@@ -283,30 +283,28 @@ const (
 	SyncPush
 )
 
-// The health writes of each side: AudibleSyncOK's (?1 the time, ?2 the
-// account) and AudibleSyncFailed's (?1 the reason, ?2 the wait, ?3 the
-// account).
-const (
-	syncOKSQL = `UPDATE audible_accounts SET sync_at = ?1, sync_error = '',
+// healthSQL is each side's health writes, by its column prefix: AudibleSyncOK's
+// (?1 the time, ?2 the account) and AudibleSyncFailed's (?1 the reason, ?2
+// the wait, ?3 the account). The wait, sync_retry_at, is shared.
+var healthSQL = [...]struct{ ok, failed string }{
+	SyncJob:  sideHealthSQL("sync"),
+	SyncPush: sideHealthSQL("push"),
+}
+
+func sideHealthSQL(prefix string) (q struct{ ok, failed string }) {
+	q.ok = `UPDATE audible_accounts SET ` + prefix + `_at = ?1, ` + prefix + `_error = '',
 		sync_retry_at = CASE WHEN sync_retry_at > ?1 THEN sync_retry_at ELSE '' END WHERE id = ?2`
-	pushOKSQL = `UPDATE audible_accounts SET push_at = ?1, push_error = '',
-		sync_retry_at = CASE WHEN sync_retry_at > ?1 THEN sync_retry_at ELSE '' END WHERE id = ?2`
-	syncFailedSQL = `UPDATE audible_accounts SET sync_error = ?1,
+	q.failed = `UPDATE audible_accounts SET ` + prefix + `_error = ?1,
 		sync_retry_at = CASE WHEN ?2 > sync_retry_at THEN ?2 ELSE sync_retry_at END WHERE id = ?3`
-	pushFailedSQL = `UPDATE audible_accounts SET push_error = ?1,
-		sync_retry_at = CASE WHEN ?2 > sync_retry_at THEN ?2 ELSE sync_retry_at END WHERE id = ?3`
-)
+	return q
+}
 
 // AudibleSyncOK records that id's side of the sync went through at at: that
 // side's error clears (the other's stays), and a wait once it has passed (the
 // job and the push run side by side: one's success never ends a wait Audible
 // gave the other).
 func (db *DB) AudibleSyncOK(ctx context.Context, id string, side AudibleSyncSide, at time.Time) error {
-	query := syncOKSQL
-	if side == SyncPush {
-		query = pushOKSQL
-	}
-	_, err := db.sql.ExecContext(ctx, query, timestamp(at), id)
+	_, err := db.sql.ExecContext(ctx, healthSQL[side].ok, timestamp(at), id)
 	return err
 }
 
@@ -334,10 +332,6 @@ func (db *DB) AudibleSyncFailed(ctx context.Context, id string, side AudibleSync
 	if !retryAt.IsZero() {
 		retry = timestamp(retryAt)
 	}
-	query := syncFailedSQL
-	if side == SyncPush {
-		query = pushFailedSQL
-	}
-	_, err := db.sql.ExecContext(ctx, query, why, retry, id)
+	_, err := db.sql.ExecContext(ctx, healthSQL[side].failed, why, retry, id)
 	return err
 }

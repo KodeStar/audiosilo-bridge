@@ -243,11 +243,7 @@ func (o *Options) health(ctx context.Context, side store.AudibleSyncSide, a stor
 		o.Log.Warn("audible: recording how a sync went failed", "account", a.ID, "err", rerr)
 		return
 	}
-	was := before.SyncError
-	if side == store.SyncPush {
-		was = before.PushError
-	}
-	if (was == "") != (err == nil) {
+	if (before.ErrorOf(side) == "") != (err == nil) {
 		o.OnChange()
 	}
 }
@@ -397,8 +393,7 @@ type Result struct {
 // places: the failure's code and message beside the counts of what it did
 // before it stopped (the console's "before it stopped" line, bridge#80).
 type failedResult struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	*Failure
 	*Result
 }
 
@@ -412,7 +407,7 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	case err == nil:
 		return res, nil
 	case errors.As(err, &f) && res != nil:
-		return failedResult{Code: f.Code, Message: f.Message, Result: res}, f
+		return failedResult{f, res}, f
 	case f != nil:
 		return f, f
 	case res != nil:

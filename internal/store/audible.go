@@ -63,6 +63,14 @@ func (a AudibleAccount) SyncProblem() string {
 	return a.PushError
 }
 
+// ErrorOf is why side's last run failed ("" when it went through).
+func (a AudibleAccount) ErrorOf(side AudibleSyncSide) string {
+	if side == SyncPush {
+		return a.PushError
+	}
+	return a.SyncError
+}
+
 // The kinds of an Audible refusal (AudibleAccount.RefusalKind).
 const (
 	// RefusalSignIn: Audible refused the sign-in (401/403 on a signed call);
