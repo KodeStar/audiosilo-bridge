@@ -1300,18 +1300,18 @@ func seriesLess(a, b store.Book) bool {
 
 // --- events ---
 
-// publishStored publishes book id's book.state SSE frame as the store holds the
+// publishStored publishes book id's book.state event as the store holds the
 // book now. Every change to a book's state or status publishes through it after
 // its write: the read and the publish hold the book's own lock (lockPublish), so
-// the book's frames go out in the order of their reads and the last one carries
+// the book's events go out in the order of their reads and the last one carries
 // the latest write. A change that published the values it wrote instead could
-// land its frame after a later change's (an advance finishing as a Pause lands, a
-// cancel's frame after the re-admit that followed it) and leave the page on the
-// older state until the next event. retry_at is the scheduled auto-readmit
-// instant (RFC3339 UTC) of a timed park, "" otherwise: a client flips a parked
-// book's hint to "retries automatically" (and clears it on re-admit) without a
-// separate GET. The write is done before this, so a caller's context ending now
-// never loses its frame; a book deleted since publishes nothing.
+// land its event after a later change's (an advance finishing as a Pause lands, a
+// cancel's after the re-admit that followed it), and the book's last event would
+// not be its state. No page follows these events live today: the hub's replay
+// ring and the durable event log (the supervisor's ListEvents) are their readers.
+// retry_at is the scheduled auto-readmit instant (RFC3339 UTC) of a timed park,
+// "" otherwise. The write is done before this, so a caller's context ending now
+// never loses its event; a book deleted since publishes nothing.
 func (s *Scheduler) publishStored(ctx context.Context, id int64) {
 	unlock := s.lockPublish(id)
 	defer unlock()

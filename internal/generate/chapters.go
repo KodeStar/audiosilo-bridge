@@ -401,8 +401,8 @@ func sidecarsWithoutChapters(p place) bool {
 // and the job's mapping are one transaction, on the job's context (a job
 // cancelled meanwhile leaves the run as it was, for the next one): a continued
 // book always has its job to follow it and is never left stopped. The book is
-// published as stored once continued (Engine.PublishStored), so the page leaves
-// its cancelled frame. It reports whether it continued it.
+// published as stored once continued (Engine.PublishStored), so its last
+// book.state event is no longer the cancel. It reports whether it continued it.
 func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old store.Book, ebookRun int64) (bool, error) {
 	if r.source != SourceAudio || !continuable(old) {
 		return false, nil
@@ -464,8 +464,8 @@ func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old 
 
 // tookUp makes engine book id run r's book once a continue (ContinueChapters,
 // ContinueReadalong) has cleared its stop: it publishes the book as stored
-// (Engine.PublishStored), so the page leaves its cancelled frame, and wakes the
-// engine for it. Every continue ends here, so none can skip the publish.
+// (Engine.PublishStored), so its last book.state event is no longer the cancel,
+// and wakes the engine for it. Every continue ends here, so none can skip the publish.
 func tookUp(ctx context.Context, eng Engine, r *run, id int64) {
 	r.bookID = id
 	eng.PublishStored(ctx, id)

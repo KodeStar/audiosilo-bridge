@@ -613,7 +613,7 @@ func TestGenerateContinuesACancelledChaptersRun(t *testing.T) {
 		t.Fatalf("the generate job's book = %+v, want the chapters run (%d) continued", b, first.ID)
 	}
 	if !rec.published(b.ID) {
-		t.Fatal("the continue cleared the run's cancel without publishing it: the page still shows it cancelled")
+		t.Fatal("the continue cleared the run's cancel without publishing it: its last event still shows it cancelled")
 	}
 	if asr, _ := stageRuns(hr, b.ID, state.ASR); asr != 1 {
 		t.Fatalf("asr runs = %d: the continue transcribed again", asr)

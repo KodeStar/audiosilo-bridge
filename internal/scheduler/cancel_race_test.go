@@ -167,7 +167,7 @@ func TestBatchReadmitStatusChangeLogsAtDebug(t *testing.T) {
 // A job's guarded cancel publishes the cancel only while the book still carries
 // it: a later claim of the job that re-admits the book after the cancel's write
 // (here as the cancel stops the running stage) published its own state, and the
-// page must not be left showing the book cancelled. Without a later claim the
+// book's last event must not show it cancelled. Without a later claim the
 // cancel is published as stored.
 func TestGuardedCancelNeverPublishesOverALaterReadmit(t *testing.T) {
 	h := newHarness(t)
@@ -223,7 +223,7 @@ func TestGuardedCancelNeverPublishesOverALaterReadmit(t *testing.T) {
 		t.Fatal(err)
 	}
 	if status, errMsg := lastState(readmitted.ID); status != "" || errMsg != "" {
-		t.Fatalf("the page was left at %q %q after the re-admit, want it running", status, errMsg)
+		t.Fatalf("the last event was %q %q after the re-admit, want it running", status, errMsg)
 	}
 
 	// The caller's context ending once the cancel is written (a client gone, a
