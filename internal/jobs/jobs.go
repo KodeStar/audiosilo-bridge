@@ -1098,7 +1098,8 @@ type Reporter struct {
 	// failing: the last report didn't reach the server (unreachable), so the
 	// next goes after ReportRetry rather than Keepalive; any report that gets
 	// through clears it (a ConfirmLease's too, on the handler's goroutine, and a
-	// Refresh's, on the goroutine that asked for it). warned: a failed report was logged and none has got through
+	// Refresh's, on the goroutine that asked for it, which sets it too when it
+	// doesn't get through). warned: a failed report was logged and none has got through
 	// since, so the next failures are quiet until one does (bridge#31).
 	failing bool
 	warned  bool
@@ -1709,7 +1710,10 @@ var ErrStopped = errors.New("the server stopped the job")
 // its last report, and would otherwise say so only at the next keepalive; the
 // contributing stage asks it just before it files, for a share_off since. nil
 // when the server holds the job open; ErrStopped when the answer stopped it; the
-// error when the report didn't get through.
+// error when the report didn't get through, which counts as any failed report
+// (failing, unless the caller's own context ended): a check that doesn't ask
+// (Runner.ShareOff) then says the job can't be reached, and the next report
+// goes after ReportRetry.
 func (p *Reporter) Refresh(ctx context.Context) error {
 	if p.r == nil {
 		return nil
@@ -1722,16 +1726,22 @@ func (p *Reporter) Refresh(ctx context.Context) error {
 		p.mu.Unlock()
 		u, _ := p.updateOf(pr, parked, parkMsg)
 		got, err := p.srv.UpdateJob(ctx, p.job.ID, u)
-		return got, p.answer(got, err, parked), err
+		stop := p.answer(got, err, parked)
+		// Noted under sendMu, as send does, so an older report's outcome never
+		// lands over a newer one's.
+		switch {
+		case stop != nil:
+		case err == nil:
+			p.reached()
+		case ctx.Err() == nil:
+			p.failed(err)
+		}
+		return got, stop, err
 	}()
 	if p.acted(got, stop, err) {
 		return ErrStopped
 	}
-	if err != nil {
-		return err
-	}
-	p.reached()
-	return nil
+	return err
 }
 
 // clip bounds s to n bytes, cut at a character's boundary.

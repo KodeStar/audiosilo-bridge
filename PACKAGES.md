@@ -2247,7 +2247,11 @@ internal/
             report warns, the rest log at debug, and the first one through after
             them logs one Info (bridge#31); a ConfirmLease or Refresh that gets
             through clears failing too (under the Reporter's lock: they run on
-            the handler's goroutine). Reporter.Refresh (v0.5.0, BRIDGE-01) reports
+            the handler's goroutine), and a Refresh that doesn't sets it (noted
+            under sendMu like a send's; not when the caller's own context
+            ended), so Runner.ShareOff's check without ask says the job can't
+            be reached before the stage's lookups, not after one more round of
+            them. Reporter.Refresh (v0.5.0, BRIDGE-01) reports
             the job now, parked as it is, for another job it stands in the way
             of: nil while the server holds it, ErrStopped when the answer (a
             cancel, a lost claim) ended it. A reply

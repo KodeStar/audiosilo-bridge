@@ -160,6 +160,55 @@ func TestRefreshHearsACancelAtOnce(t *testing.T) {
 	runFor(t, r, func() bool { s, _ := srv.finalState(13); return s == link.StateCancelled })
 }
 
+// A Refresh that doesn't reach the server counts as a failed report: the job
+// reads as unreachable until a report gets through, so a check that doesn't
+// ask (Runner.ShareOff without ask, the contributing stage's before its
+// lookups) says so at once rather than after one more round of lookups.
+// Denied: a Refresh that failed because its caller's context ended says
+// nothing about the server.
+func TestFailedRefreshSetsFailing(t *testing.T) {
+	t.Parallel()
+	db, srv := openStore(t), newFakeServer()
+	srv.add(&link.Job{ID: 14, Kind: "k.refresh", Attempts: 1})
+	opts := testOpts()
+	opts.Keepalive, opts.ReportRetry = time.Hour, time.Hour
+	var r *Runner
+	r = New(db, func() Server { return srv }, nil, opts, handler{kind: "k.refresh", lane: LaneLight,
+		fn: func(ctx context.Context, _ Job, rep *Reporter) (any, error) {
+			srv.setFailing(true)
+			defer srv.setFailing(false) // a failure below is still reported
+			ended, end := context.WithCancel(ctx)
+			end()
+			if err := rep.Refresh(ended); err == nil {
+				return nil, errors.New("Refresh got through an unreachable server")
+			}
+			if rep.unreached() {
+				return nil, errors.New("a Refresh whose caller's context ended set failing")
+			}
+			if off, err := r.ShareOff(ctx, 14, false); off || err != nil {
+				return nil, fmt.Errorf("ShareOff, not asked, before a failed Refresh = %v %v, want false", off, err)
+			}
+			if err := rep.Refresh(ctx); err == nil {
+				return nil, errors.New("Refresh got through an unreachable server")
+			}
+			if !rep.unreached() {
+				return nil, errors.New("a failed Refresh didn't set failing")
+			}
+			if _, err := r.ShareOff(ctx, 14, false); !errors.Is(err, ErrShareNotReachable) {
+				return nil, fmt.Errorf("ShareOff, not asked, after a failed Refresh = %v, want ErrShareNotReachable", err)
+			}
+			srv.setFailing(false)
+			if err := rep.Refresh(ctx); err != nil {
+				return nil, err
+			}
+			if rep.unreached() {
+				return nil, errors.New("a Refresh that got through left failing set")
+			}
+			return nil, nil
+		}})
+	wantDone(t, r, srv, 14)
+}
+
 // A LocalReporter has no server to ask.
 func TestLocalReporterRefresh(t *testing.T) {
 	if err := LocalReporter().Refresh(context.Background()); err != nil {
