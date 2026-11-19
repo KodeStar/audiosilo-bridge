@@ -579,12 +579,14 @@ func (s *service) persist(ctx context.Context, root *os.Root, lib link.Library, 
 	}
 	return added, changed, nil
 }
+
+// rescan asks the server to index show, waiting out its 429s (askRescan).
 func (s *service) rescan(ctx context.Context, id int64, show string) error {
 	srv := s.o.Server()
 	if srv == nil {
 		return fail("write_failed", "The server is unavailable for indexing. Check the feed again.")
 	}
-	if _, err := srv.RescanPodcast(ctx, id, show); err != nil {
+	if err := s.askRescan(ctx, srv, id, show); err != nil {
 		return fail("write_failed", "The server could not index the podcast show. Check the feed again.")
 	}
 	s.setIndexed(id, show, true)

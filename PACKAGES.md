@@ -2041,7 +2041,9 @@ internal/
             ErrNoBook, ErrNotIndexable (a rescan's 404 not_indexable), else *APIError
             (an HTML proxy page never becomes a message; RetryAfter carries a 429's
             Retry-After, seconds or an HTTP date, clamped at a day; RetryAfterSet
-            distinguishes a valid zero wait from a missing or invalid header);
+            distinguishes a valid zero wait from a missing or invalid header;
+            RateLimited picks a 429 out, Backoff.Wait is the shared wait-out rule:
+            Retry-After, else First doubling, Tries asks, each wait at most Max);
             a 2xx it can't use (not the JSON expected, a pairing with no token)
             is ErrUnusableAnswer (bridge#28), worded as its cause, which the
             page's pairing error keys on rather than on what's left over.
@@ -2464,11 +2466,12 @@ internal/
             the resumed job goes on from the partial there. An episode path the
             server answers not_indexable (its show folder renamed since the
             server read it) is indexed by rescanning the show folder. The
-            server's 429 to an episode's rescan is waited out (its Retry-After,
-            else 2 s doubling; 3 asks, each wait at most 30 s, as audiblejob's
-            enrichment), then the saved episode is left for the show's next
-            poll's rescan (isIndexed) and the fetch succeeds, never
-            index_failed. A saved feed.json over
+            server's 429 to any rescan is waited out (askRescan, link.Backoff:
+            its Retry-After, else 2 s doubling; 3 asks, each wait at most 30 s,
+            as audiblejob's enrichment). One an episode's rescan could not wait
+            out leaves the saved episode for the show's next poll's rescan
+            (isIndexed) and the fetch succeeds, never index_failed; a
+            subscribe's or poll's fails write_failed, the rescan still owed. A saved feed.json over
             the read cap fails as too_large, not write_failed. A new show never
             takes the old name of a renamed folder not taken in yet (find
             answers those names): the server indexes that name as the renamed
@@ -2940,7 +2943,7 @@ internal/
             a permission refusal is not_writable), rescan (the placed file; the
             server answers the book path, retried 3 times; failing says the book is
             placed), enrich (the ASIN; asin_set is enriched false, no failure; 429s
-            waited out as the poll's enrichment does, limitWait, then enriched
+            waited out as the poll's enrichment does, enrichLimit, then enriched
             false). The books of the library the file could join (joinedBooks: at
             its own path, its folder or a disc set's folder above it) each get a
             verdict, the BookMatcher picking that book for the title, not

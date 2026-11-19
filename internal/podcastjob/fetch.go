@@ -9,7 +9,6 @@ import (
 	"hash"
 	"io"
 	"log/slog"
-	"net/http"
 	"os"
 	"path"
 	"time"
@@ -446,55 +445,62 @@ func (s *service) reuse(ctx context.Context, root *os.Root, lib link.Library, e 
 	return fetchResult{lib.ID, e.Path, showID, e.ID, *e.Fetch, n, true}, nil
 }
 
-// rescanTries, rescanMaxWait and rescanBackoff bound how long an episode's
-// rescan waits out the server's 429s (episodeRescan).
+// rescanTries, rescanMaxWait and rescanBackoff bound how long a rescan waits
+// out the server's 429s (askRescan).
 const (
 	rescanTries   = 3
 	rescanMaxWait = 30 * time.Second
 	rescanBackoff = 2 * time.Second
 )
 
+var rescanLimit = link.Backoff{Tries: rescanTries, First: rescanBackoff, Max: rescanMaxWait}
+
+// askRescan asks the server to index target (a show folder or an episode),
+// waiting out its 429s as audiblejob's enrichment does (rescanLimit): the
+// server's Retry-After (an explicit 0 asks again at once, none waits
+// rescanBackoff, doubling), rescanTries asks in all, each wait at most
+// rescanMaxWait. The last answer's error: still a 429 (link.RateLimited)
+// past those bounds or after a stop meanwhile.
+func (s *service) askRescan(ctx context.Context, srv Server, id int64, target string) error {
+	for limited := 1; ; limited++ {
+		_, err := srv.RescanPodcast(ctx, id, target)
+		busy, ok := link.RateLimited(err)
+		if !ok {
+			return err
+		}
+		wait, ok := rescanLimit.Wait(busy, limited)
+		if !ok || ctx.Err() != nil || s.o.Wait(ctx, wait) != nil {
+			return err
+		}
+	}
+}
+
 // episodeRescan asks the server to index episode p. One whose show folder was
 // renamed by hand since the server last read it is a path the server does not
 // know (it answers not_indexable), so the show folder is rescanned instead.
-// A 429 is waited out, as audiblejob's enrichment does: the server's
-// Retry-After (an explicit 0 asks again at once, none waits rescanBackoff,
-// doubling), rescanTries asks in all, each wait at most rescanMaxWait. Past
-// that, or a stop meanwhile, the episode, saved already, is left for the
-// show's next poll, which rescans a show not indexed since (isIndexed),
+// A 429 askRescan could not wait out leaves the episode, saved already, for
+// the show's next poll, which rescans a show not indexed since (isIndexed),
 // rather than fail the job index_failed and fetch it again.
 func (s *service) episodeRescan(ctx context.Context, id int64, p string) error {
 	srv := s.o.Server()
 	if srv == nil {
 		return fail("index_failed", "The episode could not be indexed. Retry the job.")
 	}
-	show, target := path.Dir(p), p
-	for limited := 0; ; {
-		_, err := srv.RescanPodcast(ctx, id, target)
-		if errors.Is(err, link.ErrNotIndexable) && target == p {
-			target = show
-			continue
-		}
-		var busy *link.APIError
-		if errors.As(err, &busy) && busy.Status == http.StatusTooManyRequests {
-			limited++
-			wait := busy.RetryAfter
-			if !busy.RetryAfterSet {
-				wait = rescanBackoff << (limited - 1)
-			}
-			if limited < rescanTries && wait <= rescanMaxWait && ctx.Err() == nil && s.o.Wait(ctx, wait) == nil {
-				continue
-			}
-			s.setIndexed(id, show, false)
-			slog.Info("podcasts: the server asked the Bridge to slow down; the episode is indexed at its show's next poll", "library", id, "show", show)
-			return nil
-		}
-		if err != nil {
-			return fail("index_failed", "The episode could not be indexed. Retry the job.")
-		}
-		s.setIndexed(id, show, true)
+	show := path.Dir(p)
+	err := s.askRescan(ctx, srv, id, p)
+	if errors.Is(err, link.ErrNotIndexable) {
+		err = s.askRescan(ctx, srv, id, show)
+	}
+	if _, limited := link.RateLimited(err); limited {
+		s.setIndexed(id, show, false)
+		slog.Info("podcasts: the server asked the Bridge to slow down; the episode is indexed at its show's next poll", "library", id, "show", show)
 		return nil
 	}
+	if err != nil {
+		return fail("index_failed", "The episode could not be indexed. Retry the job.")
+	}
+	s.setIndexed(id, show, true)
+	return nil
 }
 
 func (s *service) enclosure(ctx context.Context, f *podcast.Feed, e podcast.Episode) (string, error) {

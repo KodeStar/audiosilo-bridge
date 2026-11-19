@@ -528,6 +528,51 @@ func TestPollRescansWhatAFailedJobLeftOwed(t *testing.T) {
 	}
 }
 
+// The poll's own rescan waits out the server's 429 (askRescan) rather than
+// fail write_failed at once; one still limited past the bounds fails as
+// before and leaves the rescan owed to the next poll.
+func TestPollRescanWaitsOutTheServersLimit(t *testing.T) {
+	t.Parallel()
+	second := time.Second
+	for _, tc := range []struct {
+		name    string
+		limited int32
+		asks    int32
+		waits   []time.Duration
+		fails   bool
+	}{
+		{"waited out", 2, 3, []time.Duration{time.Second, time.Second}, false},
+		{"still limited", 100, rescanTries, []time.Duration{time.Second, time.Second}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			job := h.claim(h.http.URL+"/feed", false)
+			if _, err := h.handler.Run(context.Background(), job, jobs.LocalReporter()); err != nil {
+				t.Fatal(err)
+			}
+			var waits []time.Duration
+			h.handler.s.o.Wait = func(_ context.Context, d time.Duration) error { waits = append(waits, d); return nil }
+			show := "Example Show"
+			poll := jobs.Job{ID: 10, Kind: PollKind, LibraryID: job.LibraryID, Path: &show, Params: json.RawMessage(`{"etag":"\"abc\""}`)}
+			h.newEpisode.Store(true)
+			h.scan.limit = &second
+			h.scan.limited.Store(tc.limited)
+			scans := h.scan.calls.Load()
+			res, err := h.handler.PollJob().Run(context.Background(), poll, jobs.LocalReporter())
+			if got := h.scan.calls.Load() - scans; got != tc.asks || !slices.Equal(waits, tc.waits) {
+				t.Fatal("asks", got, "waits", waits)
+			}
+			if tc.fails != (err != nil) || tc.fails && fields(t, res)["code"] != "write_failed" {
+				t.Fatal("a limited poll rescan", res, err)
+			}
+			if h.handler.s.isIndexed(3, show) == tc.fails {
+				t.Fatal("indexed", !tc.fails)
+			}
+		})
+	}
+}
+
 // Each attempt of a job seals the URL under its own name: the end of an
 // earlier attempt (its lease ran out and the server handed the job out again)
 // never deletes the later one's.
