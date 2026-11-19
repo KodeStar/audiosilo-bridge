@@ -551,3 +551,61 @@ func TestALongerNameNeverMakesAShowUnadoptable(t *testing.T) {
 		t.Fatal("past the reader's cap:", err)
 	}
 }
+
+// A take-in that moved a pending journal to the folder's new name and stopped
+// before feed.json, then the folder renamed back by hand: feed.json names the
+// folder again, the journal the gone middle name. RecoverShow resolves it to
+// the show's folder and finishes the install, rather than refusing the show
+// for good. A journal naming a middle folder that is still there, or another
+// show's, still refuses.
+func TestRecoverShowResolvesAJournalOfAGoneMiddleName(t *testing.T) {
+	now := time.Date(2026, 10, 21, 8, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		name  string
+		edit  func(*Journal)
+		there bool
+		ok    bool
+	}{
+		{"gone", nil, false, true},
+		{"still there", nil, true, false},
+		{"another show", func(j *Journal) { j.ShowID = "0123456789abcdef" }, false, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			root, j := journalFixture(t)
+			if err := Publish(root, nil, j, now, stopAt("journal")); !errors.Is(err, errStop) {
+				t.Fatal(err)
+			}
+			middle := j
+			middle.Path = "Middle Name/" + strings.TrimPrefix(j.Path, "Fixture Show/")
+			if c.edit != nil {
+				c.edit(&middle)
+			}
+			putJournal(t, root, AttachmentPath(j.Path, ".publish.json"), middle)
+			if c.there {
+				if err := os.Mkdir(root.Name()+"/Middle Name", 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := RecoverShow(root, "Fixture Show", now, nil)
+			if !c.ok {
+				if !errors.Is(err, ErrInvalidFile) {
+					t.Fatal("refusal:", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			f, err := Read(root, "Fixture Show")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if e := episodeFor(f, j); e == nil || !reflect.DeepEqual(e.Fetch, &j.Fetch) || !Matches(root, j.Path, &j.Fetch) {
+				t.Fatal("the install did not finish in the show's folder", e)
+			}
+			if _, err := root.Lstat(AttachmentPath(j.Path, ".publish.json")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("the journal was left", err)
+			}
+		})
+	}
+}

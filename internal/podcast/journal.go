@@ -190,7 +190,12 @@ func Publish(root *os.Root, f *Feed, j Journal, now time.Time, fault Boundary) e
 // RecoverShow finishes installs and moved deletions before any other show mutation.
 // A delete whose audio has not moved is aborted: its aggregate may now be stale.
 // An install whose staged and installed audio are both gone, with the feed not
-// pinning it, is aborted too (abortInstall).
+// pinning it, is aborted too (abortInstall). A journal naming a folder that is
+// gone is the show's own when its show id and its episode (id and file name)
+// are the show's: a take-in that moved the journals to a new name and stopped
+// before feed.json, then the folder renamed back by hand. It is resolved
+// against the show's folder (rehome) rather than refused for good, as feed.json
+// names this folder and no take-in would run.
 func RecoverShow(root *os.Root, show string, now time.Time, fault Boundary) error {
 	if !ValidShow(show) {
 		return ErrInvalidFile
@@ -200,6 +205,7 @@ func RecoverShow(root *os.Root, show string, now time.Time, fault Boundary) erro
 	if err != nil {
 		return err
 	}
+	var feed *Feed // read once, for a journal that names another folder
 	for _, e := range entries {
 		if !strings.HasSuffix(e.Name(), ".publish.json") {
 			continue
@@ -209,7 +215,17 @@ func RecoverShow(root *os.Root, show string, now time.Time, fault Boundary) erro
 		if err != nil {
 			return err
 		}
-		if !journalValid(&j, show) || AttachmentPath(j.Path, ".publish.json") != p {
+		if !journalValid(&j, show) {
+			if feed == nil {
+				if feed, err = Read(root, show); err != nil {
+					return ErrInvalidFile
+				}
+			}
+			if j, err = rehome(root, show, p, j, feed); err != nil {
+				return err
+			}
+		}
+		if AttachmentPath(j.Path, ".publish.json") != p {
 			return ErrInvalidFile
 		}
 		if j.Op == "install" && stagedAudioGone(root, j) {
@@ -234,6 +250,30 @@ func RecoverShow(root *os.Root, show string, now time.Time, fault Boundary) erro
 		}
 	}
 	return nil
+}
+
+// rehome rewrites j, the journal at name in show's folder that names another
+// folder, to name show: when that folder is gone (or is show itself spelt
+// otherwise, a case-insensitive filesystem) and j is the show's (f, its
+// feed.json read under the same lock: its id, and an episode of j's id and
+// file name). ErrInvalidFile otherwise, as before.
+func rehome(root *os.Root, show, name string, j Journal, f *Feed) (Journal, error) {
+	dir := path.Dir(j.Path)
+	if dir == show || !journalValid(&j, dir) {
+		return j, ErrInvalidFile
+	}
+	if _, err := root.Lstat(dir); !errors.Is(err, os.ErrNotExist) && !sameFolder(root, dir, show) {
+		return j, ErrInvalidFile
+	}
+	at := j
+	at.Path = show + "/" + path.Base(j.Path)
+	if episodeFor(f, at) == nil {
+		return j, ErrInvalidFile
+	}
+	if err := writeJournal(root, name, at); err != nil {
+		return j, err
+	}
+	return at, nil
 }
 
 // listFolder lists dir, a real folder (never a link); nothing when it does
