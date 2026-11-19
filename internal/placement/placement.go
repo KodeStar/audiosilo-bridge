@@ -87,8 +87,7 @@ func (s Suggestion) FullPath() string {
 // position is dropped from the front of its titles first (dropLeadingSequence),
 // and a title with nothing to name a folder by falls back to the ASIN (named).
 func Suggest(in Input) Suggestion {
-	in = named(in)
-	in.Title, in.TitleShort = dropLeadingSequence(in.Title, in), dropLeadingSequence(in.TitleShort, in)
+	in = withoutLeadingSequence(named(in))
 	switch {
 	case in.SeriesName == "":
 		return standalone(in)
@@ -228,6 +227,13 @@ func dropLeadingSequence(t string, in Input) string {
 		return t
 	}
 	return m[2]
+}
+
+// withoutLeadingSequence is in with its own position dropped from the front
+// of its titles (dropLeadingSequence).
+func withoutLeadingSequence(in Input) Input {
+	in.Title, in.TitleShort = dropLeadingSequence(in.Title, in), dropLeadingSequence(in.TitleShort, in)
+	return in
 }
 
 // seriesTitle names a bare-titled book by its series: "He Who Fights with Monsters

@@ -889,7 +889,7 @@ func vacant(fsys transfer.LibraryFS, rel string, books map[string]string) (strin
 	dir := path.Dir(rel)
 	if dir == "." {
 		if at := formerFile(fsys, dir, rel); at != "" {
-			return link.ConflictFile, fail(CodeExists, "A file is already at %s: nothing was overwritten. Choose another destination, or move that file.", at)
+			return vacantAt(fsys, at, books) // a file is there: ConflictFile
 		}
 		return "", nil
 	}

@@ -37,7 +37,7 @@ func SuggestWith(mode Mode, tmpl string, in Input) (Suggestion, error) {
 	}
 	in = named(in)
 	if t.uses("Seq", "PaddedSeq") {
-		in.Title, in.TitleShort = dropLeadingSequence(in.Title, in), dropLeadingSequence(in.TitleShort, in)
+		in = withoutLeadingSequence(in)
 	}
 	rel, err := t.Render(varsFromInput(in))
 	if err != nil {
