@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -49,7 +50,7 @@ func OwnedTemp(s string) bool {
 // EnsureDir makes the folders of name below its first component, a show
 // folder that must be there already (a real folder, as every component): a
 // show folder renamed by hand while a job ran is never made again at its old
-// name, where ReadMoved would take the renamed folder for a copy.
+// name, a stray folder left behind there (the job's files in it).
 func EnsureDir(root *os.Root, name string) error {
 	parts := strings.Split(name, "/")
 	for i, part := range parts {
@@ -262,13 +263,33 @@ func listFolder(root *os.Root, dir string) ([]os.DirEntry, error) {
 // still carry under from moves to show. The pending journals and committed
 // trash manifests go first and feed.json last, so a stop part way through
 // leaves a folder ReadMoved finds renamed again, and a journal adopted already
-// is left as it is. A pending journal that is not the show's fails the
-// adoption (RecoverShow would refuse it under either name); a manifest that is
-// not stays, as cleanup ignores it. The caller holds the show's lock and has
-// checked the mapping.
+// is left as it is. A journal may also name a third folder that is gone: the
+// folder was renamed again by hand after an adoption that moved its journals
+// stopped before feed.json. It moves too when it is this show's (its show id)
+// and names one of its episodes by id and file name. A pending journal that is
+// not the show's fails the adoption (RecoverShow would refuse it under any
+// name); a manifest that is not stays, as cleanup ignores it. The caller holds
+// the show's lock and has checked the mapping.
 func Adopt(root *os.Root, show, from string, f *Feed, now time.Time) error {
 	if !ValidShow(show) || !ValidShow(from) || show == from || !episodesIn(f, from) {
 		return ErrInvalidFile
+	}
+	// earlier reports whether j names an earlier name of this folder: from, or
+	// a gone folder it was adopted to part way before this rename.
+	earlier := func(j *Journal) bool {
+		dir := path.Dir(j.Path)
+		if dir == from {
+			return journalValid(j, from)
+		}
+		if dir == show || !journalValid(j, dir) || j.ShowID != f.ShowID {
+			return false
+		}
+		if _, err := root.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+			return false
+		}
+		return slices.ContainsFunc(f.Episodes, func(e Episode) bool {
+			return e.ID == j.EpisodeID && path.Base(e.Path) == path.Base(j.Path)
+		})
 	}
 	move := func(name string) error {
 		j, err := ReadJournal(root, name)
@@ -278,7 +299,7 @@ func Adopt(root *os.Root, show, from string, f *Feed, now time.Time) error {
 		if journalValid(&j, show) {
 			return nil
 		}
-		if !journalValid(&j, from) {
+		if !earlier(&j) {
 			return ErrInvalidFile
 		}
 		j.Path = show + "/" + path.Base(j.Path)

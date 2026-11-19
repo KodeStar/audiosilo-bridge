@@ -55,8 +55,11 @@ func readFile(root *os.Root, show string) (*Feed, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !info.Mode().IsRegular() || info.Size() > maxReadBytes {
+	if !info.Mode().IsRegular() {
 		return nil, ErrInvalidFile
+	}
+	if info.Size() > maxReadBytes {
+		return nil, ErrTooLarge
 	}
 	rd, err := root.Open(name)
 	if err != nil {
@@ -96,9 +99,12 @@ func episodesIn(f *Feed, show string) bool {
 
 // ReadMoved is Read for a show folder that may have been renamed by hand: its
 // feed.json still names every episode under the folder's old name. It answers
-// that old name, or "" when the episodes live in show (as Read). A feed naming
-// a folder that still exists is a copy, not a rename: ErrInvalidFile, as is a
-// feed whose episodes name no single folder.
+// that old name, or "" when the episodes live in show (as Read). A feed whose
+// old-name folder still holds the same show is a copy, not a rename:
+// ErrInvalidFile, as is a feed whose episodes name no single folder. An old
+// name that now holds another show (two folders' names swapped by hand, or
+// another show moved there) or no show at all is a rename. An old-name folder
+// whose own feed.json cannot be read refuses too: it may be the show's.
 func ReadMoved(root *os.Root, show string) (*Feed, string, error) {
 	f, err := readFile(root, show)
 	if err != nil {
@@ -111,7 +117,7 @@ func ReadMoved(root *os.Root, show string) (*Feed, string, error) {
 	if from == show || !ValidShow(from) || !episodesIn(f, from) {
 		return nil, "", ErrInvalidFile
 	}
-	if _, err := root.Lstat(from); !errors.Is(err, os.ErrNotExist) {
+	if held, err := readFile(root, from); err == nil && held.ShowID == f.ShowID || err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, "", ErrInvalidFile
 	}
 	return f, from, nil
