@@ -82,12 +82,16 @@ const downloadAttempts = 3
 const mappingPoll = time.Second
 
 // Failure is a failed import's result and error: a code from the list above
-// and a sentence for the console. It never holds a key, an iv or a URL, nor an
-// Amazon account identifier (fail redacts the errors it quotes; Amazon's other
-// text, an unavailable reason, is redacted where it is quoted).
+// and a sentence for the console, and for CodeExists what is in the way
+// (Conflict: link.ConflictFile, ConflictBook or ConflictAudio, the plan's
+// words, which the console reads rather than the sentence; bridge#47). It
+// never holds a key, an iv or a URL, nor an Amazon account identifier (fail
+// redacts the errors it quotes; Amazon's other text, an unavailable reason,
+// is redacted where it is quoted).
 type Failure struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code     string `json:"code"`
+	Message  string `json:"message"`
+	Conflict string `json:"conflict,omitempty"`
 }
 
 func (f *Failure) Error() string { return f.Message }
@@ -106,6 +110,13 @@ func fail(code, format string, args ...any) *Failure {
 		quoted[i] = a
 	}
 	return &Failure{Code: code, Message: fmt.Sprintf(format, quoted...)}
+}
+
+// exists is a CodeExists failure: conflict is what is in the way.
+func exists(conflict, format string, args ...any) *Failure {
+	f := fail(CodeExists, format, args...)
+	f.Conflict = conflict
+	return f
 }
 
 // ThrottledText is an import's message (code audible_refused) when Audible
@@ -500,7 +511,7 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 	case err != nil && ctx.Err() != nil:
 		return nil, ctx.Err()
 	case errors.Is(err, transfer.ErrExists):
-		return nil, fail(CodeExists, "A different file is already at %s: nothing was overwritten. Choose another destination, or move that file.", rel)
+		return nil, exists(link.ConflictFile, "A different file is already at %s: nothing was overwritten. Choose another destination, or move that file.", rel)
 	case errors.Is(err, transfer.ErrDiskFull):
 		return nil, fail(CodeDiskFull, "The library is short of space for the book (%s).", err)
 	case errors.Is(err, transfer.ErrInvalidPath), errors.Is(err, fs.ErrPermission), fsutil.IsReadOnly(err):
@@ -980,12 +991,12 @@ func vacantAt(fsys transfer.LibraryFS, rel string, books map[string]string) (str
 	_, err := fsys.Lstat(rel)
 	switch {
 	case err == nil:
-		return link.ConflictFile, fail(CodeExists, "A file is already at %s: nothing was overwritten. Choose another destination, or move that file.", rel)
+		return link.ConflictFile, exists(link.ConflictFile, "A file is already at %s: nothing was overwritten. Choose another destination, or move that file.", rel)
 	case !errors.Is(err, fs.ErrNotExist):
 		return "", fail(CodeNotWritable, "The Bridge can't place the book at %s in the library: %v", rel, err)
 	}
 	if dir, title, ok := listedBook(rel, books); ok {
-		return link.ConflictBook, fail(CodeExists, "%s is already the library's book %q: a backup goes in a folder of its own. Choose another destination.", dir, title)
+		return link.ConflictBook, exists(link.ConflictBook, "%s is already the library's book %q: a backup goes in a folder of its own. Choose another destination.", dir, title)
 	}
 	dir := path.Dir(rel)
 	if dir == "." {
@@ -1000,7 +1011,7 @@ func vacantAt(fsys transfer.LibraryFS, rel string, books map[string]string) (str
 	}
 	for _, e := range entries {
 		if ext := strings.ToLower(path.Ext(e.Name())); !e.IsDir() && (mp4Names[ext] || otherAudio[ext]) {
-			return link.ConflictAudio, fail(CodeExists, "%s already holds audio (%s), a book of its own: a backup goes in a folder of its own. Choose another destination.", dir, e.Name())
+			return link.ConflictAudio, exists(link.ConflictAudio, "%s already holds audio (%s), a book of its own: a backup goes in a folder of its own. Choose another destination.", dir, e.Name())
 		}
 	}
 	return "", nil

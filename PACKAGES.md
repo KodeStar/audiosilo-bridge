@@ -2897,7 +2897,8 @@ internal/
             done import whose book isn't the title's). spelled and vacant are free
             functions over a transfer.LibraryFS (the import's methods open the
             mount's os.Root and call them; vacant also returns the conflict:
-            link.ConflictFile|Book|Audio; listedBook is its books-listing part;
+            link.ConflictFile|Book|Audio, which the exists failure carries as
+            conflict for the console, bridge#47; listedBook is its books-listing part;
             formerDirs adds the folder the destination's was under the name rule
             before bridge#47, found on disk as a name Sanitize now turns into
             the folder's, so a title backed up as "Who Moved My Cheese?" is

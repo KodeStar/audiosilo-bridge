@@ -594,7 +594,13 @@ func TestImportCodes(t *testing.T) {
 			// The failure's wire shape: the server reads its "code".
 			var wire map[string]any
 			_ = json.Unmarshal([]byte(mustJSON(t, res)), &wire)
-			if msg, _ := wire["message"].(string); wire["code"] != c.code || msg != err.Error() || len(wire) != 2 {
+			// Only an exists failure says what is in the way (here a file).
+			want := 2
+			if c.code == CodeExists {
+				want = 3
+			}
+			if msg, _ := wire["message"].(string); wire["code"] != c.code || msg != err.Error() || len(wire) != want ||
+				(c.code == CodeExists) != (wire["conflict"] == link.ConflictFile) {
 				t.Fatalf("failure on the wire = %v", wire)
 			}
 			files := e.libraryFiles()
