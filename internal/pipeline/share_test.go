@@ -57,6 +57,39 @@ func TestShareFilesOverALocalRun(t *testing.T) {
 	}
 }
 
+// ShareChecked asks stopped before each dimension's filing: a share that
+// stops standing after the first dimension files no more (denied), and one
+// that stands files both (allowed).
+func TestShareCheckedStopsBetweenDimensions(t *testing.T) {
+	ctx := context.Background()
+	for _, c := range []struct {
+		name    string
+		stopAt  int // the ask that says stop (0: none)
+		issues  int
+		stopped bool
+	}{{"stands", 0, 2, false}, {"stops after the first", 2, 1, true}, {"stops at once", 1, 0, true}} {
+		t.Run(c.name, func(t *testing.T) {
+			db := openContribDB(t)
+			gh := newFakeGitHub(t)
+			meta := newFakeMeta(t, nil, map[string]metaWorkFixture{"reacher-01": {title: "Killing Floor"}})
+			b := contribBook(t, db, store.NewBook{}, baseChars("x"), baseRecaps("x"))
+			exe := NewExecutor(contribConfig(t, db, contribModeLocal, gh.srv.URL, meta.srv.URL, t.TempDir(),
+				fakeTokenResolver{token: "ghu_x", from: contrib.FromDevice}))
+			asks := 0
+			_, err := exe.ShareChecked(ctx, b.ID, "reacher-01", nil, func() (bool, error) {
+				asks++
+				return asks == c.stopAt, nil
+			})
+			if errors.Is(err, ErrShareStopped) != c.stopped || (!c.stopped && err != nil) {
+				t.Fatalf("ShareChecked = %v, stopped want %v", err, c.stopped)
+			}
+			if gh.issueCount() != c.issues {
+				t.Fatalf("issues = %d, want %d (asks %d)", gh.issueCount(), c.issues, asks)
+			}
+		})
+	}
+}
+
 func TestShareRefusals(t *testing.T) {
 	ctx := context.Background()
 	db := openContribDB(t)

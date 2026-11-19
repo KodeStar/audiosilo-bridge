@@ -1181,6 +1181,25 @@ func TestContributeReadsTheBooksModeNow(t *testing.T) {
 	}
 }
 
+// TestContributeTakesAShareResumedSinceTheDispatch: a book the dispatch read
+// local that the store has in issue mode again (a share job that follows it
+// again resumed its no_share_job share) files its issues. Allowed: the issues.
+// A book still local in the store stays local (TestContributeLocalMode).
+func TestContributeTakesAShareResumedSinceTheDispatch(t *testing.T) {
+	db := openContribDB(t)
+	gh := newFakeGitHub(t)
+	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01", ContribMode: store.ContribModeIssue}, baseChars("x"), baseRecaps("x"))
+	stale := b
+	stale.ContribMode = store.ContribModeLocal
+	cfg := contribConfig(t, db, contribModeLocal, gh.srv.URL, "", t.TempDir(), fakeTokenResolver{token: "ghp_x"})
+	if _, err := NewExecutor(cfg).Execute(context.Background(), stale, state.Contributing, scheduler.StageReport{}); err != nil {
+		t.Fatalf("contribute: %v", err)
+	}
+	if n := gh.issueCount(); n != 2 {
+		t.Fatalf("issues filed = %d, want both", n)
+	}
+}
+
 // TestContributeTurnedLocalWhileResolving: a book turned local while the stage
 // looked its work up (after the read that follows the description) still
 // files nothing. Denied: the issues. Allowed: the local export under the slug

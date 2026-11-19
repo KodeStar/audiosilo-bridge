@@ -1220,16 +1220,25 @@ func TestShareOffWithNoShareJobKeepsTheBookLocal(t *testing.T) {
 }
 
 // keepShareLocal says contributions_off for a book kept local with no reason
-// recorded; a book's own reason (no_share_job) is taken when its share can't
-// be resumed (TestFollowedAgainSharesANoShareJobBook).
+// recorded, and for a no_share_job book once the run heard share_off (it wins
+// over the book's reason, and the run owes no share). A share_off stored on
+// the book is its reason too (TestFollowedAgainSharesANoShareJobBook).
 func TestKeepShareLocalTakesTheBooksReason(t *testing.T) {
 	t.Parallel()
 	h := New(Options{WorkRoot: t.TempDir()})
-	for _, c := range []struct{ recorded, want string }{
-		{"", ShareSkippedContributionsOff},
+	for _, c := range []struct {
+		recorded string
+		heard    bool
+		want     string
+	}{
+		{"", false, ShareSkippedContributionsOff},
+		{store.ShareSkippedNoShareJob, true, ShareSkippedContributionsOff},
 	} {
 		r := &run{job: jobs.Job{ID: 1, Kind: Kind}, kind: Kind, rep: jobs.LocalReporter(),
 			params: Params{Contribute: ContributeIssue}}
+		if c.heard {
+			jobs.HearShareOff(r.rep)
+		}
 		b := store.Book{ID: 1, State: string(state.Done), ContribMode: store.ContribModeLocal, ShareSkipped: c.recorded}
 		h.keepShareLocal(context.Background(), nil, r, &b)
 		if r.shareSkipped != c.want || r.params.Contribute != ContributeLocal {
@@ -1330,8 +1339,9 @@ func TestFollowedAgainSharesANoShareJobBook(t *testing.T) {
 		db, h, _, b := setup(t, false, true)
 		r := newRun()
 		h.keepShareLocal(ctx, nil, r, &b)
-		if r.shareSkipped != ShareSkippedNoShareJob || r.params.Contribute != ContributeLocal {
-			t.Fatalf("a share_off on the book: share skipped %q (contribute %q), want no_share_job, local",
+		// The share_off is the book's reason now (keepSharedOffLocal).
+		if r.shareSkipped != ShareSkippedContributionsOff || r.params.Contribute != ContributeLocal {
+			t.Fatalf("a share_off on the book: share skipped %q (contribute %q), want contributions_off, local",
 				r.shareSkipped, r.params.Contribute)
 		}
 		if got := book(t, db, b.ID); got.ContribMode != store.ContribModeLocal {
@@ -1356,6 +1366,35 @@ func TestFollowedAgainSharesANoShareJobBook(t *testing.T) {
 			t.Fatalf("book = %q %q, want shared", got.ContribMode, got.ShareSkipped)
 		}
 	})
+	t.Run("done since the look", func(t *testing.T) {
+		// The look read the book running; its stage filed locally and it is done
+		// by the hold: it isn't turned back (finish owes the share, allowed).
+		t.Parallel()
+		db, h, _, stale := setup(t, false, false)
+		if err := db.SetBookState(ctx, stale.ID, string(state.Done), "", "", ""); err != nil {
+			t.Fatal(err)
+		}
+		r := newRun()
+		h.keepShareLocal(ctx, nil, r, &stale)
+		got := book(t, db, stale.ID)
+		if got.ContribMode != store.ContribModeLocal || got.ShareSkipped != store.ShareSkippedNoShareJob ||
+			r.shareSkipped != "" || !r.owesShare(&got) {
+			t.Fatalf("book = %q %q, run skipped %q owes %v; want it left local for finish to file",
+				got.ContribMode, got.ShareSkipped, r.shareSkipped, r.owesShare(&got))
+		}
+	})
+	t.Run("done, the share stopped standing by the hold", func(t *testing.T) {
+		// A share_off stored after shareOwed's look (another job's on the book)
+		// still wins: asked under the hold, nothing is filed (denied).
+		t.Parallel()
+		_, h, sharer, b := setup(t, true, false)
+		r := newRun()
+		_, err := h.shareConfirmed(ctx, r, sharer, b.ID, ContributeParams{},
+			func(context.Context) (bool, error) { return false, nil })
+		if !errors.Is(err, errShareOffNow) || len(sharer.calls) != 0 {
+			t.Fatalf("shareConfirmed = %v (calls %v), want errShareOffNow with nothing filed", err, sharer.calls)
+		}
+	})
 	t.Run("done, share_off", func(t *testing.T) {
 		t.Parallel()
 		db, h, sharer, b := setup(t, true, true)
@@ -1364,8 +1403,8 @@ func TestFollowedAgainSharesANoShareJobBook(t *testing.T) {
 		if err != nil || filed || len(sharer.calls) != 0 {
 			t.Fatalf("shareOwed = %v %v (calls %v), want nothing filed", filed, err, sharer.calls)
 		}
-		if r.shareSkipped != store.ShareSkippedNoShareJob || r.params.Contribute != ContributeLocal {
-			t.Fatalf("share skipped %q (contribute %q), want no_share_job, local", r.shareSkipped, r.params.Contribute)
+		if r.shareSkipped != ShareSkippedContributionsOff || r.params.Contribute != ContributeLocal {
+			t.Fatalf("share skipped %q (contribute %q), want contributions_off, local", r.shareSkipped, r.params.Contribute)
 		}
 		if got := book(t, db, b.ID); got.ContribMode != store.ContribModeLocal {
 			t.Fatalf("book mode %q, want local", got.ContribMode)

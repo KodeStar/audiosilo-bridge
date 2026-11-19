@@ -491,9 +491,18 @@ func (h *Handler) keepShareLocal(ctx context.Context, eng Engine, r *run, b *sto
 		if !ok {
 			return false
 		}
-		turned, err := h.o.DB.ResumeShare(ctx, r.job.ID, r.job.Attempt, b.ID)
+		// Read again under the hold: a stage that ended since the look (the
+		// contributing stage filed locally, the book done) leaves it to finish,
+		// which a turn now would leave owing nothing.
+		now, err := h.o.DB.GetBook(ctx, b.ID)
+		turned := false
+		if err == nil && state.State(now.State) != state.Done {
+			turned, err = h.o.DB.ResumeShare(ctx, r.job.ID, r.job.Attempt, b.ID)
+		}
 		release()
 		switch {
+		case err == nil && state.State(now.State) == state.Done:
+			return false // finish files it (shareOwed)
 		case err != nil:
 			// The share isn't dropped: the next look tries again.
 			h.o.Log.Warn("generate: sharing the engine book again failed", "job", r.job.ID, "book", b.ID, "err", err)
@@ -578,9 +587,14 @@ func (h *Handler) shareOwed(ctx context.Context, r *run, b store.Book) (bool, er
 	}
 	h.o.Log.Info("generate: the job follows its engine book again, so it files the share", "job", r.job.ID, "book", b.ID)
 	r.rep.Progress(jobs.Progress{Step: stepSharing, Message: "Sharing with the community", Total: 1})
-	if _, err := h.shareConfirmed(ctx, r, sharer, b.ID, ContributeParams{WorkID: b.WorkID}); err != nil {
-		if errors.Is(err, errShareOffNow) {
-			h.dropShare(r, nil)
+	// Asked again under the hold, after the server's answer: a share_off stored
+	// since the look above (another job's on the book) still wins.
+	stands := func(ctx context.Context) (bool, error) {
+		return h.o.DB.ShareResumable(ctx, r.job.ID, r.job.Attempt, b.ID)
+	}
+	if _, err := h.shareConfirmed(ctx, r, sharer, b.ID, ContributeParams{WorkID: b.WorkID}, stands); err != nil {
+		if errors.Is(err, errShareOffNow) || errors.Is(err, pipeline.ErrShareStopped) {
+			h.dropShare(r, &b)
 			return false, nil
 		}
 		return false, err
@@ -1692,6 +1706,11 @@ func (h *Handler) finish(ctx context.Context, r *run, b store.Book, cost float64
 			h.o.Log.Warn("generate: the share failed", "job", r.job.ID, "path", r.rel, "err", err)
 			return nil, shareError(err)
 		}
+	} else if r.shareSkipped == "" && r.params.Contribute == ContributeIssue && b.ContribMode == store.ContribModeLocal {
+		// A share it owed (keepShareLocal left a done no_share_job book to this
+		// point) that a share_off heard since (the write can wait a long time)
+		// dropped: the result says so.
+		h.dropShare(r, &b)
 	}
 	if r.descTried {
 		// The description step may have spent after the cost was read (a try that

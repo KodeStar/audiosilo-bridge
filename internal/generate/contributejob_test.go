@@ -1,6 +1,7 @@
 package generate
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -27,7 +28,16 @@ type fakeSharer struct {
 	calls []string
 }
 
-func (f *fakeSharer) Share(_ context.Context, bookID int64, workID string, dims []string) (pipeline.ShareResult, error) {
+func (f *fakeSharer) ShareChecked(_ context.Context, bookID int64, workID string, dims []string,
+	stopped func() (bool, error)) (pipeline.ShareResult, error) {
+	if stopped != nil {
+		// Asked before each dimension, as the engine's share asks.
+		for range max(len(dims), 2) {
+			if stop, err := stopped(); err != nil || stop {
+				return pipeline.ShareResult{}, cmp.Or(err, pipeline.ErrShareStopped)
+			}
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, workID+"|"+strings.Join(dims, ","))

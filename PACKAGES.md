@@ -1633,7 +1633,9 @@ internal/
             feed's end; a remap clears it with the cursor.
             0019 adds books.share_skipped (Book.ShareSkipped: why a book that was to
             be shared was kept local, '' otherwise): contributions_off where
-            keepSharedOffLocal turns it, the contributing stage's answer
+            keepSharedOffLocal turns it (also over a no_share_job reason, done or
+            not: a later claim resets the row's share_off, so the book keeps the
+            evidence and ResumeShare never takes that share up), the contributing stage's answer
             (contributions_off or no_share_job) through KeepBookLocal (never a done
             or local book, updated_at left alone); ContinueChapters clears it with
             the mode it sets. ResumeShare is the one way back from no_share_job
@@ -3433,7 +3435,14 @@ internal/
             stage to file, a done one is filed by finish as sidecars.contribute
             files (shareOwed, shareConfirmed); a share_off still wins.
             shareConfirmed files nothing on an answer carrying share_off
-            (errShareOffNow). The result says share_skipped for a book
+            (errShareOffNow), nor, for shareOwed, once ShareResumable no longer
+            holds when asked again under the hold after the answer; keepShareLocal
+            reads the book again under its hold and leaves one done since to
+            finish. shareOwed files through pipeline.Executor.ShareChecked with
+            stoppedBy asked before each dimension (the server again, its share_off,
+            ShareResumable), as the stage asks before each filing; the contributing
+            stage takes a book's issue mode back from the store when the dispatch
+            read it local (a share resumed since). The result says share_skipped for a book
             kept local unless something was filed: the book's own reason
             (books.share_skipped: no_share_job when the stage found no run of the
             job to ask), else "contributions_off" (the console words both, an

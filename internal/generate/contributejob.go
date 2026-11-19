@@ -24,9 +24,11 @@ import (
 // Bridge's GitHub sign-in. It writes nothing into the library and runs no agent.
 const ContributeKind = "sidecars.contribute"
 
-// Sharer is the engine's share step (pipeline.Executor.Share).
+// Sharer is the engine's share step (pipeline.Executor.ShareChecked: stopped,
+// nil for never, is asked before each dimension is filed).
 type Sharer interface {
-	Share(ctx context.Context, bookID int64, workID string, dims []string) (pipeline.ShareResult, error)
+	ShareChecked(ctx context.Context, bookID int64, workID string, dims []string,
+		stopped func() (bool, error)) (pipeline.ShareResult, error)
 }
 
 // The ways a share fails that need an admin's words.
@@ -139,7 +141,7 @@ func (c *ContributeJob) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporte
 		return nil, err
 	}
 	rep.Progress(jobs.Progress{Step: stepSharing, Message: "Sharing with the community", Total: 1})
-	res, err := h.shareConfirmed(ctx, r, sharer, b.ID, p)
+	res, err := h.shareConfirmed(ctx, r, sharer, b.ID, p, nil)
 	if err != nil {
 		// The console gets shareError's words; the log keeps the cause.
 		h.o.Log.Warn("generate: the share failed", "job", job.ID, "path", r.rel, "err", err)
@@ -160,21 +162,36 @@ const stepSharing = "sharing"
 // filing, as the server stops a share whose Contributions module was turned
 // off only in an answer to the job's next report, which can be a keepalive
 // away. An answer that stopped the job, or carried share_off (errShareOffNow),
-// files nothing (the job ends); a server
+// files nothing (the job ends); so does stands (nil: none) answering false,
+// asked under the hold after the server's answer (errShareOffNow; its error is
+// returned). A server
 // that couldn't be asked parks the job share_unconfirmed and asks again every
 // Recheck, or at once on Retry, filing nothing meanwhile.
 func (h *Handler) shareConfirmed(ctx context.Context, r *run, sharer Sharer, bookID int64,
-	p ContributeParams) (pipeline.ShareResult, error) {
+	p ContributeParams, stands func(context.Context) (bool, error)) (pipeline.ShareResult, error) {
 	for parked := false; ; parked = true {
 		release, err := h.holdBook(ctx, bookID)
 		if err != nil {
 			return pipeline.ShareResult{}, err
 		}
 		err = r.rep.Refresh(ctx)
-		if err == nil && r.rep.ShareOff() {
+		off := err == nil && r.rep.ShareOff()
+		if err == nil && !off && stands != nil {
+			var ok bool
+			if ok, err = stands(ctx); err != nil {
+				release()
+				return pipeline.ShareResult{}, err
+			}
+			off = !ok
+		}
+		if off {
 			// A sidecars.generate run filing a share it owes (shareOwed) hears
-			// share_off without being stopped: nothing is filed.
+			// share_off without being stopped: nothing is filed, and a run that
+			// goes on to finish reports no park it no longer waits on.
 			release()
+			if parked {
+				r.rep.Unpark()
+			}
 			return pipeline.ShareResult{}, errShareOffNow
 		}
 		if err == nil {
@@ -182,7 +199,7 @@ func (h *Handler) shareConfirmed(ctx context.Context, r *run, sharer Sharer, boo
 				r.rep.Unpark()
 				r.rep.Progress(jobs.Progress{Step: stepSharing, Message: "Sharing with the community", Total: 1})
 			}
-			res, err := sharer.Share(ctx, bookID, p.WorkID, p.Dimensions)
+			res, err := sharer.ShareChecked(ctx, bookID, p.WorkID, p.Dimensions, stoppedBy(ctx, r, stands))
 			release()
 			return res, err
 		}
@@ -201,6 +218,29 @@ func (h *Handler) shareConfirmed(ctx context.Context, r *run, sharer Sharer, boo
 		if err := h.recheckWait(ctx, r, at); err != nil {
 			return pipeline.ShareResult{}, err
 		}
+	}
+}
+
+// stoppedBy is shareConfirmed's check before each dimension it files when
+// stands is set (shareOwed: a done book's owed share, which sidecars.generate
+// answers can turn off without stopping the job): the server asked again
+// (Reporter.Refresh), its share_off or stands answering false stop the share
+// (pipeline.ErrShareStopped), and a server that can't be asked is the error
+// (nothing more is filed). nil (never) without stands: sidecars.contribute's
+// stop comes as a cancel.
+func stoppedBy(ctx context.Context, r *run, stands func(context.Context) (bool, error)) func() (bool, error) {
+	if stands == nil {
+		return nil
+	}
+	return func() (bool, error) {
+		if err := r.rep.Refresh(ctx); err != nil {
+			return false, err
+		}
+		if r.rep.ShareOff() {
+			return true, nil
+		}
+		ok, err := stands(ctx)
+		return !ok, err
 	}
 }
 

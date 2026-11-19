@@ -158,6 +158,17 @@ func (e *Executor) contribute(ctx context.Context, book store.Book, r scheduler.
 	// The description first, while the source text is still there (best effort,
 	// outside the stage's rate sample).
 	e.describeAtContributing(ctx, book, r)
+	// A book the dispatch read local may be shared again since: a share job
+	// that follows it again turns a no_share_job book back to issue under the
+	// engine's hold (generate's store.ResumeShare), and a dispatch pass that read
+	// it before then would otherwise file it locally for good. The issue mode
+	// read here is checked below like any other.
+	if e.db != nil && book.ContribMode == store.ContribModeLocal {
+		if now, err := e.db.GetBook(ctx, book.ID); err == nil && now.ContribMode == store.ContribModeIssue &&
+			now.ShareSkipped == "" {
+			book.ContribMode = now.ContribMode
+		}
+	}
 	// The book's own mode as it is now, not as the dispatch read it: the
 	// description above can wait a long time for an agent slot, and a
 	// sidecars.generate job whose share the server turned off meanwhile keeps
