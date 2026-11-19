@@ -434,14 +434,15 @@ func TestStopDuringHeldCancel(t *testing.T) {
 	logs := &logCounter{n: map[string]int{}}
 	opts := testOpts()
 	opts.Keepalive, opts.ReportRetry, opts.Log = time.Hour, time.Hour, slog.New(logs)
+	hang := make(chan struct{})
+	t.Cleanup(func() { close(hang) })
 	r := New(db, func() Server { return srv }, nil, opts, handler{kind: "k.stop", lane: LaneLight,
 		fn: func(context.Context, Job, *Reporter) (any, error) {
 			srv.mu.Lock()
-			srv.hang = make(chan struct{})
+			srv.hang = hang
 			srv.mu.Unlock()
 			return nil, errors.New("the download was interrupted")
 		}})
-	t.Cleanup(func() { close(srv.hang) })
 	runFor(t, r, func() bool {
 		srv.mu.Lock()
 		defer srv.mu.Unlock()
