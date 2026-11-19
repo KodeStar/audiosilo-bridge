@@ -174,48 +174,49 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	return res, nil
 }
 
-// fetchBook asks the server for the book's files, asking again with backoff
-// (within retryFor) while the answer may change (mapping.BookReadSettled,
-// generate's fetchBook's rule). A definite answer fails at once, and so does
-// the last transient one once the budget is spent (the wait before the last
-// ask cut to what is left of it, so the server is asked at its end). Each
-// retry is logged: the job's message is the same every round.
+// fetchBook asks the server for the book's files, asking again (retrying)
+// while the answer may change (mapping.BookReadSettled, generate's fetchBook's
+// rule). A definite answer fails at once, and so does the last transient one
+// once the budget is spent.
 func (h *Handler) fetchBook(ctx context.Context, jobID int64, rep *jobs.Reporter, src mapping.BookSource, libraryID int64, path string) (*link.Book, error) {
-	deadline := time.Now().Add(h.retryFor)
-	wait := h.retryFirst
-	for {
-		rep.Progress(jobs.Progress{Step: "lookup", Message: "Asking the server for the book's files"})
-		book, err := src.Book(ctx, libraryID, path)
-		left := time.Until(deadline)
-		if err == nil || mapping.BookReadSettled(err) || left <= 0 {
-			return book, err
-		}
-		h.log.Warn("verify: asking the server for the book's files failed; trying again", "job", jobID, "err", err)
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(min(wait, left)):
-		}
-		wait = min(wait*2, bookRetryMax)
+	var book *link.Book
+	err := h.retrying(ctx, jobID, "verify: asking the server for the book's files failed; trying again",
+		func(err error) bool { return !mapping.BookReadSettled(err) },
+		func() (err error) {
+			rep.Progress(jobs.Progress{Step: "lookup", Message: "Asking the server for the book's files"})
+			book, err = src.Book(ctx, libraryID, path)
+			return err
+		})
+	if err != nil {
+		return nil, err
 	}
+	return book, nil
 }
 
-// whileSlow runs look again while the library's folder gives it no answer
-// within mapping.LookTimeout (fsutil.ErrStatTimeout: a disk spinning up, a
-// mount that hangs), which says nothing about the copy, backing off as
-// fetchBook does within retryFor (the last look at its end): the verify fails
-// on a slow folder only once that is spent. It returns look's last error, or
-// ctx's.
+// whileSlow runs look again (retrying) while the library's folder gives it no
+// answer within mapping.LookTimeout (fsutil.ErrStatTimeout: a disk spinning
+// up, a mount that hangs), which says nothing about the copy: the verify fails
+// on a slow folder only once the budget is spent.
 func (h *Handler) whileSlow(ctx context.Context, jobID int64, look func() error) error {
+	return h.retrying(ctx, jobID, "verify: the library's folder didn't answer in time; looking again",
+		func(err error) bool { return errors.Is(err, fsutil.ErrStatTimeout) }, look)
+}
+
+// retrying runs try, and again while again says its error may change, backing
+// off from retryFirst (at most bookRetryMax) within retryFor, the wait before
+// the last try cut to what is left of it so the last try is at its end. Each
+// retry is logged as msg: the job's message is the same every round. It
+// returns try's last error, or ctx's.
+func (h *Handler) retrying(ctx context.Context, jobID int64, msg string, again func(error) bool, try func() error) error {
 	deadline := time.Now().Add(h.retryFor)
 	wait := h.retryFirst
 	for {
-		err := look()
+		err := try()
 		left := time.Until(deadline)
-		if !errors.Is(err, fsutil.ErrStatTimeout) || left <= 0 {
+		if err == nil || !again(err) || left <= 0 {
 			return err
 		}
-		h.log.Warn("verify: the library's folder didn't answer in time; looking again", "job", jobID, "err", err)
+		h.log.Warn(msg, "job", jobID, "err", err)
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
