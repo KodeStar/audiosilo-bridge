@@ -167,6 +167,18 @@ func (s *service) sweepRecords(ctx context.Context, root *os.Root, lib link.Libr
 		if s.writable(lib, mount) != nil || !markerThere(root) {
 			return
 		}
+		// The open jobs read again just before the drop: no episode lock is
+		// taken here, and a fetch claimed since they were first read may have
+		// loaded the record already (a whole download, or a partial in a show
+		// folder it can read). One claimed after this read still has its
+		// library, show and episode lock to find before it reads the record,
+		// and the drop is next.
+		if rows, err = s.o.DB.OpenServerJobs(ctx); err != nil {
+			return
+		}
+		if running = s.runningRecords(rows, lib.ID, 0); running(c) {
+			continue
+		}
 		if s.forgetRecord(dir, records, c) && !gone {
 			slog.Warn("podcasts: a day-old download record no job could resume or clear is dropped; its partial is left unrecorded", "partial", c.partialName())
 		}

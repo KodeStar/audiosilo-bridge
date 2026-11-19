@@ -728,3 +728,53 @@ func TestOwnedCleanupDropsADayOldRecordWhosePartialItCannotRemove(t *testing.T) 
 		t.Fatal("the partial is gone", err)
 	}
 }
+
+// A fetch claimed while the hourly sweep reads the library (after its first
+// read of the open jobs) keeps the record it may have loaded already: the
+// open jobs are read again just before a record goes, as the sweep takes no
+// episode lock.
+func TestSweepRecordsKeepsTheRecordOfAFetchClaimedMidSweep(t *testing.T) {
+	h, job := audioHarness(t)
+	s := h.handler.s
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	var p fetchParams
+	if err := json.Unmarshal(job.Params, &p); err != nil {
+		t.Fatal(err)
+	}
+	whole := sha256.Sum256([]byte("abcdef"))
+	c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: p.ShowID, EpisodeID: p.EpisodeID, Path: *job.Path, Temp: podcast.TempPrefix + nonce(), Validator: secrets.PodcastETagPrefix + nonce(), Offset: 6, Total: 6, SHA256: hex.EncodeToString(whole[:]), UpdatedAt: s.o.Now().Add(-25 * time.Hour).Format(time.RFC3339)}
+	if err := root.WriteFile(c.partialName(), []byte("abcdef"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := s.checkpointRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dir.Close()
+	name := recordName(3, c.ShowID, c.Path)
+	if err := writeRecord(dir, name, c); err != nil {
+		t.Fatal(err)
+	}
+	// The sweep asks the library's mount once as it starts and again before
+	// each drop: the fetch is claimed in between.
+	mount, asked := s.o.Mount, 0
+	s.o.Mount = func(id int64, r string) (string, bool) {
+		if asked++; asked == 2 {
+			if err := h.db.RecordClaim(context.Background(), store.ServerJob{ID: job.ID, Kind: FetchKind, LibraryID: job.LibraryID, Path: job.Path, Params: job.Params, Attempt: 1, ServerID: "server-1"}); err != nil {
+				t.Error(err)
+			}
+		}
+		return mount(id, r)
+	}
+	s.sweepRecords(context.Background(), root, link.Library{ID: 3, Kind: "podcasts", Root: h.mount}, h.mount, []string{path.Dir(c.Path)})
+	if asked < 2 {
+		t.Fatal("the sweep never came to drop the record", asked)
+	}
+	if now, err := readRecord(dir, name); err != nil || now != c {
+		t.Fatal("the record of a fetch claimed mid-sweep was dropped", err)
+	}
+}

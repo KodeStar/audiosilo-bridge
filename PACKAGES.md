@@ -2672,7 +2672,9 @@ internal/
             where they are (outlived: a show folder the Bridge may not search,
             a partial that cannot be opened, EIO/ESTALE/EACCES, a whole
             download never read back), their partials left on disk
-            unrecorded and logged (sweepRecords; a folder that cannot be read
+            unrecorded and logged (sweepRecords, which takes no episode lock
+            and so reads the open jobs again just before each drop; a folder
+            that cannot be read
             for any other cause keeps them, as does a record whose partial is in a folder of its
             show renamed by hand and not taken in yet, which that take-in
             moves, and nothing goes while the library's marker is not there),
