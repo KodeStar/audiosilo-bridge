@@ -2,6 +2,7 @@ package mapping
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -994,5 +995,143 @@ func TestManualCheckKeepsALongerHold(t *testing.T) {
 	r.Check(context.Background(), src, mount, func() time.Time { return at.Add(time.Minute) }, 1)
 	if until, _ := r.Held(); !until.Equal(at.Add(3 * time.Minute)) {
 		t.Fatalf("held until %v, want the newer Retry-After's", until.Sub(at))
+	}
+}
+
+// A 429 that ends the pass leaves the libraries it never reached their state
+// only while their folders still show it, as it does the library it reached:
+// one whose share isn't mounted any more (an emptied folder) records the
+// failure (denied), one whose book is still there keeps its state (allowed).
+func TestRateLimitedPassProvesTheUnreached(t *testing.T) {
+	t.Parallel()
+	roots := map[int64]string{}
+	var files []link.BookFile
+	for id := int64(1); id <= 3; id++ {
+		roots[id], files = library(t)
+	}
+	mount := func(id int64, _ string) (string, bool) { return roots[id], true }
+	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	r := NewRegistry()
+	r.spacing = time.Millisecond
+	r.SetLibraries([]link.Library{{ID: 1, Root: "/a"}, {ID: 2, Root: "/b"}, {ID: 3, Root: "/c"}})
+	src := &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{}}
+	r.Check(context.Background(), src, mount, func() time.Time { return at })
+	if err := os.RemoveAll(filepath.Join(roots[3], "Author")); err != nil {
+		t.Fatal(err)
+	}
+	src.mu.Lock()
+	src.calls = nil
+	src.mu.Unlock()
+	src.answer(1, &link.APIError{Status: http.StatusTooManyRequests, RetryAfter: time.Minute, RetryAfterSet: true})
+	r.Check(context.Background(), src, mount, func() time.Time { return at.Add(time.Minute) })
+	if !slices.Equal(src.calls, []int64{1}) {
+		t.Fatalf("asked for %v after the 429, want 1 only", src.calls)
+	}
+	if st, _ := r.Status(2); !st.Mapped || !st.Writable {
+		t.Fatalf("allowed: an unreached library with its book in place lost its state: %+v", st)
+	}
+	st, _ := r.Status(3)
+	if st.Mapped || st.Writable || !strings.Contains(st.Error, "no longer shows Author/Book") {
+		t.Fatalf("denied: an unreached library at an emptied folder kept its state: %+v", st)
+	}
+	if !r.Due(at.Add(2*time.Minute), 24*time.Hour) {
+		t.Fatal("the unreached libraries aren't due again after the hold")
+	}
+}
+
+// bookAndMarkers answers book reads as scripted does and marker reads from the
+// podcast libraries' folders, or with markerErr.
+type bookAndMarkers struct {
+	*scripted
+	roots     map[int64]string
+	markerErr error
+}
+
+func (s *bookAndMarkers) Marker(_ context.Context, id int64) (string, error) {
+	s.mu.Lock()
+	s.calls = append(s.calls, id)
+	err := s.markerErr
+	s.mu.Unlock()
+	if err != nil {
+		return "", err
+	}
+	b, err := os.ReadFile(filepath.Join(s.roots[id], MarkerPath))
+	if err != nil {
+		return "", link.ErrNoMarker
+	}
+	var marker libraryMarker
+	if err := json.Unmarshal(b, &marker); err != nil {
+		return "", err
+	}
+	return marker.Nonce, nil
+}
+
+// A pass a 429 ends at a book library never reaches the podcast libraries
+// after it: one whose marker is still there keeps its state (allowed), one
+// whose marker is gone records the failure (denied), so podcast writes wait.
+func TestRateLimitedPassProvesTheUnreachedPodcasts(t *testing.T) {
+	t.Parallel()
+	bookRoot, files := library(t)
+	roots := map[int64]string{1: bookRoot, 4: t.TempDir(), 5: t.TempDir()}
+	mount := func(id int64, _ string) (string, bool) { return roots[id], true }
+	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	r := NewRegistry()
+	r.spacing = time.Millisecond
+	r.SetLibraries([]link.Library{{ID: 1, Root: "/a"}, {ID: 4, Root: "/p", Kind: "podcasts"}, {ID: 5, Root: "/q", Kind: "podcasts"}})
+	src := &bookAndMarkers{scripted: &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{}}, roots: roots}
+	r.Check(context.Background(), src, mount, func() time.Time { return at })
+	for _, id := range []int64{1, 4, 5} {
+		if st, _ := r.Status(id); !st.Mapped || !st.Writable {
+			t.Fatalf("library %d's first check = %+v", id, st)
+		}
+	}
+	if err := os.RemoveAll(filepath.Join(roots[4], ".audiosilo")); err != nil {
+		t.Fatal(err)
+	}
+	limited := &link.APIError{Status: http.StatusTooManyRequests, RetryAfter: time.Minute, RetryAfterSet: true}
+	src.answer(1, limited)
+	src.mu.Lock()
+	src.calls, src.markerErr = nil, limited
+	src.mu.Unlock()
+	r.Check(context.Background(), src, mount, func() time.Time { return at.Add(time.Minute) })
+	if !slices.Equal(src.calls, []int64{1}) {
+		t.Fatalf("asked for %v after the 429, want 1 only", src.calls)
+	}
+	if st, _ := r.Status(5); !st.Mapped || !st.Writable {
+		t.Fatalf("allowed: an unreached podcast library with its marker lost its state: %+v", st)
+	}
+	st, _ := r.Status(4)
+	if st.Mapped || st.Writable || !strings.Contains(st.Error, "no longer shows "+MarkerPath) {
+		t.Fatalf("denied: an unreached podcast library without its marker kept its state: %+v", st)
+	}
+}
+
+// An unreached library whose mapping moved since its last check keeps nothing:
+// the old state was the old folder's, so the failure is recorded.
+func TestRateLimitedPassDropsAMovedUnreachedState(t *testing.T) {
+	t.Parallel()
+	root, files := library(t)
+	moved, _ := library(t)
+	var mu sync.Mutex
+	mounts := map[int64]string{1: root, 2: root}
+	mount := func(id int64, _ string) (string, bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		return mounts[id], true
+	}
+	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	r := NewRegistry()
+	r.spacing = time.Millisecond
+	r.SetLibraries([]link.Library{{ID: 1, Root: "/a"}, {ID: 2, Root: "/b"}})
+	src := &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{}}
+	r.Check(context.Background(), src, mount, func() time.Time { return at })
+	mu.Lock()
+	mounts[2] = moved
+	mu.Unlock()
+	src.answer(1, &link.APIError{Status: http.StatusTooManyRequests, RetryAfter: time.Minute, RetryAfterSet: true})
+	r.Check(context.Background(), src, mount, func() time.Time { return at.Add(time.Minute) })
+	st, _ := r.Status(2)
+	if st.Mapped || st.Writable || st.MountPath != moved || !strings.Contains(st.Error, "not checked") {
+		t.Fatalf("an unreached library kept its state at the old mount: %+v", st)
 	}
 }

@@ -427,9 +427,9 @@ func (r *Registry) Entries(mount MountFunc) []Entry {
 // the heartbeat's periodic run waits for Due: an admin's mapping edit, Check
 // now and a changed library list call Check at once, hold or not. interval is
 // the configured one (mapping.check_minutes), which also caps a kept state:
-// Due ends the states unanswered checks have kept past KeptChecks of it, hold
-// or not, so the library fails closed and writes wait for a check the server
-// answers.
+// Due ends the states unanswered checks have kept past KeptChecks of it,
+// hold or not (the heartbeat calls it on every beat, one that failed too), so
+// the library fails closed and writes wait for a check the server answers.
 func (r *Registry) Due(now time.Time, interval time.Duration) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -462,7 +462,8 @@ func (r *Registry) Due(now time.Time, interval time.Duration) bool {
 // server didn't answer keeps the library's last known state at the same mount
 // (a 429 or a 503 says nothing about the folder), and a 429 or a refused token
 // ends the pass: the libraries it hadn't reached yet are due again after the
-// hold. The checks queued meanwhile are still made (an admin's mapping edit,
+// hold, keeping their state only as such a check would (keepUnreached). The
+// checks queued meanwhile are still made (an admin's mapping edit,
 // Check now, a changed library list: they skip the hold, as they do when asked
 // for after the run), ending at their first 429 too. It returns once there is
 // nothing left to check, or ctx ends, and reports whether it checked (false:
@@ -490,8 +491,8 @@ func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, n
 		gen := r.gen
 		var libs []link.Library
 		listed := map[int64]bool{}
-		// prev: the state each library's check may keep (only this run records
-		// one, so it is still the state when the check ends).
+		// prev: the state each library's check may keep, as the pass starts
+		// (record reads the state again: Due may have ended it meanwhile).
 		prev := map[int64]link.LibraryStatus{}
 		for _, l := range r.libs {
 			listed[l.ID] = true
@@ -529,15 +530,12 @@ func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, n
 				if unanswered == nil || retryAfter(err) >= retryAfter(unanswered) {
 					unanswered = err
 				}
-				if _, limited := link.RateLimited(err); limited || errors.Is(err, link.ErrUnauthorized) {
-					ended = true
-					for _, rest := range libs[i+1:] {
-						r.markRetry(rest.ID, at)
-					}
-				}
+				_, limited := link.RateLimited(err)
+				ended = limited || errors.Is(err, link.ErrUnauthorized)
 			}
 			r.mu.Unlock()
 			if ended {
+				r.keepUnreached(libs[i+1:], prev, mount, err, at, gen)
 				break
 			}
 		}
@@ -655,6 +653,33 @@ func proveKept(st link.LibraryStatus, unanswered error, last link.LibraryStatus)
 	st.Error = "the folder no longer shows " + cmp.Or(last.CheckedPath, "itself") + ", which the last check found (" +
 		describeStatError(err) + "), and the server didn't answer this one"
 	return st, unproven{unanswered}
+}
+
+// keepUnreached records the libraries a pass ended before (a 429, a refused
+// token: ended) as an unanswered check of each, so record keeps a
+// library's last state, due again after the hold, only as it would that
+// check's: at the same mount, within KeptChecks intervals, and while the
+// folder still shows what that state's check found (proveKept, outside r.mu).
+// Otherwise the failure is recorded, so writes wait for a check the server
+// answers. One with no check yet has nothing to keep and is due anyway.
+func (r *Registry) keepUnreached(rest []link.Library, prev map[int64]link.LibraryStatus, mount MountFunc, ended error, at time.Time, gen int) {
+	for _, l := range rest {
+		last, ok := prev[l.ID]
+		if !ok {
+			continue
+		}
+		path, _ := mount(l.ID, l.Root)
+		st := link.LibraryStatus{LibraryID: l.ID, MountPath: path,
+			Error: "not checked: the server stopped the pass at another library (" + ended.Error() + ")"}
+		st, err := proveKept(st, ended, last)
+		r.mu.Lock()
+		if r.gen != gen {
+			r.mu.Unlock()
+			return // the link changed: the old link's failure says nothing now
+		}
+		r.record(st, err, at)
+		r.mu.Unlock()
+	}
 }
 
 // record keeps a library's check (r.mu held). One the server didn't answer

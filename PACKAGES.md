@@ -2223,10 +2223,14 @@ internal/
             wait. A kept state stands KeptChecks (3) check intervals from the
             check that set it (the interval Due last took, the heartbeat's
             mapping.check_minutes): the next unanswered check past that records
-            its failure, and Due ends it during a hold. A 429 or a refused token
-            ends the pass (the rest are flagged too; checks queued meanwhile are
-            still made, as an edit after the run is, and end at their first
-            429).
+            its failure, and Due ends it during a hold. The heartbeat calls Due
+            on every beat, a failed one too (a server limiting the checks limits
+            the heartbeat as well), asking for no check then. A 429 or a refused
+            token ends the pass: the rest keep their state
+            only as an unanswered check would (keepUnreached: same mount, within
+            the cap, the folder still showing it, else the failure); checks
+            queued meanwhile are still made, as an edit after the run is, and end
+            at their first 429.
             Due waits out a hold after such a run: the longest Retry-After of
             its failures (a zero one, or a past date, counts as none), else
             RetryFirst (1 min) doubling per such run in a row, at most RetryMax
