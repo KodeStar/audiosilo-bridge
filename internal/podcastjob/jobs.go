@@ -794,9 +794,10 @@ func (s *service) readShow(ctx context.Context, root *os.Root, lib link.Library,
 }
 
 // adopt takes in show when it is a folder renamed by hand (podcast.Adopt):
-// the episodes, their downloads and the show's state stay, the cache row
-// follows, and the server is asked to index the folder again. It reports
-// whether show was such a folder.
+// the episodes, their downloads and the show's state stay, the cache row and
+// the records of its interrupted downloads follow (adoptCheckpoints), and the
+// server is asked to index the folder again. It reports whether show was such
+// a folder.
 func (s *service) adopt(ctx context.Context, root *os.Root, lib link.Library, mount, show string) (bool, error) {
 	f, from, err := podcast.ReadMoved(root, show)
 	if err != nil || from == "" {
@@ -820,6 +821,7 @@ func (s *service) adopt(ctx context.Context, root *os.Root, lib link.Library, mo
 		return false, nil
 	}
 	s.setIndexed(lib.ID, show, false)
+	s.adoptCheckpoints(ctx, lib, show, from)
 	if err := s.o.DB.UpsertPodcastShow(ctx, s.showRow(lib, show, f)); err != nil {
 		slog.Warn("podcasts: the show cache could not record a renamed show folder", "library", lib.ID, "err", err)
 	}

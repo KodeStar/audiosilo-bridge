@@ -10,15 +10,18 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
+	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/netguard"
 	"github.com/kodestar/audiosilo-bridge/internal/podcast"
 	"github.com/kodestar/audiosilo-bridge/internal/secrets"
+	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
 
 type checkpoint struct {
@@ -162,6 +165,71 @@ func (s *service) clearCheckpoint(job jobs.Job, root *os.Root, c *checkpoint) {
 	if dir, err := s.checkpointRoot(); err == nil {
 		_ = dir.Remove(s.checkpointName(job))
 		_ = dir.Close()
+	}
+}
+
+// adoptCheckpoints moves this pairing's download records for the episodes of a
+// show folder taken in under show (adopt) from their paths under its old name
+// from. A record names its episode's path twice (its own name is the path's
+// hash), and its partial moved with the folder: left as it was, no fetch at the
+// new path would resume it, cleanOwned (which reads a show's records by their
+// folder) would never clear it and sweepPartials would leave its partial for
+// good, as one a record names. A record whose download is still running (a
+// fetch claimed under the old name) stays: that job drops it as it ends, and
+// its partial is then the sweep's. Best effort: a record that could not be
+// moved is left as it was.
+func (s *service) adoptCheckpoints(ctx context.Context, lib link.Library, show, from string) {
+	if s.o.DB == nil || s.o.DataDir == "" {
+		return
+	}
+	dir, err := s.checkpointRoot()
+	if err != nil {
+		return
+	}
+	defer func() { _ = dir.Close() }()
+	entries, err := readDir(dir)
+	if err != nil {
+		return
+	}
+	rows, err := s.o.DB.OpenServerJobs(ctx)
+	if err != nil {
+		return
+	}
+	pairing := s.pairHash()
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		rd, err := podcast.OpenRegular(dir, entry.Name())
+		if err != nil {
+			continue
+		}
+		b, err := io.ReadAll(io.LimitReader(rd, 16385))
+		_ = rd.Close()
+		var c checkpoint
+		if err != nil || len(b) > 16384 || json.Unmarshal(b, &c) != nil || c.ServerHash != pairing || c.LibraryID != lib.ID || !podcast.ValidEpisodePath(c.Path) || path.Dir(c.Path) != from || !podcast.OwnedTemp(c.Temp) {
+			continue
+		}
+		old := c.Path
+		if entry.Name() != s.checkpointName(jobs.Job{LibraryID: &lib.ID, Path: &old}) {
+			continue
+		}
+		if slices.ContainsFunc(rows, func(r store.ServerJob) bool {
+			return r.State == store.JobRunning && r.ServerID == s.o.ServerID() && r.LibraryID != nil && *r.LibraryID == lib.ID && r.Path != nil && *r.Path == old
+		}) {
+			continue
+		}
+		c.Path = show + "/" + path.Base(old)
+		name := s.checkpointName(jobs.Job{LibraryID: &lib.ID, Path: &c.Path})
+		if _, err := dir.Lstat(name); !errors.Is(err, os.ErrNotExist) {
+			continue // never over a record a download at the new path already made
+		}
+		if b, err = json.Marshal(c); err != nil {
+			continue
+		}
+		if fsutil.WriteRootAtomic(dir, ".", name, b, 0o600, nil) == nil {
+			_ = dir.Remove(entry.Name())
+		}
 	}
 }
 

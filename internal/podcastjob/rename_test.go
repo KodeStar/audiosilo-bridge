@@ -10,8 +10,10 @@ import (
 	"testing"
 
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
+	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/netguard"
 	"github.com/kodestar/audiosilo-bridge/internal/podcast"
+	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
 
 // followed subscribes the harness feed and answers its show folder and id.
@@ -202,5 +204,54 @@ func TestANewShowNeverTakesTheNameARenamedFolderCameFrom(t *testing.T) {
 	poll := jobs.Job{ID: 20, Kind: PollKind, LibraryID: &lib, Path: &show, Params: params}
 	if res, err := h.handler.PollJob().Run(context.Background(), poll, jobs.LocalReporter()); err != nil || fields(t, res)["show_path"] != "Renamed Show" {
 		t.Fatal("the renamed show was not taken in", res, err)
+	}
+}
+
+// Taking in a renamed show folder moves the records of its interrupted
+// downloads to the episodes' new paths, so a fetch there resumes the partial
+// (which moved with the folder) and the day-old cleanup still finds it; left
+// under the old path the record would hold its partial in the folder for good.
+// A record whose download is still running stays where it is.
+func TestTakingInARenamedShowMovesItsDownloadRecords(t *testing.T) {
+	for _, running := range []bool{false, true} {
+		h, job := audioHarness(t)
+		s := h.handler.s
+		root, err := os.OpenRoot(h.mount)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer root.Close()
+		c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: "a1b2c3d4e5f60718", EpisodeID: "1cc306d831645e2b", Path: *job.Path, Temp: ".audiosilo-tmp-owned", Offset: 6, Total: 100}
+		if err := root.WriteFile("Fixture Show/"+c.Temp, []byte("prefix"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.saveCheckpoint(job, root, &c, `"one"`); err != nil {
+			t.Fatal(err)
+		}
+		if running {
+			if err := h.db.RecordClaim(context.Background(), store.ServerJob{ID: job.ID, Kind: FetchKind, LibraryID: job.LibraryID, Path: job.Path, Attempt: 1, ServerID: "server-1"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		renameShow(t, h, "Fixture Show", "Renamed Show")
+		if _, err := s.readShow(context.Background(), root, link.Library{ID: 3, Kind: "podcasts", Root: h.mount}, h.mount, "Renamed Show"); err != nil {
+			t.Fatal(err)
+		}
+		moved := "Renamed Show/" + strings.TrimPrefix(*job.Path, "Fixture Show/")
+		there := jobs.Job{LibraryID: job.LibraryID, Path: &moved}
+		_, old := s.readCheckpoint(job)
+		saved, now := s.readCheckpoint(there)
+		if running {
+			if !old || now {
+				t.Fatal("a running download's record was moved", old, now)
+			}
+			continue
+		}
+		if old || !now || saved.Temp != c.Temp || saved.Validator != c.Validator {
+			t.Fatal("the record did not follow the folder", old, now, saved)
+		}
+		if resumed, tag := s.loadCheckpoint(there, root, c.ShowID, c.EpisodeID); tag != `"one"` || resumed.Offset != 6 || resumed.Temp != c.Temp {
+			t.Fatal("a fetch at the new path would not resume the partial", resumed, tag)
+		}
 	}
 }
