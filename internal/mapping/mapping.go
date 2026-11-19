@@ -575,10 +575,13 @@ func (m pacedMarkers) Marker(ctx context.Context, libraryID int64) (string, erro
 
 // record keeps a library's check (r.mu held). One the server didn't answer
 // (unanswered) leaves the last known state at the same mount in place, due
-// again after the hold; with none there it is recorded, so the page says why.
+// again after the hold; with none there it is recorded, so the page says why,
+// and so is one whose folder had lost the marker that proved the last state
+// (unproven).
 func (r *Registry) record(st link.LibraryStatus, unanswered error, at time.Time) {
 	prev, ok := r.results[st.LibraryID]
-	if unanswered != nil && ok && prev.status.MountPath == st.MountPath {
+	var lost unproven
+	if unanswered != nil && ok && prev.status.MountPath == st.MountPath && !errors.As(unanswered, &lost) {
 		r.markRetry(st.LibraryID)
 		return
 	}

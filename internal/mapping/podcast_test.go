@@ -57,6 +57,60 @@ func TestPodcastMarkerRoundTripAndRegistry(t *testing.T) {
 		t.Fatalf("registry: %+v", st)
 	}
 }
+
+// An unanswered marker read keeps a podcast library's last state only while
+// the folder still holds its marker. With the marker gone (the share isn't
+// mounted, or the folder was swapped) nothing proves that state any more, so
+// the failure is recorded and podcast writes wait.
+func TestPodcastUnansweredCheckNeedsTheMarker(t *testing.T) {
+	t.Parallel()
+	mount := t.TempDir()
+	lib := link.Library{ID: 3, Root: mount, Kind: "podcasts"}
+	var down error
+	source := markerSourceFunc(func(context.Context, int64) (string, error) {
+		if down != nil {
+			return "", down
+		}
+		b, err := os.ReadFile(filepath.Join(mount, MarkerPath))
+		if err != nil {
+			return "", link.ErrNoMarker
+		}
+		var marker libraryMarker
+		if err := json.Unmarshal(b, &marker); err != nil {
+			return "", err
+		}
+		return marker.Nonce, nil
+	})
+	mountFn := func(int64, string) (string, bool) { return mount, true }
+	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	r := NewRegistry()
+	r.SetLibraries([]link.Library{lib})
+	r.Check(context.Background(), source, mountFn, func() time.Time { return at })
+	if st, _ := r.Status(3); !st.Mapped || !st.Writable {
+		t.Fatalf("the first check = %+v", st)
+	}
+
+	down = &link.APIError{Status: 503}
+	r.Check(context.Background(), source, mountFn, func() time.Time { return at })
+	if st, _ := r.Status(3); !st.Mapped || !st.Writable {
+		t.Fatalf("an unanswered check with the marker in place replaced the state: %+v", st)
+	}
+
+	if err := os.RemoveAll(filepath.Join(mount, ".audiosilo")); err != nil {
+		t.Fatal(err)
+	}
+	r.Check(context.Background(), source, mountFn, func() time.Time { return at })
+	st, ok := r.Status(3)
+	if !ok || st.Mapped || st.Writable || st.Error != "could not verify this folder with the server" {
+		t.Fatalf("an unanswered check of a folder without the marker kept the old state: %+v", st)
+	}
+	if _, err := os.Lstat(filepath.Join(mount, ".audiosilo")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the marker written for the failed read was left behind: %v", err)
+	}
+	if r.Due(at, 24*time.Hour) || !r.Due(at.Add(RetryMax), 24*time.Hour) {
+		t.Fatal("the library isn't due again after the hold")
+	}
+}
 func TestPodcastMarkerRefusalsAndCleanup(t *testing.T) {
 	t.Parallel()
 	for _, scenario := range []string{"remote404", "mismatch", "other-library", "symlink-dir", "symlink-file", "oversize", "bad-nonce"} {

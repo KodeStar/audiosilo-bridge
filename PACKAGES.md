@@ -2213,12 +2213,16 @@ internal/
             no definite answer (not BookReadSettled: a 429, a 5xx, a 408, a
             refused token, a timeout, no answer); the Registry then keeps the
             library's last state at the same mount (a first check, or one at a
-            moved mount, records the failure) and flags it due again, and a 429
-            ends the run (the rest, and checks queued meanwhile, are flagged too).
-            Due waits out a hold after such a run: the answer's Retry-After (a
-            zero one, or a past date, counts as none), else RetryFirst (1 min)
-            doubling per such run in a row, at most RetryMax (30 min); a run the
-            server answered ends it (one that asked nothing leaves it). Only the
+            moved mount, records the failure; so does a podcast check that found
+            the folder without the library's marker, unproven: the marker was
+            what proved that state, and the share may not be mounted) and flags
+            it due again, and a 429 ends the run (the rest, and checks queued
+            meanwhile, are flagged too).
+            Due waits out a hold after such a run: the answer's Retry-After (a zero
+            one, or a past date, counts as none), else
+            RetryFirst (1 min) doubling per such run in a row, at most RetryMax
+            (30 min); a run the server answered ends it (one that asked nothing
+            leaves it). Only the
             heartbeat's periodic run waits for Due: a mapping edit, Check now and
             a changed library list check at once (the page's two on the Bridge's
             background context, so shutdown ends them). A check cut short by its

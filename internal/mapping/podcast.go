@@ -34,7 +34,9 @@ type libraryMarker struct {
 // (the library was deleted, or this folder added again under a new id).
 // unanswered is as Check's: the server gave no definite answer to the marker
 // read (a 429, a 5xx, a refused token, no answer at all), so the Registry keeps
-// the library's last known state.
+// the library's last known state. Not when the folder held no marker of the
+// library and one was written for the read (unproven): the folder may be
+// another one now (a share that isn't mounted), so the failure is recorded.
 func CheckPodcast(ctx context.Context, src MarkerSource, lib link.Library, mount string, current func(int64) bool) (st link.LibraryStatus, unanswered error) {
 	st = link.LibraryStatus{LibraryID: lib.ID, MountPath: mount, CheckedPath: MarkerPath}
 	root, err := os.OpenRoot(mount)
@@ -119,7 +121,11 @@ func CheckPodcast(ctx context.Context, src MarkerSource, lib link.Library, mount
 		default:
 			st.Error = "could not verify this folder with the server"
 		}
-		return st, unsettled(err)
+		unanswered = unsettled(err)
+		if unanswered != nil && createdMarker {
+			unanswered = unproven{unanswered}
+		}
+		return st, unanswered
 	}
 	st.Mapped = true
 	if err := ProbeWritable(mount); err != nil {
@@ -129,6 +135,15 @@ func CheckPodcast(ctx context.Context, src MarkerSource, lib link.Library, mount
 	st.Writable = true
 	return st, nil
 }
+
+// unproven is an unanswered marker read of a folder that held no marker of the
+// library (CheckPodcast wrote one for the read, and removed it again): what
+// proved the library's last state is gone, so the Registry records the failure
+// instead of keeping that state, and podcast writes wait for a check the
+// server answers.
+type unproven struct{ error }
+
+func (e unproven) Unwrap() error { return e.error }
 
 func readMarker(root *os.Root) (libraryMarker, error) {
 	var m libraryMarker
