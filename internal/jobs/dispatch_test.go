@@ -885,9 +885,11 @@ func TestEarlierPairingsRowsAreDroppedAtStart(t *testing.T) {
 			if got := h.abandoned(); len(got) != 1 || got[0] != 5 {
 				t.Fatal("the dropped row's work wasn't released once", got)
 			}
-			if sj, err := db.GetServerJob(ctx, 6); err != nil || !sj.Reported {
-				t.Fatalf("a finished row of the earlier pairing: %+v %v, want never reported", sj, err)
-			}
+			// Marked after row 5 is recorded lost (the sweep goes in id order).
+			waitFor(t, func() bool {
+				sj, err := db.GetServerJob(ctx, 6)
+				return err == nil && sj.Reported
+			})
 			if srv != nil {
 				srv.next(t, false) // claiming: past the start's look
 				time.Sleep(5 * opts.RetryEvery)
