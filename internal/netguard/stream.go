@@ -70,8 +70,9 @@ func (c *Client) Stream(ctx context.Context, in StreamRequest) (*StreamResponse,
 	}
 	resp, err := hc.Do(req) //nolint:bodyclose // ownership transfers to StreamResponse.Body; caller must close it
 	if err != nil {
+		failure := classify(ctx, err) // before cancel ends ctx
 		cancel()
-		return nil, classify(err)
+		return nil, failure
 	}
 	timer := time.AfterFunc(c.stall, cancel)
 	body := &streamBody{progressReader: progressReader{r: resp.Body, timer: timer, stall: c.stall}, body: resp.Body, cancel: cancel}
@@ -124,8 +125,12 @@ func ResumeAction(offset, total int64, etag string, r *StreamResponse) string {
 	return "append"
 }
 
-func Retryable(err error) bool  { return retryable(classify(err)) }
-func Classify(err error) *Error { return classify(err) }
+// Retryable reports whether e, a guarded request's classified failure
+// (Classify), is worth another attempt.
+func Retryable(e *Error) bool { return retryable(e) }
+
+// Classify is classify for a caller that ran the request under ctx.
+func Classify(ctx context.Context, err error) *Error { return classify(ctx, err) }
 
 // RetryDelay retains the existing jitter and honors a bounded Retry-After.
 func RetryDelay(attempt int, retryAfter int) time.Duration {

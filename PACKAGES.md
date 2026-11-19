@@ -2306,8 +2306,16 @@ internal/
             cancel_requested with the server's reason as the job's error is the server's
             ("the job was cancelled by the server: <reason>"), with none an admin's, the 409 and
             the answer to a parked report (its error is the park's message that report sent) say
-            neither, the page's own Cancel says so), any other 409 ends it as lost (nothing more sent). A parked
-            report carries the park's message for people in progress park.message
+            neither, the page's own Cancel says so), any other 409 ends it as lost (nothing more sent).
+            A job that FAILS before it heard a cancel asks once more, for at most 5 s
+            (Reporter.heldCancel): a cancel held there ends it cancelled, no cancel or no
+            answer leaves it failed, a Bridge stopping meanwhile leaves it running; a done job
+            never asks. A failed or parked end the server answers as cancelled (the job in its
+            answer stored cancelled: a cancel it held that the ask missed, or one a park never
+            asks about; or a 409 cancelled: a retried report) is recorded cancelled
+            (Runner.report; its error only in the log).
+            A parked report carries the park's
+            message for people in progress park.message
             (withParkMessage: the job's park message without the "<code>: " an
             engine message leads with; bridge#28), which the page shows; a 401 is handed to
             the app WITH the link that got it (onUnauthorized(srv): a job of the
@@ -2416,6 +2424,10 @@ internal/
             StatusError maps a host's HTTP answer to the failure, the feed's and
             the episode's alike (bridge#26): gone for 410, else http_<status>, a
             message naming what was asked for and the Retry-After seconds.
+            Classify(ctx, err): a request whose context ended (a deadline, the
+            job's cancel or ceiling, with a cause too: net/http then reports the
+            cause, not context.Canceled) is timeout, never network, which the
+            server would count as the feed's failure (BR-CANCEL-RACE).
             Phase 2c-1 feed/artwork client: explicit DNS resolution and a socket
             Control check of the exact IP, public addresses or configured CIDRs
             only (including NAT64 embedded IPv4 checks), no environment proxy.

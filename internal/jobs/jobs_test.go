@@ -25,11 +25,13 @@ type fakeServer struct {
 	updates  map[int64][]link.Update
 	claims   [][]string
 	cancel   map[int64]bool   // answer cancel_requested for these
+	reason   map[int64]string // the job's error in an update's answer (a server cancel's reason)
 	notHeld  map[int64]bool   // answer 409 not_held for these
 	gone     map[int64]bool   // answer 409 not_held, reason cancelled, for these
 	failing  bool             // every update fails with a network error
 	unauthed bool             // every call is a 401
 	hang     chan struct{}    // updates wait for it to close (nil: none)
+	hung     int              // updates that waited on hang
 	changed  chan struct{}    // closed on every update
 	paths    map[int64]string // the job's path in an update's answer (a book that moved)
 	shareOff map[int64]bool   // share_off in an update's answer (server#218)
@@ -38,7 +40,7 @@ type fakeServer struct {
 
 func newFakeServer() *fakeServer {
 	return &fakeServer{updates: map[int64][]link.Update{}, cancel: map[int64]bool{}, notHeld: map[int64]bool{},
-		gone: map[int64]bool{}, tries: map[int64]int{}, changed: make(chan struct{})}
+		gone: map[int64]bool{}, reason: map[int64]string{}, tries: map[int64]int{}, changed: make(chan struct{})}
 }
 
 // setShareOff sets the jobs whose updates the server answers with share_off.
@@ -79,6 +81,7 @@ func (f *fakeServer) Claim(ctx context.Context, kinds []string, wait time.Durati
 func (f *fakeServer) UpdateJob(ctx context.Context, id int64, u link.Update) (*link.Job, error) {
 	f.mu.Lock()
 	if hang := f.hang; hang != nil {
+		f.hung++
 		f.mu.Unlock()
 		select {
 		case <-hang:
@@ -108,7 +111,10 @@ func (f *fakeServer) UpdateJob(ctx context.Context, id int64, u link.Update) (*l
 	if u.State != nil {
 		state = *u.State
 	}
-	j := &link.Job{ID: id, State: state, CancelRequested: f.cancel[id], ShareOff: f.shareOff[id]}
+	if (state == link.StateFailed || state == link.StateNeedsAttention) && f.cancel[id] {
+		state = link.StateCancelled // a failure or a park after a cancel was asked is stored cancelled
+	}
+	j := &link.Job{ID: id, State: state, CancelRequested: f.cancel[id], ShareOff: f.shareOff[id], Error: f.reason[id]}
 	if p, ok := f.paths[id]; ok {
 		j.Path = &p
 	}
