@@ -2389,10 +2389,10 @@ internal/
             reclaimed jobs. Retain hashes local candidates and fails closed on an
             unavailable, stale or protected aggregate. Snapshot freshness lasts five
             seconds from request dispatch on the Bridge's monotonic clock;
-            checked_at does not time freshness, but it must lie within two minutes
+            checked_at does not time freshness, but it must lie within five minutes
             of the Bridge's clock (replyWindow, bridge#13): a reply held or
             replayed on its way grants nothing, and a Bridge whose clock is
-            further off deletes nothing (a warning in the log). Old cleanup
+            further off deletes nothing (a warning in the log, on the page's Logs tab). Old cleanup
             uses only owned checkpoint/trash records, checked mappings and no live matching job;
             then sweepPartials (bridge#87; also after a mapping check, SweepPartials, at most
             once an hour, sweepEvery) removes a show's unrecorded partials: regular files

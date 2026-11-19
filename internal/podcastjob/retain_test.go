@@ -169,10 +169,10 @@ func TestRetainDeletesOnlyVerifiedOwnedGeneration(t *testing.T) {
 					c.Followers = 0
 				case "unfinished":
 					c.AllFinished = false
-				case "clock-ahead": // a server clock a little ahead or behind still deletes
-					c.CheckedAt = now.Add(time.Minute).Format(time.RFC3339)
+				case "clock-ahead": // a server clock a few minutes ahead or behind still deletes
+					c.CheckedAt = now.Add(4 * time.Minute).Format(time.RFC3339)
 				case "clock-behind":
-					c.CheckedAt = now.Add(-time.Minute).Format(time.RFC3339)
+					c.CheckedAt = now.Add(-4 * time.Minute).Format(time.RFC3339)
 				case "reply-old": // an aggregate older than the round trip grants nothing (bridge#13)
 					c.CheckedAt = now.Add(-time.Hour).Format(time.RFC3339)
 				case "reply-future":

@@ -232,7 +232,7 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 // reply's own age, which the round trip cannot see (a reply held or replayed
 // on its way), while leaving room for two clocks that differ a little. A
 // Bridge whose clock is further off deletes nothing (a warning in the log).
-const replyWindow = 2 * time.Minute
+const replyWindow = 5 * time.Minute
 
 // replyCurrent reports whether checkedAt (the server's) lies within
 // replyWindow of now (the Bridge's).
