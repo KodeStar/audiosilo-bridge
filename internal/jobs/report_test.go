@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/link"
+	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
 
 // logCounter counts log records by message.
@@ -281,4 +282,126 @@ func TestCancelCauseWordsTheServersReason(t *testing.T) {
 	if !errors.Is(errCancelledOnPage, errCancelRequested) {
 		t.Fatal("a cancel on the Bridge's page isn't a cancel")
 	}
+}
+
+// storedAs reports whether job id is recorded in state and reported.
+func storedAs(db *store.DB, id int64, state string) bool {
+	sj, err := db.GetServerJob(context.Background(), id)
+	return err == nil && sj.State == state && sj.Reported
+}
+
+// A cancel asked for after the job's last report, which a failure beat to the
+// next keepalive (the stop itself may be what failed it), ends the job
+// cancelled, on the server and on the Bridge's page; a cancel the server had
+// already ended the job with (its 409 cancelled) too. A failure with no cancel
+// held, and a job that got its work done, keep their end.
+func TestCancelRacingTheJobsEnd(t *testing.T) {
+	t.Parallel()
+	for name, c := range map[string]struct {
+		cancel, gone bool
+		err          error
+		want         string
+	}{
+		"failure racing a cancel":          {cancel: true, err: errors.New("the download was interrupted"), want: link.StateCancelled},
+		"failure racing a server's cancel": {gone: true, err: errors.New("the download was interrupted"), want: link.StateCancelled},
+		"failure before any cancel":        {err: errors.New("the download was interrupted"), want: link.StateFailed},
+		"done before the cancel":           {cancel: true, want: link.StateDone},
+		"done before a server's cancel":    {gone: true, want: link.StateDone},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			db, srv := openStore(t), newFakeServer()
+			srv.add(&link.Job{ID: 21, Kind: "k.race", Attempts: 1})
+			opts := testOpts()
+			// No keepalive goes before the job ends: only the end hears the cancel.
+			opts.Keepalive, opts.ReportRetry = time.Hour, time.Hour
+			r := New(db, func() Server { return srv }, nil, opts, handler{kind: "k.race", lane: LaneLight,
+				fn: func(context.Context, Job, *Reporter) (any, error) {
+					srv.mu.Lock()
+					srv.cancel[21], srv.gone[21] = c.cancel, c.gone
+					srv.reason[21] = "the Audible account was removed"
+					srv.mu.Unlock()
+					return map[string]int{"files": 1}, c.err
+				}})
+			runFor(t, r, func() bool { return storedAs(db, 21, c.want) })
+			state, final := srv.finalState(21)
+			if state != c.want {
+				t.Fatalf("reported %q, want %q", state, c.want)
+			}
+			wantErr := ""
+			if c.want == link.StateFailed {
+				wantErr = c.err.Error()
+			}
+			// A cancel sends no error of its own: the server keeps its reason.
+			if final.Error == nil || *final.Error != wantErr {
+				t.Fatalf("final report's error = %v, want %q", final.Error, wantErr)
+			}
+			if c.want == link.StateCancelled && string(final.Result) != `{"files":1}` {
+				t.Fatalf("a cancelled job's result = %s", final.Result)
+			}
+		})
+	}
+}
+
+// heldCancel's cause says by whom as a keepalive's answer would; no cancel, a
+// lost claim or no answer is none (the failure stands).
+func TestHeldCancel(t *testing.T) {
+	t.Parallel()
+	srv := newFakeServer()
+	rep := &Reporter{srv: srv, job: Job{ID: 22, Attempt: 1}}
+	ctx := context.Background()
+	if cause := rep.heldCancel(ctx); cause != nil {
+		t.Fatalf("no cancel held = %v", cause)
+	}
+	srv.cancel[22], srv.reason[22] = true, "the Audible account was removed"
+	if cause := rep.heldCancel(ctx); cause == nil ||
+		cause.Error() != "the job was cancelled by the server: the Audible account was removed" {
+		t.Fatalf("the server's cancel = %v", cause)
+	}
+	srv.reason[22] = ""
+	if cause := rep.heldCancel(ctx); cause == nil || cause.Error() != "the job was cancelled by an admin" {
+		t.Fatalf("an admin's cancel = %v", cause)
+	}
+	srv.gone[22] = true
+	if cause := rep.heldCancel(ctx); !errors.Is(cause, errCancelRequested) {
+		t.Fatalf("a job the server had cancelled = %v", cause)
+	}
+	srv.gone[22], srv.notHeld[22] = false, true
+	if cause := rep.heldCancel(ctx); cause != nil {
+		t.Fatalf("a lost claim = %v", cause)
+	}
+	srv.notHeld[22], srv.failing = false, true
+	if cause := rep.heldCancel(ctx); cause != nil {
+		t.Fatalf("no answer = %v", cause)
+	}
+}
+
+// A failure whose report didn't get through, which the server ended cancelled
+// meanwhile (its 409 cancelled to the retried report), is recorded cancelled:
+// the Bridge's page reads what the server's does.
+func TestRetriedFailureTheServerCancelled(t *testing.T) {
+	t.Parallel()
+	db, srv := openStore(t), newFakeServer()
+	srv.add(&link.Job{ID: 23, Kind: "k.retry", Attempts: 1})
+	opts := testOpts()
+	opts.Keepalive, opts.ReportRetry = time.Hour, time.Hour
+	r := New(db, func() Server { return srv }, nil, opts, handler{kind: "k.retry", lane: LaneLight,
+		fn: func(context.Context, Job, *Reporter) (any, error) {
+			srv.setFailing(true)
+			return nil, errors.New("the download was interrupted")
+		}})
+	var flipped bool
+	runFor(t, r, func() bool {
+		if !flipped {
+			sj, err := db.GetServerJob(context.Background(), 23)
+			if err != nil || sj.State != store.JobFailed || srv.triesOf(23) < 3 { // first report, probe, failed end
+				return false
+			}
+			srv.mu.Lock()
+			srv.gone[23], srv.failing = true, false
+			srv.mu.Unlock()
+			flipped = true
+		}
+		return storedAs(db, 23, store.JobCancelled)
+	})
 }
