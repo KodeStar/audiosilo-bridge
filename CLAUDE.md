@@ -149,6 +149,7 @@ internal/
   toolfetch/ audio/ asr/ transcript/ ebook/ scratch/ qa/ spelling/ agent/ repair/
   pipeline/ contrib/ state/ eta/ scheduler/ supervisor/ metaops/ events/ pricing/ fsutil/
   execfile/ (fork-safe executable writes, a leaf; the tests' fake tools)
+  testwait/ (tests only, a leaf: Race and Scaled, a failed test's deadline x4 under -race)
   chapterdetect/ (Phase 1d: chapters from the narration; pure, imported by pipeline)
   epubcfi/ readalong/ (Phase 3c-1: foliate's CFIs in Go; the read-along aligner, map
                        writer and heal/snap planning; pure, imported by pipeline)
