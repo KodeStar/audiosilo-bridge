@@ -76,6 +76,10 @@ type service struct {
 	// named by path alone were renamed by show this start (migrateRecords).
 	recMu    sync.Mutex
 	migrated map[string]bool
+	// unfound holds, until when, the show folders that could not be read and
+	// whose show no other folder held (lockShow): the next jobs there fail
+	// without searching the whole library again.
+	unfound map[string]time.Time
 }
 type lock struct {
 	gate  chan struct{}
@@ -115,7 +119,7 @@ func New(o Options) *Subscribe {
 	if o.CheckPoll <= 0 {
 		o.CheckPoll = time.Second
 	}
-	return &Subscribe{s: &service{o: o, locks: map[string]*lock{}, indexed: map[string]bool{}, migrated: map[string]bool{}}}
+	return &Subscribe{s: &service{o: o, locks: map[string]*lock{}, indexed: map[string]bool{}, migrated: map[string]bool{}, unfound: map[string]time.Time{}}}
 }
 func (h *Subscribe) PollJob() *Poll { return &Poll{s: h.s} }
 func (h *Subscribe) Kind() string   { return SubscribeKind }
@@ -794,11 +798,12 @@ func (s *service) lockShow(ctx context.Context, root *os.Root, lib link.Library,
 	case err == nil:
 		unlock()
 		err = changed
-	case !valid || !unread || searched || ctx.Err() != nil || holds(root, show, id):
+	case !valid || !unread || searched || ctx.Err() != nil || holds(root, show, id) || s.wasUnfound(lib.ID, show, id):
 		return "", nil, nil, err
 	}
 	moved := s.relocate(ctx, root, lib, id)
 	if moved == "" || moved == show {
+		s.markUnfound(lib.ID, show, id)
 		return "", nil, nil, err
 	}
 	if f, unlock, _, err = open(moved); err != nil {
@@ -809,6 +814,38 @@ func (s *service) lockShow(ctx context.Context, root *os.Root, lib link.Library,
 		return "", nil, nil, changed // moved again since relocate read it
 	}
 	return moved, f, unlock, nil
+}
+
+// unfoundFor is how long a show folder that could not be read, its show held
+// by no other folder, fails its jobs without a search of the library: a
+// feed.json the Bridge cannot read would otherwise cost every job of the
+// show (a fetch per episode) a read of every show's feed.json.
+const unfoundFor = time.Minute
+
+// wasUnfound reports whether lockShow searched the library for show id within
+// unfoundFor, its folder show unreadable, and no folder held it.
+func (s *service) wasUnfound(lib int64, show, id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	until, ok := s.unfound[s.unfoundKey(lib, show, id)]
+	return ok && s.o.BudgetNow().Before(until)
+}
+
+// markUnfound records such a search, dropping the records past their time.
+func (s *service) markUnfound(lib int64, show, id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.o.BudgetNow() // the monotonic clock: a clock set back never extends one
+	for k, until := range s.unfound {
+		if !now.Before(until) {
+			delete(s.unfound, k)
+		}
+	}
+	s.unfound[s.unfoundKey(lib, show, id)] = now.Add(unfoundFor)
+}
+
+func (s *service) unfoundKey(lib int64, show, id string) string {
+	return s.o.ServerID() + "|" + strconv.FormatInt(lib, 10) + "|" + show + "|" + id
 }
 
 // holds reports whether show's feed.json, read as a folder that may have been
@@ -830,6 +867,10 @@ func warnHeld(show, held string, err error) {
 	}
 }
 
+// searchHook, when a test sets it, is called once per library search
+// (relocate reading every show folder).
+var searchHook func()
+
 // relocate is the folder holding show id, for a job whose show folder is gone,
 // holds another show or cannot be read: one renamed by hand. The folder its
 // cache row names is read first, every show folder only when that one does
@@ -844,6 +885,9 @@ func (s *service) relocate(ctx context.Context, root *os.Root, lib link.Library,
 			return at
 		}
 		tried = at
+	}
+	if searchHook != nil {
+		searchHook()
 	}
 	entries, err := readDir(root)
 	if err != nil {

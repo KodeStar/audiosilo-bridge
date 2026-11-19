@@ -2122,6 +2122,33 @@ func TestALockRetakeNeverMakesTheFolder(t *testing.T) {
 	}
 }
 
+// A show folder whose feed.json cannot be read, its show held by no other
+// folder: the first job there searches the library for the show, and the
+// next ones within a minute fail the same way without searching again (a
+// fetch per episode would each read every show's feed.json).
+func TestAnUnreadableShowIsSearchedForOnce(t *testing.T) {
+	h, job := audioHarness(t)
+	if err := os.WriteFile(filepath.Join(h.mount, "Fixture Show", "feed.json"), []byte("not a feed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	searches := 0
+	searchHook = func() { searches++ }
+	t.Cleanup(func() { searchHook = nil })
+	show := "Fixture Show"
+	params, _ := json.Marshal(map[string]string{"show_id": fixtureShowID})
+	for i := range 3 {
+		poll := jobs.Job{ID: int64(40 + i), Kind: PollKind, LibraryID: job.LibraryID, Path: &show, Params: params}
+		res, err := h.handler.PollJob().Run(context.Background(), poll, jobs.LocalReporter())
+		var failure *netguard.Error
+		if !errors.As(err, &failure) || failure.Code != "write_failed" {
+			t.Fatal(i, res, err)
+		}
+	}
+	if searches != 1 {
+		t.Fatal("library searches:", searches)
+	}
+}
+
 // Abandon clears every download record of the episode: one moved with its
 // show folder renamed by hand, and one still at the job's path beside it (a
 // folder put back there), not only the first it finds.
