@@ -383,27 +383,32 @@ func matchTitled(m *importjob.BookMatcher, rec source.Record) (link.LibraryBook,
 
 // planUnmatched sets each unmatched title's Planned: where a backup of it
 // would go, as the import would place it now (the console shows it on the
-// title's row; used[i] is titles[i]'s record). The planner (and the library's
-// mount) is opened only when a title needs a plan, and the disk reads stop
-// with the poll.
+// title's row; used[i] is titles[i]'s record). The titles are planned together
+// (importjob.Planner.Expect: several of one new series join its first). The
+// planner (and the library's mount) is opened only when a title needs a plan,
+// and the disk reads stop with the poll.
 func (h *Handler) planUnmatched(ctx context.Context, libraryID int64, template string, books []link.LibraryBook,
 	titles []link.AudibleTitle, used []source.Record) error {
-	var planner *titlePlanner
-	defer func() {
-		if planner != nil {
-			planner.close()
-		}
-	}()
+	var todo []int
 	for i := range titles {
 		// A preorder the catalog hasn't described yet has no name to place.
-		if titles[i].Match != nil || strings.TrimSpace(used[i].Title) == "" {
-			continue
+		if titles[i].Match == nil && strings.TrimSpace(used[i].Title) != "" {
+			todo = append(todo, i)
 		}
+	}
+	if len(todo) == 0 {
+		return nil
+	}
+	planner := newTitlePlanner(libraryID, template, books, h.mappedMount(libraryID))
+	defer planner.close()
+	recs := make([]source.Record, 0, len(todo))
+	for _, i := range todo {
+		recs = append(recs, used[i])
+	}
+	planner.planner.Expect(recs)
+	for _, i := range todo {
 		if err := ctx.Err(); err != nil {
 			return err
-		}
-		if planner == nil {
-			planner = newTitlePlanner(libraryID, template, books, h.mappedMount(libraryID))
 		}
 		titles[i].Planned = planner.plan(used[i])
 	}

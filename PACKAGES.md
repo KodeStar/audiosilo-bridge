@@ -2789,7 +2789,10 @@ internal/
             params' template (no dest_path: the console's override is checked
             when the backup starts), {library_id, path (after spelled), file, kind
             series_existing|series_new|standalone (the placement's), siblings
-            (the series' books listed), state new|joins|exists|error, conflict
+            (the series' books listed; for a series the library has none of, the
+            poll's other unmatched titles of it: they are planned together,
+            Planner.Expect, the first by position series_new and the rest beside
+            it, bridge#43), state new|joins|exists|error, conflict
             (exists: file|book|audio, vacant's refusal; error: the message, path
             and file ""), template (as the params gave it)}; joins = siblings, or
             the path's top folder is a listed book's or (mapped) a folder at the
@@ -2797,7 +2800,7 @@ internal/
             reports the library mapped (writable or not) at Options.Mount's path,
             through a per-poll dirCache (each folder listed once, a folder that
             doesn't exist never read); otherwise the books listing alone (a
-            listed book's folder is exists/book). No Amazon request. Cuts a title's authors to 20 (the
+            listed book's folder, in any case, is exists/book). No Amazon request. Cuts a title's authors to 20 (the
             server refuses a whole call over more), PUTs the titles in calls of 500
             under ONE poll id (job, attempt and a random suffix), the last final (an
             empty library sends one empty final call, so the server marks every
@@ -2871,7 +2874,9 @@ internal/
             formerDirs adds the folder the destination's was under the name rule
             before bridge#47, found on disk as a name Sanitize now turns into
             the folder's, so a title backed up as "Who Moved My Cheese?" is
-            exists, not downloaded again). License (denials mapped as the title's; a title
+            exists, not downloaded again; formerFile does the same for a file at
+            the library's root ("{Title}.m4b"), and a name Windows reserves
+            ("Con", now "Con_") counts as a former name, bridge#80). License (denials mapped as the title's; a title
             only offered as a DRM-free MP3 fails drm_free: not backed up yet), download to <data>/audible/tmp/<acct>-<asin>.aaxc.part (free
             space: the tmp folder 2.2x the size less what the partial holds, the
             library 1.1x, else disk_full; a free space that can't be read is no
@@ -3018,13 +3023,16 @@ internal/
             it), SpanMismatch (a range record on a book with no
             range: no enrichment), Twins (the paths of books listed more than once:
             folded title, authors and series alike, positions by value; no
-            enrichment by words), Plan(records, {Mode, Template, Books}) (destinations
-            only, each item's RelPath, Kind (placement.Kind) and Siblings (the
-            series' books listed); Planner (NewPlanner(books), Plan(rec, mode,
-            template)) is Plan for many records over one library: AuthorFolders
-            once and the books indexed by normalized series, the same siblings in
-            the same order as SiblingsFromBooks; a template error keeps the
-            item's Kind and Siblings: siblings by tolerant author + series, AuthorFolders reusing an
+            enrichment by words), Planner (NewPlanner(books), Plan(rec, mode,
+            template): destinations only, each item's RelPath, Kind
+            (placement.Kind) and Siblings (the series' books listed), over one
+            library: AuthorFolders once and the books indexed by normalized
+            series, siblings by tolerant author + series in list order (the one
+            sibling rule; bridge#47 removed SiblingsFromBooks and the batch Plan,
+            which only tests used); Expect(recs) names a batch, so the records
+            of a series the library has none of are planned beside each other,
+            the first by position as its series' first, bridge#43; a template
+            error keeps the item's Kind and Siblings; AuthorFolders reusing an
             existing author folder spelling; the name is match.CleanTitle with
             the series as the title opens it, article included (seriesAsTitled:
             "The Orchard Cycle: Books 1-3" is "Books 1-3", not "The  - Books 1-3"); no per-record server query; whether
@@ -3041,6 +3049,11 @@ internal/
             bridge#47: Sanitize drops what an SMB share or a Windows disk can't
             store (? * < > dropped, " as ', | as -, control characters as a
             space, the spaces a drop leaves closed up).
+            bridge#80: a name Windows reserves (Reserved: CON, PRN, AUX, NUL,
+            COM0-9, LPT0-9, alone or before an extension, any case) gets an
+            underscore after its stem; a standalone title Sanitize leaves empty
+            ("???") is named by its ASIN (named); Suggest drops the book's own
+            leading position from its titles as SuggestWith does (bridge#47).
             LibriVox L6 exports Sanitize (librivoxjob names its section files
             with it; an Audible backup's file name, audible's safeFileName, is
             Sanitize too, "audiobook" when it leaves nothing).

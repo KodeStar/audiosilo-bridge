@@ -1,6 +1,7 @@
 package importjob
 
 import (
+	"cmp"
 	"path"
 	"regexp"
 	"slices"
@@ -22,44 +23,22 @@ type PlannedItem struct {
 	// Kind is how the book is placed: beside its series' books in the library
 	// (SeriesExisting), as the first of its series there (SeriesNew), or on its
 	// own (Standalone); Siblings is how many of its series' books the library
-	// has.
+	// has or, for a series it has none of, how many the same batch plans
+	// beside it (Planner.Expect).
 	Kind     placement.Kind
 	Siblings int
 }
 
-// PlanOptions configures Plan.
-type PlanOptions struct {
-	Mode     placement.Mode
-	Template string // used when Mode == placement.ModeTemplate
-	// Books is the library's books (the server's paged listing, read whole). Plan
-	// finds siblings and author folders locally in it; nil is an empty library.
-	Books []link.LibraryBook
-}
-
-// Plan computes a destination for each record against a library's books
-// (opts.Books). For series books the existing siblings anchor the placement so
-// it mirrors the established folder/shortcode convention.
-func Plan(recs []source.Record, opts PlanOptions) ([]PlannedItem, error) {
-	items := make([]PlannedItem, 0, len(recs))
-	p := NewPlanner(opts.Books)
-	for _, rec := range recs {
-		item, err := p.Plan(rec, opts.Mode, opts.Template)
-		if err != nil {
-			return nil, err
-		}
-		items = append(items, item)
-	}
-	return items, nil
-}
-
-// Planner is Plan over one library's books for many records: the author
-// folders (AuthorFolders) are found once, and the books indexed by series, so
-// a record's siblings (SiblingsFromBooks, the same books in the same order)
-// cost its series' books only. Not safe for concurrent use.
+// Planner plans records over one library's books: the author folders
+// (AuthorFolders) are found once, and the books indexed by series, so a
+// record's siblings cost its series' books only. Not safe for concurrent use.
 type Planner struct {
 	books         []link.LibraryBook
 	authorFolders map[string]string
 	bySeries      map[string][]int // match.NormalizeSeries(name) -> books in it, in order
+	// batch is what Expect named, by series the library has no book of
+	// (batchKey), in position order.
+	batch map[string][]source.Record
 }
 
 // NewPlanner indexes books (nil is an empty library).
@@ -76,7 +55,12 @@ func NewPlanner(books []link.LibraryBook) *Planner {
 	return p
 }
 
-// siblings is SiblingsFromBooks(p.books, author, series) through the index.
+// siblings are the library's books by the same author (sameAuthor) in the
+// same (tolerantly normalized) series, in list order: the books a placement
+// anchors on. It matches here rather than by exact filters, which would miss
+// "The Primal Hunter" vs "Primal Hunter", or an Audible "Shirtaloon" against a
+// tagged "Shirtaloon, Travis Deverell". A book in several series is a sibling
+// when any of them is the target. Nil for a standalone (no series).
 func (p *Planner) siblings(author, series string) []link.LibraryBook {
 	if strings.TrimSpace(series) == "" {
 		return nil
@@ -90,15 +74,84 @@ func (p *Planner) siblings(author, series string) []link.LibraryBook {
 	return out
 }
 
-// Plan is rec's destination (mode and template as PlanOptions'). A template
-// that can't place it is the error, and the item still carries rec's Kind and
-// Siblings.
+// Expect names the records about to be planned together (a poll's unmatched
+// titles): the ones of a series the library has no book of are planned beside
+// each other (bridge#43), so only the first (by position, then as given) is
+// the first of its series and the others join it, as they will once it is
+// backed up. A record needs an ASIN to be one of them.
+func (p *Planner) Expect(recs []source.Record) {
+	p.batch = map[string][]source.Record{}
+	for _, rec := range recs {
+		if rec.ASIN == "" || strings.TrimSpace(rec.Series) == "" || len(p.siblings(rec.Author, rec.Series)) > 0 {
+			continue
+		}
+		k := batchKey(rec)
+		if !slices.ContainsFunc(p.batch[k], func(o source.Record) bool { return strings.EqualFold(o.ASIN, rec.ASIN) }) {
+			p.batch[k] = append(p.batch[k], rec)
+		}
+	}
+	for k, group := range p.batch {
+		if len(group) < 2 {
+			delete(p.batch, k)
+			continue
+		}
+		slices.SortStableFunc(group, func(a, b source.Record) int {
+			switch {
+			case a.HasSequence && b.HasSequence:
+				return cmp.Compare(a.Sequence, b.Sequence)
+			case a.HasSequence:
+				return -1
+			case b.HasSequence:
+				return 1
+			}
+			return 0
+		})
+	}
+}
+
+// batchKey groups records of one author's series.
+func batchKey(rec source.Record) string {
+	return match.Normalize(rec.Author) + "\x00" + match.NormalizeSeries(rec.Series)
+}
+
+// batchSiblings are the folders the other records of rec's group (Expect) are
+// planned in, when rec is not its group's first.
+func (p *Planner) batchSiblings(rec source.Record, mode placement.Mode, template string) []placement.Sibling {
+	group := p.batch[batchKey(rec)]
+	same := func(o source.Record) bool { return strings.EqualFold(o.ASIN, rec.ASIN) }
+	if rec.ASIN == "" || len(group) == 0 || same(group[0]) || !slices.ContainsFunc(group, same) {
+		return nil
+	}
+	var out []placement.Sibling
+	for _, o := range group {
+		if same(o) {
+			continue
+		}
+		item, err := p.place(o, mode, template, nil)
+		if dir := path.Dir(item.RelPath); err == nil && item.RelPath != "" && dir != "." {
+			out = append(out, placement.Sibling{RelPath: dir, SeriesIndex: o.Sequence})
+		}
+	}
+	return out
+}
+
+// Plan is rec's destination in mode (with template for ModeTemplate). A
+// template that can't place it is the error, and the item still carries rec's
+// Kind and Siblings.
 func (p *Planner) Plan(rec source.Record, mode placement.Mode, template string) (PlannedItem, error) {
 	var siblings []placement.Sibling
 	for _, b := range p.siblings(rec.Author, rec.Series) {
 		idx, _ := SeriesPosition(b, rec.Series)
 		siblings = append(siblings, placement.Sibling{RelPath: b.Path, SeriesIndex: idx})
 	}
+	if len(siblings) == 0 {
+		siblings = p.batchSiblings(rec, mode, template)
+	}
+	return p.place(rec, mode, template, siblings)
+}
+
+// place is rec's destination beside siblings.
+func (p *Planner) place(rec source.Record, mode placement.Mode, template string, siblings []placement.Sibling) (PlannedItem, error) {
 	// Name by the clean book title - strip the series prefix and "(Book N)" /
 	// "(Unabridged)" fluff so a series book lands as "SHORTCODE## - The Ugly
 	// Truth", not "... - Diary of a Wimpy Kid: The Ugly Truth (Book 5)".

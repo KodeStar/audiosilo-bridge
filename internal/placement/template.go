@@ -23,23 +23,21 @@ const (
 // (ModeAuto, or an empty template) or by rendering a user template (ModeTemplate).
 // Template mode still resolves {SHORTCODE} and the padding width from the siblings,
 // so "match the existing convention" is available as values a template can consume.
-// Auto mode, and a template that renders the position ({Seq} or {PaddedSeq}),
-// drop the book's own position from the front of its titles first
-// (dropLeadingSequence); a template without it keeps the number in the title.
+// Auto mode (Suggest), and a template that renders the position ({Seq} or
+// {PaddedSeq}), drop the book's own position from the front of its titles
+// first (dropLeadingSequence); a template without it keeps the number in the
+// title. Either names a title Sanitize leaves empty by its ASIN (named).
 func SuggestWith(mode Mode, tmpl string, in Input) (Suggestion, error) {
-	dropSeq := func() {
-		in.Title, in.TitleShort = dropLeadingSequence(in.Title, in), dropLeadingSequence(in.TitleShort, in)
-	}
 	if mode == ModeAuto || strings.TrimSpace(tmpl) == "" {
-		dropSeq()
 		return Suggest(in), nil
 	}
 	t, err := Parse(tmpl)
 	if err != nil {
 		return Suggestion{}, err
 	}
+	in = named(in)
 	if t.uses("Seq", "PaddedSeq") {
-		dropSeq()
+		in.Title, in.TitleShort = dropLeadingSequence(in.Title, in), dropLeadingSequence(in.TitleShort, in)
 	}
 	rel, err := t.Render(varsFromInput(in))
 	if err != nil {

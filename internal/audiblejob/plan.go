@@ -17,14 +17,15 @@ import (
 // would go: the import's own Destination (no dest_path: the console's override
 // is checked when the backup starts) over the books the poll read, spelled and
 // checked as the import does when the library is mapped at the Bridge (else
-// against the books listing only). It asks Audible nothing, and reads each
-// folder of the library at most once (dirCache), only folders a plan's path
-// passes through that exist.
+// against the books listing only, its paths compared in any case). It asks
+// Audible nothing, and reads each folder of the library at most once
+// (dirCache), only folders a plan's path passes through that exist.
 type titlePlanner struct {
 	libraryID int64
 	template  string // as the poll's params gave it
 	planner   *importjob.Planner
 	books     map[string]string // bookPaths
+	folded    map[string]string // bookPaths with each path folded, for an unmapped library
 	tops      map[string]bool   // the listed books' top folders, folded
 	fsys      transfer.LibraryFS
 	root      *os.Root
@@ -43,6 +44,18 @@ func newTitlePlanner(libraryID int64, template string, books []link.LibraryBook,
 	if mount != "" {
 		if root, err := os.OpenRoot(mount); err == nil {
 			t.root, t.fsys = root, newDirCache(transfer.RootFS(root))
+		}
+	}
+	if t.fsys == nil {
+		// Without the disk, a listed book under another case is the same
+		// folder on a case-insensitive disk (an SMB share, macOS, Windows;
+		// bridge#47): the plan warns rather than says a new folder.
+		t.folded = make(map[string]string, len(books))
+		for _, b := range books {
+			k := strings.ToLower(b.Path)
+			if _, ok := t.folded[k]; !ok {
+				t.folded[k] = b.Title
+			}
 		}
 	}
 	return t
@@ -81,7 +94,7 @@ func (t *titlePlanner) plan(rec source.Record) *link.AudiblePlan {
 		}
 		p.Conflict = conflict
 	default:
-		if _, _, ok := listedBook(rel, t.books); ok {
+		if _, _, ok := listedBook(strings.ToLower(rel), t.folded); ok {
 			p.Conflict = link.ConflictBook
 		}
 	}

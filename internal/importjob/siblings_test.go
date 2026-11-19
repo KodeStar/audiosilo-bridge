@@ -42,17 +42,17 @@ func TestAuthorFoldersPicksMostCommon(t *testing.T) {
 	}
 }
 
-func TestSiblingsFromBooksTolerantSeries(t *testing.T) {
+func TestSiblingsTolerantSeries(t *testing.T) {
 	books := []link.LibraryBook{
 		{Path: "Will Wight/Cradle/C01 - Unsouled", Authors: []string{"Will Wight"}, Series: []link.SeriesRef{{Name: "Cradle", Position: "1"}}},
 		{Path: "Will Wight/Cradle/C02 - Soulsmith", Authors: []string{"Will Wight"}, Series: []link.SeriesRef{{Name: "The Cradle", Position: "2"}}},
 		{Path: "Will Wight/Elder Empire/EE01", Authors: []string{"Will Wight"}, Series: []link.SeriesRef{{Name: "Elder Empire", Position: "1"}}},
 	}
-	got := SiblingsFromBooks(books, "Will Wight", "Cradle")
+	got := NewPlanner(books).siblings("Will Wight", "Cradle")
 	if len(got) != 2 {
 		t.Fatalf("want 2 Cradle siblings (tolerant of 'The Cradle'), got %d: %+v", len(got), got)
 	}
-	if s := SiblingsFromBooks(books, "Will Wight", ""); s != nil {
+	if s := NewPlanner(books).siblings("Will Wight", ""); s != nil {
 		t.Fatalf("standalone: got %+v", s)
 	}
 	if pos, ok := SeriesPosition(got[1], "Cradle"); !ok || pos != 2 {
@@ -63,7 +63,7 @@ func TestSiblingsFromBooksTolerantSeries(t *testing.T) {
 	}
 }
 
-func TestSiblingsFromBooksMultiAuthor(t *testing.T) {
+func TestSiblingsMultiAuthor(t *testing.T) {
 	books := []link.LibraryBook{
 		{Path: "Shirtaloon/HWFWM/FWM01", Authors: []string{"Shirtaloon, Travis Deverell"}, Series: []link.SeriesRef{{Name: "He Who Fights WIth Monsters"}}},
 		{Path: "Shirtaloon/HWFWM/FWM02", Authors: []string{"Shirtaloon & Travis Deverell"}, Series: []link.SeriesRef{{Name: "He Who Fights With Monsters"}}},
@@ -71,18 +71,18 @@ func TestSiblingsFromBooksMultiAuthor(t *testing.T) {
 		{Path: "Shirtaloon/Other/O01", Authors: []string{"Shirtaloon"}, Series: []link.SeriesRef{{Name: "Other Series"}}},
 	}
 	// Allowed: the Audible record's single author is one of the credited authors.
-	got := SiblingsFromBooks(books, "Shirtaloon", "He Who Fights with Monsters")
+	got := NewPlanner(books).siblings("Shirtaloon", "He Who Fights with Monsters")
 	if len(got) != 2 || got[0].Path != "Shirtaloon/HWFWM/FWM01" || got[1].Path != "Shirtaloon/HWFWM/FWM02" {
 		t.Fatalf("multi-author siblings = %+v", got)
 	}
-	if len(SiblingsFromBooks(books, "Travis Deverell", "He Who Fights With Monsters")) != 2 {
+	if len(NewPlanner(books).siblings("Travis Deverell", "He Who Fights With Monsters")) != 2 {
 		t.Fatal("second credited author should match too")
 	}
 	// Denied: a different author in the same series, and a partial-name overlap.
-	if s := SiblingsFromBooks(books, "Jane Doe", "He Who Fights With Monsters"); len(s) != 0 {
+	if s := NewPlanner(books).siblings("Jane Doe", "He Who Fights With Monsters"); len(s) != 0 {
 		t.Fatalf("unrelated author matched: %+v", s)
 	}
-	if s := SiblingsFromBooks(books, "Travis", "He Who Fights With Monsters"); len(s) != 0 {
+	if s := NewPlanner(books).siblings("Travis", "He Who Fights With Monsters"); len(s) != 0 {
 		t.Fatalf("partial name matched: %+v", s)
 	}
 }

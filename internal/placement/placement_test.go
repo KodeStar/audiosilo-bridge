@@ -325,3 +325,71 @@ func TestSuggestWithLeadingSequence(t *testing.T) {
 		}
 	}
 }
+
+// Suggest itself drops the book's own position from its titles, as SuggestWith
+// does (bridge#47): a direct caller never gets "2.5 - 2.5 - Margins".
+func TestSuggestDropsLeadingSequence(t *testing.T) {
+	in := Input{
+		Author: "Wen Liang", Title: "2.5: Margins", TitleShort: "2.5: Margins", SeriesName: "Mapmakers",
+		Sequence: 2.5, HasSequence: true, Filename: "Margins.m4b",
+	}
+	if got := Suggest(in).RelPath; got != "Wen Liang/Mapmakers/M02.5 - Margins" {
+		t.Errorf("got %q", got)
+	}
+	// Not the book's position: kept.
+	in.Title = "3: Margins"
+	if got := Suggest(in).RelPath; got != "Wen Liang/Mapmakers/M02.5 - 3 - Margins" {
+		t.Errorf("another number: got %q", got)
+	}
+}
+
+// A title Sanitize leaves empty names its folder by the ASIN (bridge#80), in
+// Auto and in a template; a series book is named by its series, as before.
+func TestSuggestNamelessTitle(t *testing.T) {
+	in := Input{Author: "Ada Fenwick", Title: "???", TitleShort: "???", ASIN: "B0NAMELESS", Filename: "audiobook.m4b"}
+	if got := Suggest(in).FullPath(); got != "Ada Fenwick/B0NAMELESS/audiobook.m4b" {
+		t.Errorf("auto: got %q", got)
+	}
+	for tmpl, want := range map[string]string{
+		"{Author}/{Title}.m4b":                     "Ada Fenwick/B0NAMELESS.m4b",
+		"{Author}/{TitleShort}/{OriginalFilename}": "Ada Fenwick/B0NAMELESS/audiobook.m4b",
+	} {
+		sug, err := SuggestWith(ModeTemplate, tmpl, in)
+		if err != nil || sug.FullPath() != want {
+			t.Errorf("%s: got %q, %v; want %q", tmpl, sug.FullPath(), err, want)
+		}
+	}
+	series := in
+	series.SeriesName, series.Sequence, series.HasSequence = "Night Road", 3, true
+	if got := Suggest(series).RelPath; got != "Ada Fenwick/Night Road/NR03 - Night Road" {
+		t.Errorf("series: got %q", got)
+	}
+}
+
+// Windows reserves device names, alone or before an extension, in any case:
+// Sanitize gives each an underscore after its stem (bridge#80); a longer name
+// that only starts with one is left alone.
+func TestSanitizeReservedNames(t *testing.T) {
+	for in, want := range map[string]string{
+		"CON":      "CON_",
+		"con":      "con_",
+		"Nul.m4b":  "Nul_.m4b",
+		"aux .m4b": "aux_.m4b",
+		"COM1":     "COM1_",
+		"lpt9.txt": "lpt9_.txt",
+		"COM¹":     "COM¹_",
+		"PRN?":     "PRN_",
+		"Console":  "Console",
+		"COM10":    "COM10",
+		"Conan":    "Conan",
+		"Lpt":      "Lpt",
+	} {
+		if got := Sanitize(in); got != want {
+			t.Errorf("Sanitize(%q) = %q, want %q", in, got, want)
+		}
+	}
+	sug, err := SuggestWith(ModeTemplate, "{Author}/{Title}/{Title}.m4b", Input{Author: "Aux", Title: "Con"})
+	if err != nil || sug.FullPath() != "Aux_/Con_/Con_.m4b" {
+		t.Errorf("template: %q, %v", sug.FullPath(), err)
+	}
+}
