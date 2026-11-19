@@ -35,9 +35,13 @@ func (r *Runner) handle(ctx context.Context, job *os.Root) {
 	}()
 	touch(job, agentproto.HeartbeatFile)
 	exit := r.execute(ctx, job, id)
-	if r.opts.EndpointOnly {
+	if r.opts.EndpointOnly && ctx.Err() == nil {
 		// The run's processes are gone (spawn's sweep): what it planted
-		// goes before the Bridge reads its output.
+		// goes before the Bridge reads its output. The walk may wait behind
+		// a tick's on a slow mount, so the heartbeat is fresh first (the
+		// Bridge's stale limit); a stopping service leaves it to the next
+		// start's sweep (Run), so exit.json lands within the stop's grace.
+		touch(job, agentproto.HeartbeatFile)
 		r.sweepRunFiles()
 	}
 	r.log.Info("agent runner: job finished", "job", id, "exit_code", exit.ExitCode,
