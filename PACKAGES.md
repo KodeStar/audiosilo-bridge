@@ -2237,9 +2237,13 @@ internal/
             of: nil while the server holds it, ErrStopped when the answer (a
             cancel, a lost claim) ended it. A reply
             with cancel_requested, or a 409 not_held with reason "cancelled"
-            (link.ErrCancelledHere, bridge#35: any cancel of a claimed job, an
-            admin's of a parked one, which ends at once, among them), ends its context (errCancelRequested -> reported
-            cancelled), any other 409 ends it as lost (nothing more sent). A parked
+            (link.ErrCancelledHere, bridge#35: any cancel that ended the job with no
+            later claim, an admin's or the server's own, a parked one's at once among
+            them, server bridge.cancelledUnder), ends its context (errCancelRequested -> reported
+            cancelled; the cause says by whom when the answer does, bridge#80:
+            cancel_requested with the server's reason as the job's error is the server's
+            ("the server cancelled the job: <reason>"), with none an admin's, the 409 says
+            neither, the page's own Cancel says so), any other 409 ends it as lost (nothing more sent). A parked
             report carries the park's message for people in progress park.message
             (withParkMessage: the job's park message without the "<code>: " an
             engine message leads with; bridge#28), which the page shows; a 401 is handed to

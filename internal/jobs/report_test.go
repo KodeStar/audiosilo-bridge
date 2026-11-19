@@ -188,3 +188,39 @@ func TestCancelContextReadsAsAnAdminsCancel(t *testing.T) {
 		t.Fatal("a stop resumes at the next start")
 	}
 }
+
+// A cancel's cause says by whom when the server's answer does (bridge#80): a
+// cancel_requested with the server's own reason as the job's error is the
+// server's, one with none an admin's, and a 409 not_held "cancelled" (sent
+// for both) says neither. Every one reads as a cancel: Resumes false.
+func TestCancelCauseWordsTheServersReason(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		got  *link.Job
+		err  error
+		want string
+	}{
+		{"the server's", &link.Job{CancelRequested: true, Error: "the Audible account was removed"}, nil,
+			"the server cancelled the job: the Audible account was removed"},
+		{"an admin's", &link.Job{CancelRequested: true}, nil, "an admin cancelled the job"},
+		{"either", nil, link.ErrCancelledHere, "the job was cancelled"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			stop := (&Reporter{}).answer(c.got, c.err)
+			if stop == nil || !errors.Is(stop, errCancelRequested) || stop.Error() != c.want {
+				t.Fatalf("cause = %v, want %q", stop, c.want)
+			}
+			ctx, cancel := context.WithCancelCause(context.Background())
+			cancel(stop)
+			if Resumes(ctx) || Lost(ctx) {
+				t.Fatal("a cancel resumes or reads as lost")
+			}
+		})
+	}
+	if stop := (&Reporter{}).answer(&link.Job{Error: "a park's message"}, nil); stop != nil {
+		t.Fatalf("an error with no cancel asked = %v", stop)
+	}
+	if !errors.Is(cancelledHere, errCancelRequested) {
+		t.Fatal("a cancel on the Bridge's page isn't a cancel")
+	}
+}

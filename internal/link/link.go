@@ -54,15 +54,19 @@ type Job struct {
 	Result    json.RawMessage `json:"result"`
 	Error     string          `json:"error"`
 	// RequestedBy is the admin who queued the job, nil once they are deleted.
-	RequestedBy     *Requester `json:"requested_by"`
-	Priority        int        `json:"priority"`
-	Attempts        int        `json:"attempts"`
-	LeaseUntil      *string    `json:"lease_until"`
-	CancelRequested bool       `json:"cancel_requested"`
-	CreatedAt       string     `json:"created_at"`
-	UpdatedAt       string     `json:"updated_at"`
-	ClaimedAt       *string    `json:"claimed_at"`
-	FinishedAt      *string    `json:"finished_at"`
+	RequestedBy *Requester `json:"requested_by"`
+	Priority    int        `json:"priority"`
+	Attempts    int        `json:"attempts"`
+	LeaseUntil  *string    `json:"lease_until"`
+	// CancelRequested asks the Bridge to stop the job: an admin's cancel, or
+	// the server's own (its module turned off, an Audible account removed,
+	// paused or its sync turned off, a newer request), whose reason the server
+	// then keeps as Error while the job runs (jobs words the cancel by it).
+	CancelRequested bool    `json:"cancel_requested"`
+	CreatedAt       string  `json:"created_at"`
+	UpdatedAt       string  `json:"updated_at"`
+	ClaimedAt       *string `json:"claimed_at"`
+	FinishedAt      *string `json:"finished_at"`
 	// ShareOff tells the Bridge to keep the job's results local, filing nothing
 	// to the community: the server's Contributions module is off while a
 	// sidecars.generate job with contribute "issue" runs (server#218). On the
@@ -354,13 +358,16 @@ var (
 	// ErrNotHeld is a job update's 409: the claim no longer holds the job (it
 	// finished, was cancelled, or its lease ran out and it was claimed again).
 	ErrNotHeld = errors.New("the job is no longer held by this claim")
-	// ErrCancelledHere is ErrNotHeld for a job cancelled after this claim took
-	// it (the 409 not_held's reason "cancelled", bridge#35). The server sends
-	// it for any cancel of a claimed job: an admin's, parked (which ends the
-	// job at once) or working, the server's own, a move of its book, and a
-	// lease that ran out after a cancel was asked. errors.Is reads it as
-	// ErrNotHeld too; an older server never sends it, and its jobs read as
-	// lost as before.
+	// ErrCancelledHere is ErrNotHeld for a job that ended cancelled with no
+	// later claim than this one (the 409 not_held's reason "cancelled",
+	// bridge#35). The server sends it for any such cancel: an admin's or its
+	// own (which never says which), of a parked job (which ends at once) or a
+	// working one, a move of its book onto another open job, a lease that ran
+	// out after a cancel was asked, a job this claim lost to a lapsed lease and
+	// that was cancelled while queued again, and one whose claim the server
+	// released as undelivered though the Bridge read it, cancelled then or
+	// while queued again (bridge#80). errors.Is reads it as ErrNotHeld too; an
+	// older server never sends it, and its jobs read as lost as before.
 	ErrCancelledHere = fmt.Errorf("%w: it was cancelled", ErrNotHeld)
 	// ErrNoBook is the book lookup's 404 no_book.
 	ErrNoBook   = errors.New("no indexed book there")

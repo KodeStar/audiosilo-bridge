@@ -1,7 +1,8 @@
 // Package jobs is the Bridge's generic job runner (BRIDGE-PLAN.md Phase 0). It
 // long-polls the server for jobs of the kinds it has room for, runs each with
 // the kind's Handler in that kind's lane, reports progress (which renews the
-// server's lease and carries an admin's cancel back), and reports the end.
+// server's lease and carries a cancel back, an admin's or the server's own),
+// and reports the end.
 //
 // Its own server_jobs rows (internal/store) are the execution truth: a job
 // still running when the Bridge starts again is resumed under the same claim,
@@ -58,9 +59,10 @@ type Handler interface {
 	Kind() string
 	// Lane is the lane the kind runs in (LaneLight, ...).
 	Lane() string
-	// Run does the job. Its ctx ends when an admin cancels it, the server takes
-	// it back or the Bridge stops; result may be returned beside an error (a
-	// verify that found a mismatch). Return a *ParkError to park the job.
+	// Run does the job. Its ctx ends when it is cancelled (by an admin or the
+	// server itself), the server takes it back or the Bridge stops; result
+	// may be returned beside an error (a verify that found a mismatch). Return
+	// a *ParkError to park the job.
 	Run(ctx context.Context, job Job, rep *Reporter) (result any, err error)
 }
 
@@ -134,13 +136,42 @@ type Store interface {
 	PruneServerJobs(ctx context.Context, keep int) (int64, error)
 }
 
-// Why a running job's context ended.
+// Why a running job's context ended. errCancelRequested is any cancel (a
+// cancelled cause says by whom when it is known; errors.Is reads every one as
+// it): the server's 409 not_held with reason "cancelled" doesn't say, and is
+// sent for the server's own cancels as for an admin's (bridge#80).
 var (
-	errCancelRequested = errors.New("an admin cancelled the job")
+	errCancelRequested = errors.New("the job was cancelled")
 	errLost            = errors.New("the server no longer holds the job for this claim")
 	errStopping        = errors.New("the Bridge is stopping")
 	errUnpaired        = errors.New("the server refused the Bridge's token")
 )
+
+// cancelled is a cancel that says by whom (errors.Is errCancelRequested).
+type cancelled string
+
+func (c cancelled) Error() string { return string(c) }
+
+func (c cancelled) Is(target error) bool { return target == errCancelRequested }
+
+// The cancels that say by whom: an admin's on the server (cancel_requested
+// with no reason), and one on the Bridge's own page (Runner.Cancel).
+const (
+	cancelledByAdmin = cancelled("an admin cancelled the job")
+	cancelledHere    = cancelled("the job was cancelled on the Bridge's page")
+)
+
+// cancelCause is the cause of a cancel the server asked for in its answer
+// (cancel_requested): the server's own reason when it recorded one as the
+// job's error (its module turned off, an Audible account removed or its sync
+// turned off: the Bridge's reports carry no error while the job runs, so any
+// is the server's), else an admin's.
+func cancelCause(reason string) error {
+	if reason != "" {
+		return cancelled("the server cancelled the job: " + reason)
+	}
+	return cancelledByAdmin
+}
 
 // Abandoner is a Handler whose jobs hold work beyond Run (sidecars.generate: an
 // engine book). The runner calls Abandon when it ends such a job without running
@@ -184,8 +215,9 @@ func Lost(ctx context.Context) bool {
 
 // Resumes reports whether a job whose context ended will run again under its
 // claim: the Bridge is stopping (the next start resumes it) or the server refused
-// the token (resumed once a link works again). False when an admin cancelled it
-// or the server took it back, which end it here for good.
+// the token (resumed once a link works again). False when it was cancelled (by
+// an admin or the server itself) or the server took it back, which end it here
+// for good.
 func Resumes(ctx context.Context) bool {
 	cause := context.Cause(ctx)
 	return !errors.Is(cause, errCancelRequested) && !errors.Is(cause, errLost)
@@ -777,6 +809,7 @@ func (r *Runner) settle(base context.Context, srv Server, ru *run, rep *Reporter
 			r.log.Warn("bridge: recording a job failed", "job", job.ID, "err", ferr)
 		}
 	case errors.Is(err, errCancelRequested):
+		r.log.Info("bridge: a job was cancelled", "job", job.ID, "kind", job.Kind, "why", err)
 		r.finish(base, srv, job, store.JobCancelled, progress, raw, "")
 	case err == nil:
 		r.finish(base, srv, job, store.JobDone, progress, raw, "")
@@ -897,7 +930,7 @@ func (r *Runner) Cancel(id int64) bool {
 	defer r.mu.Unlock()
 	ru, ok := r.running[id]
 	if ok {
-		ru.cancel(errCancelRequested)
+		ru.cancel(cancelledHere)
 	}
 	return ok
 }
@@ -1468,8 +1501,12 @@ func (p *Reporter) answer(got *link.Job, err error) (stop error) {
 		p.mu.Unlock()
 	}
 	switch {
-	case err == nil && got.CancelRequested, errors.Is(err, link.ErrCancelledHere):
-		// A cancel, asked for or already done on the server (ErrCancelledHere).
+	case err == nil && got.CancelRequested:
+		// A cancel asked for: by whom, from the job's error (cancelCause).
+		return cancelCause(got.Error)
+	case errors.Is(err, link.ErrCancelledHere):
+		// Already cancelled on the server, by an admin or by the server
+		// itself: its answer doesn't say which.
 		return errCancelRequested
 	case errors.Is(err, link.ErrNotHeld):
 		return errLost
