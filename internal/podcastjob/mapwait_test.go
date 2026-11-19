@@ -232,7 +232,8 @@ func TestAFetchWaitingForItsFolderSaysSo(t *testing.T) {
 	}
 }
 
-// Once the folder answers, a wait reports again the step it interrupted.
+// Once the folder answers, a wait reports again the step it interrupted, but
+// never a wait it was at before (the library's), which is over.
 func TestAWaitReportsTheStepItInterruptedAgain(t *testing.T) {
 	requireProbe(t)
 	h, job := audioHarness(t)
@@ -240,26 +241,34 @@ func TestAWaitReportsTheStepItInterruptedAgain(t *testing.T) {
 	s.o.CheckPoll = 2 * time.Millisecond
 	lib, _ := s.o.Libraries.Library(*job.LibraryID)
 	saving := jobs.Progress{Step: "writing", Message: "Saving the episode"}
-	rep := jobs.LocalReporter()
-	rep.Progress(saving)
-	var slow atomic.Bool
-	slow.Store(true)
-	var seen atomic.Value
-	s.o.WriteProbe = func(dir string) error {
-		if slow.CompareAndSwap(true, false) {
-			return &fs.PathError{Op: "probe", Path: dir, Err: fsutil.ErrStatTimeout}
+	for _, tc := range []struct {
+		at    jobs.Progress
+		again bool
+	}{
+		{saving, true},
+		{waitingFor(errMappingUnknown), false},
+	} {
+		rep := jobs.LocalReporter()
+		rep.Progress(tc.at)
+		var slow atomic.Bool
+		slow.Store(true)
+		var seen atomic.Value
+		s.o.WriteProbe = func(dir string) error {
+			if slow.CompareAndSwap(true, false) {
+				return &fs.PathError{Op: "probe", Path: dir, Err: fsutil.ErrStatTimeout}
+			}
+			seen.Store(rep.Last())
+			return mapping.ProbeWritable(dir)
 		}
-		seen.Store(rep.Last())
-		return mapping.ProbeWritable(dir)
-	}
-	if err := s.awaitWrite(context.Background(), rep, lib, h.mount, "Fixture Show"); err != nil {
-		t.Fatal(err)
-	}
-	if p, _ := seen.Load().(jobs.Progress); p.Step != "waiting" {
-		t.Fatalf("the look after a slow one saw %+v; want the wait reported", p)
-	}
-	if p := rep.Last(); p.Step != saving.Step || p.Message != saving.Message {
-		t.Fatalf("after the wait the fetch reports %+v; want %+v", p, saving)
+		if err := s.awaitWrite(context.Background(), rep, lib, h.mount, "Fixture Show"); err != nil {
+			t.Fatal(err)
+		}
+		if p, _ := seen.Load().(jobs.Progress); p.Step != "waiting" {
+			t.Fatalf("at %+v: the look after a slow one saw %+v; want the wait reported", tc.at, p)
+		}
+		if p := rep.Last(); (p.Step == tc.at.Step && p.Message == tc.at.Message) != tc.again {
+			t.Fatalf("at %+v: after the wait the fetch reports %+v; reported again: want %v", tc.at, p, tc.again)
+		}
 	}
 }
 

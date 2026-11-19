@@ -499,7 +499,9 @@ func (s *service) awaitWrite(ctx context.Context, slot *jobs.Reporter, lib link.
 			return err
 		}
 		if !slot.Yielded() {
-			if was.Step != "" {
+			// A wait it was at (the library's, fetchLibrary's) is over: it
+			// isn't reported again.
+			if was.Step != "" && was.Step != "waiting" {
 				slot.Progress(was) // the same progress again is no change (Reporter.Progress)
 			}
 			return nil
