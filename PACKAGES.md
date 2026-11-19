@@ -2453,9 +2453,10 @@ internal/
             back by hand after a take-in) reads its episode again there rather
             than failing as not found. A fetch whose folder is renamed while it
             downloads finds the show again (episodeAt) whenever its partial is
-            no longer at its path (settle: before each host attempt, before a
-            retry's clear and at a failure's exit, so a host retry resumes from
-            the partial there and a failure clears it there) and after the
+            no longer at its path, or with no partial yet its folder is gone
+            (settle: before each host attempt, before a retry's clear and at a
+            failure's exit, so a host retry resumes from the partial there, or
+            makes its first one there, and a failure clears it there) and after the
             download, and publishes there from its partial, its record and lock
             following (heldLock.follow), never downloading again. Under the
             episode's lock its own record moves even when a duplicate claim's

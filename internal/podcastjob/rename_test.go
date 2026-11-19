@@ -1219,6 +1219,41 @@ func TestAdoptOwnClearsAnOldRecordPastANewOne(t *testing.T) {
 	}
 }
 
+// A show folder renamed by hand while the fetch waits to retry a host that
+// failed before any audio arrived (no partial yet): the retry finds the show
+// where it is now and makes its partial there, rather than fail in the folder
+// that is gone.
+func TestAFetchRenamedBeforeItsFirstBytesRetriesThere(t *testing.T) {
+	requireProbe(t)
+	h, job := audioHarness(t)
+	h.scan.knows = func(p string) bool { return strings.HasPrefix(p, "Fixture Show/") }
+	audio := data(t, "chap-v24-reverse.mp3")
+	var calls atomic.Int32
+	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			if err := os.Rename(filepath.Join(h.mount, "Fixture Show"), filepath.Join(h.mount, "Renamed Show")); err != nil {
+				t.Error(err)
+			}
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("ETag", `"one"`)
+		w.Write(audio)
+	})
+	res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+	moved := "Renamed Show/" + strings.TrimPrefix(*job.Path, "Fixture Show/")
+	if got, ok := res.(fetchResult); err != nil || !ok || got.Path != moved || got.Fetch.Bytes != int64(len(audio)) || calls.Load() != 2 {
+		t.Fatal(res, err, calls.Load())
+	}
+	if _, err := os.Lstat(filepath.Join(h.mount, "Fixture Show")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the old folder came back", err)
+	}
+	if left := partials(filepath.Join(h.mount, "Renamed Show")); len(left) != 0 {
+		t.Fatal("a partial was left behind", left)
+	}
+	noRecords(t, h.handler.s)
+}
+
 // An episode already fetched whose show folder was renamed by hand since is
 // taken as it is (reuse), and the server, which knows it only at the old
 // path, is asked to index the folder; one that never moved is indexed by its
