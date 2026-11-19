@@ -135,3 +135,73 @@ func ReadDirNWithin(path string, n int, d time.Duration) ([]fs.DirEntry, error) 
 		return entries, err
 	})
 }
+
+// change is one ChangeWithin call out: done is closed once val and err hold
+// its answer (finished). waiting counts the callers still waiting for it; one
+// that gives up leaves the count, so a change that finishes with none left has
+// nobody to hand its answer to.
+type change struct {
+	done     chan struct{}
+	started  time.Time
+	waiting  int
+	finished bool
+	val      any
+	err      error
+}
+
+var (
+	changesMu sync.Mutex
+	changes   = map[string]*change{}
+)
+
+// ChangeWithin is LookWithin for a look that changes what it looks at (a
+// mapping check's podcast marker, written for the server to read back): bounded
+// by d, ErrStatTimeout past it, and one out per op and path, a later call
+// waiting on it for what is left of d. Unlike a look, a change may leave
+// something behind, so its answer is handed to every caller still waiting when
+// it finishes, and when none is (every caller gave up past d, so nobody will
+// ever clean up after it), undo gets it in the change's own goroutine.
+func ChangeWithin[T any](op, path string, d time.Duration, do func(string) (T, error), undo func(T, error)) (T, error) {
+	key := op + "\x00" + path
+	changesMu.Lock()
+	c, ok := changes[key]
+	if !ok {
+		c = &change{done: make(chan struct{}), started: time.Now()}
+		changes[key] = c
+		go func() {
+			val, err := do(path)
+			changesMu.Lock()
+			c.val, c.err, c.finished = val, err, true
+			delete(changes, key)
+			orphan := c.waiting == 0
+			close(c.done)
+			changesMu.Unlock()
+			if orphan && undo != nil {
+				undo(val, err)
+			}
+		}()
+	}
+	c.waiting++
+	changesMu.Unlock()
+	answer := func() (T, error) {
+		t, _ := c.val.(T)
+		return t, c.err
+	}
+	t := time.NewTimer(d - time.Since(c.started))
+	defer t.Stop()
+	select {
+	case <-c.done:
+		return answer()
+	case <-t.C:
+	}
+	changesMu.Lock()
+	defer changesMu.Unlock()
+	if c.finished {
+		// It finished as the bound ran out: this caller still counted, so the
+		// change handed its answer here rather than to undo.
+		return answer()
+	}
+	c.waiting--
+	var zero T
+	return zero, &fs.PathError{Op: op, Path: path, Err: ErrStatTimeout}
+}

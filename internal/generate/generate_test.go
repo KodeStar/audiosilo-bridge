@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -22,8 +23,10 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/audio"
 	"github.com/kodestar/audiosilo-bridge/internal/contrib"
 	"github.com/kodestar/audiosilo-bridge/internal/events"
+	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
+	"github.com/kodestar/audiosilo-bridge/internal/mapping"
 	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
@@ -735,6 +738,60 @@ func TestGenerateLibraryNotWritable(t *testing.T) {
 	defer stop()
 	hr.waitFor("failed", func() bool { s, _ := hr.srv.final(27); return s == link.StateFailed })
 	if _, final := hr.srv.final(27); final.Error == nil || !strings.Contains(*final.Error, "read-only") {
+		t.Fatalf("error = %v", final.Error)
+	}
+}
+
+// A comparison or a write probe the library's folder doesn't answer within
+// mapping.LookTimeout (an array disk spinning up) says nothing about the copy:
+// the job looks again rather than failing or parking, and goes on once the
+// folder answers. Denied: a comparison the folder answers with another size
+// still fails the job.
+func TestGenerateWaitsForASlowFolder(t *testing.T) {
+	t.Parallel()
+	slow := func(op, path string) error {
+		return &fs.PathError{Op: op, Path: path, Err: fsutil.ErrStatTimeout}
+	}
+	hr := newHarness(t)
+	var compares, probes atomic.Int32
+	hr.h.compare = func(mount string, files []link.BookFile) ([]mapping.FileCheck, bool, string, error) {
+		if compares.Add(1) <= 2 {
+			return nil, false, "Author/Book/01.mp3: not answering", slow("stat", mount)
+		}
+		return mapping.CompareFiles(mount, files)
+	}
+	hr.h.probe = func(dir string) error {
+		if probes.Add(1) <= 2 {
+			return slow("probe", dir)
+		}
+		return mapping.ProbeWritable(dir)
+	}
+	hr.srv.add(98, "Author/Book", `{}`)
+	stop := hr.runner(hr.h)
+	hr.waitFor("the engine's book once the folder answered", func() bool {
+		_, err := hr.db.GetGenerateBook(context.Background(), 98)
+		return err == nil
+	})
+	stop()
+	if _, final := hr.srv.final(98); final.Error != nil && *final.Error != "" {
+		t.Fatalf("a slow folder failed the job: %s", *final.Error)
+	}
+	if hr.srv.saw(98, func(u link.Update, p map[string]any) bool { return p["park"] != nil }) {
+		t.Fatal("a slow folder parked the job")
+	}
+	if compares.Load() < 3 || probes.Load() < 3 {
+		t.Fatalf("looked %d and %d times, want the slow looks tried again", compares.Load(), probes.Load())
+	}
+
+	hr = newHarness(t)
+	hr.h.compare = func(mount string, files []link.BookFile) ([]mapping.FileCheck, bool, string, error) {
+		return nil, false, "Author/Book/01.mp3: size differs", nil
+	}
+	hr.srv.add(99, "Author/Book", `{}`)
+	stop = hr.runner(hr.h)
+	defer stop()
+	hr.waitFor("failed", func() bool { s, _ := hr.srv.final(99); return s == link.StateFailed })
+	if _, final := hr.srv.final(99); final.Error == nil || !strings.Contains(*final.Error, "doesn't match the server's") {
 		t.Fatalf("error = %v", final.Error)
 	}
 }

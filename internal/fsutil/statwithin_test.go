@@ -185,3 +185,54 @@ func TestLookWithin(t *testing.T) {
 		t.Fatalf("another op at the hung path = %v, want its own answer", err)
 	}
 }
+
+// ChangeWithin answers as its change does; one a hung mount holds past the
+// bound is ErrStatTimeout, a second ask waiting on the change already out, and
+// a change that finishes once every caller gave up is undone (nobody else
+// will), while one a caller took is not.
+func TestChangeWithin(t *testing.T) {
+	t.Parallel()
+	const path = "/hung/mount/podcasts"
+	undone := make(chan int, 2)
+	undo := func(n int, _ error) { undone <- n }
+	if n, err := ChangeWithin("answers", path, 5*time.Second, func(string) (int, error) { return 7, nil }, undo); n != 7 || err != nil {
+		t.Fatalf("an answered change = %v, %v", n, err)
+	}
+	release := make(chan struct{})
+	var started atomic.Int32
+	hung := func(string) (int, error) {
+		started.Add(1)
+		<-release
+		return 9, nil
+	}
+	for range 3 {
+		_, err := ChangeWithin("marker", path, 10*time.Millisecond, hung, undo)
+		var pe *fs.PathError
+		if !errors.Is(err, ErrStatTimeout) || !errors.As(err, &pe) || pe.Path != path || pe.Op != "marker" {
+			t.Fatalf("a hung change = %v, want marker's ErrStatTimeout at %s", err, path)
+		}
+	}
+	if n := started.Load(); n != 1 {
+		t.Fatalf("%d changes of the hung path started, want 1", n)
+	}
+	select {
+	case n := <-undone:
+		t.Fatalf("undid %d before the change finished", n)
+	default:
+	}
+	close(release)
+	select {
+	case n := <-undone:
+		if n != 9 {
+			t.Fatalf("undid %d, want the hung change's own answer", n)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a change nobody waited for any more was not undone")
+	}
+	// The answered change (taken by its caller) was never undone.
+	select {
+	case n := <-undone:
+		t.Fatalf("undid a change a caller took (%d)", n)
+	case <-time.After(50 * time.Millisecond):
+	}
+}

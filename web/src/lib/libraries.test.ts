@@ -18,6 +18,11 @@ describe('libraries', () => {
     expect(checkBadges(libraryFixture({ unknown: true })).map((b) => b.label)).toEqual([
       'Waiting for the server',
     ]);
+    const slow = libraryFixture({ unknown: true, slow_at: '2026-11-19T10:00:00Z' });
+    expect(checkBadges(slow).map((b) => b.label)).toEqual(['Waiting for the folder']);
+    // A slow look that kept the earlier result badges that result.
+    const kept = libraryFixture({ slow_at: '2026-11-19T10:00:00Z' });
+    expect(checkBadges(kept).map((b) => b.label)).toEqual(['Mapped', 'Read only']);
   });
   it('wants an absolute path or nothing', () => {
     expect(checkMountPath('')).toBeNull();

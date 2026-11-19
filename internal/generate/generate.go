@@ -162,6 +162,10 @@ type Handler struct {
 	// unusableFor is how long a book read keeps asking through answers that
 	// can't be used (mapping.BookReadBudget; shorter in tests).
 	unusableFor time.Duration
+	// compare and probe, seams (tests), are mapping.CompareFiles and
+	// mapping.ProbeWritable, each bounded by mapping.LookTimeout.
+	compare func(mount string, files []link.BookFile) ([]mapping.FileCheck, bool, string, error)
+	probe   func(dir string) error
 }
 
 // endSignal is the channel the next job end here closes. A waiter takes it
@@ -226,7 +230,8 @@ func New(o Options) *Handler {
 		o.ContribCredential = func(context.Context) error { return nil }
 	}
 	return &Handler{o: o, pokes: map[int64]runHandle{}, loopParks: map[int64]loopPark{},
-		woken: map[state.ParkCode]uint64{}, unusableFor: mapping.BookReadBudget}
+		woken: map[state.ParkCode]uint64{}, unusableFor: mapping.BookReadBudget,
+		compare: mapping.CompareFiles, probe: mapping.ProbeWritable}
 }
 
 // loopPark is a park a run waits on in its own loop (loopParks): its code, and
@@ -1094,8 +1099,8 @@ func (h *Handler) prepare(ctx context.Context, r *run, strict bool) error {
 	if book.Path != "" {
 		r.rel = book.Path
 	}
-	if _, ok, problem := mapping.CompareFiles(r.mount, book.Files); !ok {
-		return errors.New("the Bridge's copy of the book doesn't match the server's: " + problem)
+	if err := h.compareFiles(ctx, r, book.Files); err != nil {
+		return err
 	}
 	p, err := locate(r.mount, r.rel)
 	if err != nil {
@@ -1103,6 +1108,36 @@ func (h *Handler) prepare(ctx context.Context, r *run, strict bool) error {
 	}
 	r.place = p
 	return h.waitWritable(ctx, r)
+}
+
+// compareFiles compares the book's files through the mount with the server's,
+// looking again every Poll (or on a Retry) while a stat gets no answer within
+// mapping.LookTimeout (a disk spinning up, a mount that hangs): that says
+// nothing about the copy, so only a comparison the folder answered fails the
+// job.
+func (h *Handler) compareFiles(ctx context.Context, r *run, files []link.BookFile) error {
+	for {
+		_, ok, problem, timeout := h.compare(r.mount, files)
+		switch {
+		case ok:
+			return nil
+		case timeout == nil:
+			return errors.New("the Bridge's copy of the book doesn't match the server's: " + problem)
+		}
+		h.folderWait(r, "Waiting for the library's folder to answer")
+		if err := h.recheckWait(ctx, r, time.Now().Add(h.o.Poll)); err != nil {
+			return err
+		}
+	}
+}
+
+// folderWait reports a wait for a folder that didn't answer a look in time,
+// unless the job is parked on a reason of the Bridge's own (its message
+// stays).
+func (h *Handler) folderWait(r *run, msg string) {
+	if !r.ownPark {
+		r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: msg})
+	}
 }
 
 // serverLibrary sets the run's server and the job's library as the server
@@ -1206,12 +1241,21 @@ func (h *Handler) waitMapped(ctx context.Context, r *run, strict bool) error {
 // waitWritable checks the book's own folder can be written (a library root that
 // is writable says nothing about a 0555 book folder, spike 3), parking
 // book_not_writable and checking again every Recheck (or on Retry) until it can.
+// A probe the folder didn't answer within mapping.LookTimeout says nothing
+// either way: it is tried again every Poll (or on a Retry), without a park.
 func (h *Handler) waitWritable(ctx context.Context, r *run) error {
 	for {
-		err := mapping.ProbeWritable(r.place.dir)
+		err := h.probe(r.place.dir)
 		if err == nil {
 			r.unparkOwn()
 			return nil
+		}
+		if errors.Is(err, fsutil.ErrStatTimeout) {
+			h.folderWait(r, "Waiting for the book's folder to answer")
+			if err := h.recheckWait(ctx, r, time.Now().Add(h.o.Poll)); err != nil {
+				return err
+			}
+			continue
 		}
 		h.park(r, parkBookNotWritable, "the Bridge can't write in the book's folder ("+writeProblem(err)+")")
 		if err := h.recheckWait(ctx, r, time.Now().Add(h.o.Recheck)); err != nil {

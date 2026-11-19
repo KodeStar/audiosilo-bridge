@@ -12,10 +12,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/mapping"
@@ -53,6 +53,10 @@ type Handler struct {
 	// (bookRetryFirst, bookRetryFor; shorter in tests).
 	retryFirst, retryFor time.Duration
 	log                  *slog.Logger
+	// compare and probe are mapping.CompareFiles and mapping.ProbeWritable (a
+	// test makes one time out).
+	compare func(mount string, files []link.BookFile) ([]mapping.FileCheck, bool, string, error)
+	probe   func(dir string) error
 }
 
 // New returns the handler. books returns the server link (nil while unpaired);
@@ -61,7 +65,8 @@ func New(libs Libraries, mount mapping.MountFunc, books func() mapping.BookSourc
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Handler{libs: libs, mount: mount, books: books, retryFirst: bookRetryFirst, retryFor: bookRetryFor, log: log}
+	return &Handler{libs: libs, mount: mount, books: books, retryFirst: bookRetryFirst, retryFor: bookRetryFor, log: log,
+		compare: mapping.CompareFiles, probe: mapping.ProbeWritable}
 }
 
 // Kind is bridge.verify.
@@ -122,15 +127,30 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	}
 	res := Result{LibraryID: lib.ID, MountPath: mount, Path: book.Path}
 	rep.Progress(jobs.Progress{Step: "stat", Message: "Comparing the files", Total: len(book.Files)})
-	checks, ok, problem := mapping.CompareFiles(mount, book.Files)
+	var checks []mapping.FileCheck
+	var problem string
+	_ = h.whileSlow(ctx, job.ID, func() error {
+		var timeout error
+		checks, ok, problem, timeout = h.compare(mount, book.Files)
+		return timeout
+	})
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	res.Files = checks
 	rep.Progress(jobs.Progress{Step: "stat", Message: "Compared the files", Done: len(checks), Total: len(book.Files)})
 
 	if ok {
 		rep.Progress(jobs.Progress{Step: "writable", Message: "Checking the book's folder can be written"})
-		dir, derr := bookFolder(mount, book)
-		if derr == nil {
-			derr = mapping.ProbeWritable(dir)
+		derr := h.whileSlow(ctx, job.ID, func() error {
+			dir, err := bookFolder(mount, book)
+			if err == nil {
+				err = h.probe(dir)
+			}
+			return err
+		})
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
 		res.Writable = derr == nil
 		if derr != nil {
@@ -180,15 +200,40 @@ func (h *Handler) fetchBook(ctx context.Context, jobID int64, rep *jobs.Reporter
 	}
 }
 
+// whileSlow runs look again while the library's folder gives it no answer
+// within mapping.LookTimeout (fsutil.ErrStatTimeout: a disk spinning up, a
+// mount that hangs), which says nothing about the copy, backing off as
+// fetchBook does within retryFor (the last look at its end): the verify fails
+// on a slow folder only once that is spent. It returns look's last error, or
+// ctx's.
+func (h *Handler) whileSlow(ctx context.Context, jobID int64, look func() error) error {
+	deadline := time.Now().Add(h.retryFor)
+	wait := h.retryFirst
+	for {
+		err := look()
+		left := time.Until(deadline)
+		if !errors.Is(err, fsutil.ErrStatTimeout) || left <= 0 {
+			return err
+		}
+		h.log.Warn("verify: the library's folder didn't answer in time; looking again", "job", jobID, "err", err)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(min(wait, left)):
+		}
+		wait = min(wait*2, bookRetryMax)
+	}
+}
+
 // bookFolder is the folder a book's files are in through the mount: the
 // book's own folder for a folder book, the folder holding it for a single
-// file.
+// file. Its stat is bounded by mapping.LookTimeout.
 func bookFolder(mount string, book *link.Book) (string, error) {
 	full, err := mapping.SafeJoin(mount, book.Path)
 	if err != nil {
 		return "", err
 	}
-	info, err := os.Stat(full)
+	info, err := fsutil.StatWithin(full, mapping.LookTimeout)
 	if err != nil {
 		return "", err
 	}

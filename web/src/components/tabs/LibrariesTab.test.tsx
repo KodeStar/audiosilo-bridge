@@ -86,6 +86,31 @@ describe('LibrariesTab', () => {
     expect(screen.queryByText('Not mapped')).not.toBeInTheDocument();
   });
 
+  it('says when the folder did not answer in time', async () => {
+    const kept = libraryFixture({ slow_at: new Date(Date.now() - 120_000).toISOString() });
+    const waiting = libraryFixture({
+      library: { id: 2, name: 'More books', root: '/more', kind: 'books' },
+      slow_at: new Date(Date.now() - 120_000).toISOString(),
+      unknown: true,
+    });
+    waiting.status = {
+      ...waiting.status!,
+      mapped: false,
+      error: 'the folder /more is not answering (no answer within 5s)',
+    };
+    mockFetch({ 'GET /api/libraries': { body: { libraries: [kept, waiting] } } });
+    render(<LibrariesTab client={api()} />);
+    const notes = await screen.findAllByText(/The folder did not answer within 5 s/);
+    expect(notes.map((n) => n.textContent)).toEqual([
+      'The folder did not answer within 5 s (2 min ago). These are the results of the check before it. The Bridge will look again.',
+      'The folder did not answer within 5 s (2 min ago). Writes wait until it does. The Bridge will look again.',
+    ]);
+    expect(screen.getByText('Waiting for the folder')).toBeInTheDocument();
+    expect(screen.getByText('Mapped')).toBeInTheDocument();
+    expect(screen.queryByText('Waiting for the server')).not.toBeInTheDocument();
+    expect(screen.queryByText(/The server gave no answer/)).not.toBeInTheDocument();
+  });
+
   it('locks the folder when the environment sets it', async () => {
     mockFetch({
       'GET /api/libraries': { body: { libraries: [libraryFixture({ locked: true })] } },

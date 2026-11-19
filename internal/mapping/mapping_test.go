@@ -185,24 +185,24 @@ func TestBookReadSettled(t *testing.T) {
 func TestCompareFilesCapsAndReports(t *testing.T) {
 	t.Parallel()
 	root, files := library(t)
-	checks, ok, problem := CompareFiles(root, files)
-	if !ok || problem != "" || len(checks) != 2 || !checks[0].OK {
+	checks, ok, problem, timeout := CompareFiles(root, files)
+	if !ok || problem != "" || len(checks) != 2 || !checks[0].OK || timeout != nil {
 		t.Fatalf("matching = %+v %v %q", checks, ok, problem)
 	}
-	if _, ok, problem := CompareFiles(root, nil); ok || problem == "" {
+	if _, ok, problem, _ := CompareFiles(root, nil); ok || problem == "" {
 		t.Fatal("no files compared as a match")
 	}
 	many := make([]link.BookFile, MaxFilesChecked+5)
 	for i := range many {
 		many[i] = files[0]
 	}
-	if checks, _, _ := CompareFiles(root, many); len(checks) != MaxFilesChecked {
+	if checks, _, _, _ := CompareFiles(root, many); len(checks) != MaxFilesChecked {
 		t.Fatalf("checked %d files, want %d", len(checks), MaxFilesChecked)
 	}
 	if err := os.Mkdir(filepath.Join(root, "Author", "Dir.mp3"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, problem := CompareFiles(root, []link.BookFile{{Path: "Author/Dir.mp3", Size: 0}}); ok || !strings.Contains(problem, "not a regular file") {
+	if _, ok, problem, timeout := CompareFiles(root, []link.BookFile{{Path: "Author/Dir.mp3", Size: 0}}); ok || !strings.Contains(problem, "not a regular file") || timeout != nil {
 		t.Fatalf("a folder named like a file = %v %q", ok, problem)
 	}
 }
@@ -1298,11 +1298,63 @@ func TestUnansweredCheckOfARootBookFailsClosed(t *testing.T) {
 	}
 }
 
+// hangLooks makes r's looks at the paths hung marks wait for release, bounded
+// by bound (each phase its own ops, so a look still out from an earlier phase
+// is never joined); the others answer, bounded at LookTimeout, so a slow
+// moment on a loaded runner never turns a healthy look into a hung one. A hung
+// podcast look runs the real look (it writes the marker) and only then hangs.
+func hangLooks(r *Registry, phase string, hung map[string]bool, bound time.Duration, release chan struct{}, fileStats *atomic.Int32, files string) {
+	within := func(p string) time.Duration {
+		if hung[p] {
+			return bound
+		}
+		return LookTimeout
+	}
+	r.look = looks{
+		stat: func(p string) (fs.FileInfo, error) {
+			if files != "" && strings.HasPrefix(p, files) {
+				fileStats.Add(1)
+			}
+			return fsutil.LookWithin("test-stat-"+phase, p, within(p), func(p string) (fs.FileInfo, error) {
+				if hung[p] {
+					<-release
+					return nil, errors.New("released") // touches nothing: the folder may be gone
+				}
+				return os.Stat(p)
+			})
+		},
+		probe: func(d string) error {
+			_, err := fsutil.LookWithin("test-probe-"+phase, d, within(d), func(d string) (struct{}, error) {
+				if hung[d] {
+					<-release
+					return struct{}{}, errors.New("released")
+				}
+				return struct{}{}, probeWritable(d)
+			})
+			return err
+		},
+		podcast: func(op, mount string, look func(string) (podcastFound, error)) (podcastFound, error) {
+			return podcastWithin(within(mount))(op+"-"+phase, mount, func(m string) (podcastFound, error) {
+				f, err := look(m)
+				if hung[m] {
+					<-release
+				}
+				return f, err
+			})
+		},
+	}
+}
+
 // A look at a library's folder that a hung mount holds (the folder's stat, a
-// book file's stat, the write probe, a podcast folder's open) fails that
-// library's check within its bound, recorded as a definite local failure, and
-// the run goes on to the next library: one hung mount never holds every check
-// after it. A hung file stat ends the comparison (each would cost the bound).
+// book file's stat, the write probe, a podcast check's look) ends that
+// library's check within its bound and the run goes on to the next library:
+// one hung mount never holds every check after it. A hung file stat ends the
+// comparison (each would cost the bound). A look that timed out says nothing
+// definite (an array disk spinning up answers in about 8 s), so with no state
+// before it the library is unknown (Status false, writes wait) with the reason,
+// never a definite "not mapped"; the run sets no hold, and the library is due
+// again after LookAgain, not at once (the run's beat would check again in a
+// tight loop).
 func TestHungMountFailsOnlyItsLibrary(t *testing.T) {
 	t.Parallel()
 	roots := map[int64]string{}
@@ -1315,53 +1367,30 @@ func TestHungMountFailsOnlyItsLibrary(t *testing.T) {
 		roots[1]: true, // the folder itself
 		filepath.Join(roots[2], "Author", "Book", "01.mp3"): true,
 		filepath.Join(roots[2], "Author", "Book", "02.mp3"): true,
+		roots[3]: true, // its write probe (its stat is the folder's too: only the probe hangs, below)
 		roots[4]: true,
 	}
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
 	var fileStats atomic.Int32
-	// The hung looks are bounded short; the others at LookTimeout, so a slow
-	// moment on a loaded runner never turns a healthy look into a hung one.
-	const bound = 20 * time.Millisecond
-	within := func(hangs bool) time.Duration {
-		if hangs {
-			return bound
-		}
-		return LookTimeout
-	}
 	r := newRegistry()
 	r.spacing = time.Millisecond
-	r.look = looks{
-		stat: func(p string) (fs.FileInfo, error) {
-			if strings.HasPrefix(p, filepath.Join(roots[2], "Author")) {
-				fileStats.Add(1)
-			}
-			return fsutil.LookWithin("test-stat", p, within(hung[p]), func(p string) (fs.FileInfo, error) {
-				if hung[p] {
-					<-release
-					return nil, errors.New("released") // touches nothing: the folder may be gone
-				}
-				return os.Stat(p)
-			})
-		},
-		probe: func(d string) error {
-			_, err := fsutil.LookWithin("test-probe", d, within(d == roots[3]), func(d string) (struct{}, error) {
-				if d == roots[3] {
-					<-release
-					return struct{}{}, errors.New("released")
-				}
-				return struct{}{}, probeWritable(d)
-			})
-			return err
-		},
+	hangLooks(r, "1", hung, 20*time.Millisecond, release, &fileStats, filepath.Join(roots[2], "Author"))
+	stat := r.look.stat
+	r.look.stat = func(p string) (fs.FileInfo, error) {
+		if p == roots[3] {
+			return os.Stat(p)
+		}
+		return stat(p)
 	}
 	r.SetLibraries([]link.Library{{ID: 1, Root: "/a"}, {ID: 2, Root: "/b"}, {ID: 3, Root: "/c"},
 		{ID: 4, Root: "/d", Kind: "podcasts"}, {ID: 5, Root: "/e"}})
 	src := &bookAndMarkers{scripted: &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{}}, roots: roots}
 	mount := func(id int64, _ string) (string, bool) { return roots[id], true }
+	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
 	done := make(chan struct{})
 	go func() {
-		r.Check(context.Background(), src, mount, time.Now)
+		r.Check(context.Background(), src, mount, func() time.Time { return at })
 		close(done)
 	}()
 	select {
@@ -1369,22 +1398,143 @@ func TestHungMountFailsOnlyItsLibrary(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("a hung mount held the run")
 	}
-	for id, want := range map[int64]struct {
-		mapped, writable bool
-		why              string
-	}{
-		1: {why: "the folder " + roots[1] + " is not answering"},
-		2: {why: ".mp3: not answering"},
-		3: {mapped: true, why: "not writable here: not answering"},
-		4: {why: "the library folder is not answering"},
-		5: {mapped: true, writable: true},
+	for id, why := range map[int64]string{
+		1: "the folder " + roots[1] + " is not answering",
+		2: ".mp3: not answering",
+		3: "not writable here: not answering",
+		4: "the library folder is not answering",
 	} {
 		st, ok := r.Status(id)
-		if !ok || st.Mapped != want.mapped || st.Writable != want.writable || !strings.Contains(st.Error, want.why) {
-			t.Errorf("library %d = %+v, %v; want mapped %v, writable %v, a known failure saying %q", id, st, ok, want.mapped, want.writable, want.why)
+		if ok || st.Writable || !strings.Contains(st.Error, why) {
+			t.Errorf("library %d = %+v, %v; want unknown, saying %q", id, st, ok, why)
 		}
+	}
+	if st, ok := r.Status(5); !ok || !st.Mapped || !st.Writable {
+		t.Errorf("the answering library = %+v, %v", st, ok)
 	}
 	if n := fileStats.Load(); n != 1 {
 		t.Errorf("%d file stats at the hung mount, want the comparison to end at the first", n)
+	}
+	for _, e := range r.Entries(mount) {
+		slow := e.Library.ID != 5
+		if e.Unknown != slow || (e.SlowAt != nil) != slow || e.UnansweredAt != nil {
+			t.Errorf("library %d's entry: unknown %v, slow_at %v, unanswered_at %v; want slow %v", e.Library.ID, e.Unknown, e.SlowAt, e.UnansweredAt, slow)
+		}
+	}
+	if until, why := r.Held(); why != "" {
+		t.Fatalf("a slow folder held the checks until %v: %s", until, why)
+	}
+	if r.Due(at.Add(time.Second), time.Hour) {
+		t.Fatal("a slow folder made the libraries due at once: the run's beat would check again in a tight loop")
+	}
+	if !r.Due(at.Add(LookAgain), time.Hour) {
+		t.Fatal("a slow folder isn't looked at again after LookAgain")
+	}
+}
+
+// A look that times out keeps the library's last state while it stands (within
+// KeptChecks intervals, its folder still showing the book), as a check the
+// server didn't answer does: a write job runs on through a disk spinning up
+// rather than failing on one slow look. Past the cap it is unknown, saying the
+// folder hasn't answered, and an answered look ends it.
+func TestSlowLookKeepsTheState(t *testing.T) {
+	t.Parallel()
+	books, files := library(t)
+	podcasts := t.TempDir()
+	roots := map[int64]string{1: books, 2: podcasts}
+	r := newRegistry()
+	r.spacing = time.Millisecond
+	r.SetLibraries([]link.Library{{ID: 1, Root: "/a"}, {ID: 2, Root: "/b", Kind: "podcasts"}})
+	src := &bookAndMarkers{scripted: &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{}}, roots: roots}
+	mount := func(id int64, _ string) (string, bool) { return roots[id], true }
+	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return at }
+	r.Check(context.Background(), src, mount, clock)
+	for id := int64(1); id <= 2; id++ {
+		if st, ok := r.Status(id); !ok || !st.Mapped || !st.Writable {
+			t.Fatalf("library %d's first check = %+v, %v", id, st, ok)
+		}
+	}
+
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	hangLooks(r, "slow", map[string]bool{books: true, podcasts: true}, 20*time.Millisecond, release, nil, "")
+	stat := r.look.stat
+	r.look.stat = func(p string) (fs.FileInfo, error) {
+		if p != books {
+			return os.Stat(p) // the proof: the book's folder answers
+		}
+		return stat(p)
+	}
+	at = at.Add(time.Minute)
+	r.Check(context.Background(), src, mount, clock)
+	r.clock = clock
+	for _, e := range r.Entries(mount) {
+		st, ok := r.Status(e.Library.ID)
+		if !ok || !st.Mapped || !st.Writable || e.Unknown || e.SlowAt == nil || !e.SlowAt.Equal(at) {
+			t.Errorf("library %d after a slow look = %+v, %v (entry unknown %v, slow_at %v); want the last state kept", e.Library.ID, st, ok, e.Unknown, e.SlowAt)
+		}
+	}
+	at = at.Add(KeptChecks * defaultInterval)
+	st, ok := r.Status(1)
+	if ok || st.Mapped || !strings.Contains(st.Error, "the folder hasn't answered a check of this mapping within 5s") {
+		t.Fatalf("a state kept past the cap by slow looks = %+v, %v", st, ok)
+	}
+	if e := r.Entries(mount)[0]; !e.Unknown {
+		t.Fatal("the page doesn't badge a state too old to stand as unknown")
+	}
+}
+
+// A podcast check's whole look before the server's read is bounded as one: a
+// mount that hangs after the marker's open, read or write (here, once the look
+// wrote it) ends the check unknown within the bound, and the marker the look
+// wrote is removed once the mount answers, since nobody else will.
+func TestHungPodcastLookIsBoundedAndUndone(t *testing.T) {
+	t.Parallel()
+	mount := t.TempDir()
+	r := newRegistry()
+	r.SetLibraries([]link.Library{{ID: 2, Root: "/p", Kind: "podcasts"}})
+	release := make(chan struct{})
+	hangLooks(r, "1", map[string]bool{mount: true}, 20*time.Millisecond, release, nil, "")
+	src := &bookAndMarkers{scripted: &scripted{err: map[int64]error{}}, roots: map[int64]string{2: mount}}
+	mountFn := func(int64, string) (string, bool) { return mount, true }
+	done := make(chan struct{})
+	go func() {
+		r.Check(context.Background(), src, mountFn, time.Now)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		close(release)
+		t.Fatal("a podcast folder that hangs after its marker's write held the run")
+	}
+	if st, ok := r.Status(2); ok || st.Mapped || !strings.Contains(st.Error, "not answering") {
+		t.Fatalf("a hung podcast look = %+v, %v; want unknown, not answering", st, ok)
+	}
+	if len(src.calls) != 0 {
+		t.Fatal("the server was asked to read a marker the look never handed over")
+	}
+	// The look goes on past the bound: it writes the marker, then hangs.
+	waitUntil(t, "the hung look's marker", func() bool {
+		_, err := os.Stat(filepath.Join(mount, MarkerPath))
+		return err == nil
+	})
+	close(release)
+	waitUntil(t, "the hung look's marker removed once the mount answered", func() bool {
+		_, err := os.Lstat(filepath.Join(mount, ".audiosilo"))
+		return errors.Is(err, os.ErrNotExist)
+	})
+}
+
+// waitUntil waits (at most 5 s) for ok, failing the test as what otherwise.
+func waitUntil(t *testing.T, what string, ok func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !ok() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
