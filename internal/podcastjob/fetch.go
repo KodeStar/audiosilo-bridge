@@ -197,8 +197,14 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 		}
 		keep := false
 		if !committed && parent.Err() != nil && jobs.Resumes(parent) && c.Temp != "" {
-			saved, validator := s.loadCheckpoint(job, root, params.ShowID, params.EpisodeID)
-			keep = saved.Temp == c.Temp && saved.Offset == c.Offset && saved.Total == c.Total && netguard.StrongETag(validator)
+			// Read, not loaded: loadCheckpoint drops a record whose partial is
+			// not at its path, and a show folder renamed by hand mid-download
+			// took the partial with it. The resumed job finds the show there
+			// (episodeAt, its record following) and goes on from the partial.
+			if saved, ok := s.readCheckpoint(job); ok && saved.ShowID == params.ShowID && saved.EpisodeID == params.EpisodeID {
+				validator, _ := s.o.Vault.Get(saved.Validator)
+				keep = saved.Temp == c.Temp && saved.Offset == c.Offset && saved.Total == c.Total && netguard.StrongETag(validator)
+			}
 		}
 		if !keep {
 			s.clearCheckpoint(job, root, &c)

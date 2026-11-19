@@ -2412,7 +2412,9 @@ internal/
             than failing as not found. A fetch whose folder is renamed while it
             downloads finds the show again after the download (episodeAt) and
             publishes there from its partial, its record and lock following
-            (heldLock.follow), never downloading again. An episode path the
+            (heldLock.follow), never downloading again; one the Bridge stops
+            meanwhile keeps its record (read, not loaded, at the stop), and
+            the resumed job goes on from the partial there. An episode path the
             server answers not_indexable (its show folder renamed since the
             server read it) is indexed by rescanning the show folder. A saved feed.json over
             the read cap fails as too_large, not write_failed. A new show never

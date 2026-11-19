@@ -944,3 +944,76 @@ func TestAReusedFetchOfARenamedShowIndexesItsFolder(t *testing.T) {
 		t.Fatal("the server was not asked to index the renamed folder", asked)
 	}
 }
+
+// A show folder renamed by hand mid-download, then the Bridge stopping: the
+// download record stays though its partial is no longer at its path (it moved
+// with the folder), and the resumed job finds the show, its record and the
+// partial there and goes on from the bytes it has (a ranged request), never
+// from byte 0 again.
+func TestAFetchStoppedAfterItsShowWasRenamedResumesThere(t *testing.T) {
+	requireProbe(t)
+	h, job := audioHarness(t)
+	if err := h.db.RecordClaim(context.Background(), store.ServerJob{ID: job.ID, Kind: FetchKind, LibraryID: job.LibraryID, Path: job.Path, Params: job.Params, Attempt: 1, ServerID: "server-1"}); err != nil {
+		t.Fatal(err)
+	}
+	audio := data(t, "chap-v24-reverse.mp3")
+	started := make(chan struct{})
+	var calls atomic.Int32
+	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		w.Header().Set("ETag", `"one"`)
+		if n == 1 {
+			w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
+			w.WriteHeader(200)
+			w.Write(audio[:1000])
+			w.(http.Flusher).Flush()
+			close(started)
+			<-r.Context().Done()
+			return
+		}
+		if r.Header.Get("Range") != "bytes=1000-" || r.Header.Get("If-Range") != `"one"` {
+			t.Error("the episode was downloaded again", r.Header)
+		}
+		w.Header().Set("Content-Range", "bytes 1000-"+strconv.Itoa(len(audio)-1)+"/"+strconv.Itoa(len(audio)))
+		w.Header().Set("Content-Length", strconv.Itoa(len(audio)-1000))
+		w.WriteHeader(206)
+		w.Write(audio[1000:])
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { _, err := h.handler.FetchJob().Run(ctx, job, jobs.LocalReporter()); done <- err }()
+	<-started
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(time.Millisecond) {
+		if matches := partials(filepath.Join(h.mount, "Fixture Show")); len(matches) == 1 {
+			if st, err := os.Stat(matches[0]); err == nil && st.Size() == 1000 {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the download did not start")
+		}
+	}
+	renameShow(t, h, "Fixture Show", "Renamed Show")
+	cancel()
+	if err := <-done; err == nil {
+		t.Fatal("the stopped job succeeded")
+	}
+	if left := partials(filepath.Join(h.mount, "Renamed Show")); len(left) != 1 {
+		t.Fatal("the partial did not stay in the renamed folder", left)
+	}
+	job.Resumed = true
+	res, err := New(h.handler.s.o).FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+	if err != nil {
+		t.Fatal(res, err)
+	}
+	moved := "Renamed Show/" + strings.TrimPrefix(*job.Path, "Fixture Show/")
+	if got := res.(fetchResult); got.Path != moved || got.Fetch.Bytes != int64(len(audio)) || calls.Load() != 2 {
+		t.Fatal(got, calls.Load())
+	}
+	if left := partials(filepath.Join(h.mount, "Renamed Show")); len(left) != 0 {
+		t.Fatal("a partial was left behind", left)
+	}
+	if _, err := os.Lstat(filepath.Join(h.mount, "Fixture Show")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the old folder came back", err)
+	}
+}
