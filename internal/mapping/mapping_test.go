@@ -1135,3 +1135,34 @@ func TestRateLimitedPassDropsAMovedUnreachedState(t *testing.T) {
 		t.Fatalf("an unreached library kept its state at the old mount: %+v", st)
 	}
 }
+
+// A server read that times out ends the pass as a 429 does: a hung server
+// would otherwise cost every library the whole request timeout. The rest keep
+// their state, proved by their folders, and are due again after the hold.
+func TestTimeoutEndsThePass(t *testing.T) {
+	t.Parallel()
+	root, files := library(t)
+	mount := func(int64, string) (string, bool) { return root, true }
+	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	r := NewRegistry()
+	r.spacing = time.Millisecond
+	r.SetLibraries([]link.Library{{ID: 1, Root: root}, {ID: 2, Root: root}, {ID: 3, Root: root}})
+	src := &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{}}
+	r.Check(context.Background(), src, mount, func() time.Time { return at })
+	src.mu.Lock()
+	src.calls = nil
+	src.mu.Unlock()
+	src.answer(1, &url.Error{Op: "Get", URL: "https://server/api", Err: context.DeadlineExceeded})
+	r.Check(context.Background(), src, mount, func() time.Time { return at.Add(time.Minute) })
+	if !slices.Equal(src.calls, []int64{1}) {
+		t.Fatalf("asked for %v after a timeout, want 1 only", src.calls)
+	}
+	for _, st := range r.Statuses() {
+		if !st.Mapped || !st.Writable {
+			t.Fatalf("library %d lost its state: %+v", st.LibraryID, st)
+		}
+	}
+	if !r.Due(at.Add(time.Minute+RetryFirst), 24*time.Hour) {
+		t.Fatal("the libraries aren't due again after the hold")
+	}
+}

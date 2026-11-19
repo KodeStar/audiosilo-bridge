@@ -460,7 +460,7 @@ func (r *Registry) Due(now time.Time, interval time.Duration) bool {
 // one asked for while another runs is done right after it (by that call, with
 // this call's src), so a mapping changed mid-check is never missed. A check the
 // server didn't answer keeps the library's last known state at the same mount
-// (a 429 or a 503 says nothing about the folder), and a 429 or a refused token
+// (a 429 or a 503 says nothing about the folder), and a 429, a refused token or a timeout
 // ends the pass: the libraries it hadn't reached yet are due again after the
 // hold, keeping their state only as such a check would (keepUnreached). The
 // checks queued meanwhile are still made (an admin's mapping edit,
@@ -504,8 +504,9 @@ func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, n
 			}
 		}
 		r.mu.Unlock()
-		// ended: a 429 or a refused token, which the rest of the pass would
-		// meet too.
+		// ended: a 429, a refused token or a request that timed out, which
+		// the rest of the pass would meet too (a hung server would cost each
+		// library the whole request timeout).
 		ended := false
 		for i, l := range libs {
 			if ctx.Err() != nil {
@@ -531,7 +532,8 @@ func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, n
 					unanswered = err
 				}
 				_, limited := link.RateLimited(err)
-				ended = limited || errors.Is(err, link.ErrUnauthorized)
+				// ctx is live here, so a deadline is the request's own timeout.
+				ended = limited || errors.Is(err, link.ErrUnauthorized) || errors.Is(err, context.DeadlineExceeded)
 			}
 			r.mu.Unlock()
 			if ended {
@@ -656,7 +658,7 @@ func proveKept(st link.LibraryStatus, unanswered error, last link.LibraryStatus)
 }
 
 // keepUnreached records the libraries a pass ended before (a 429, a refused
-// token: ended) as an unanswered check of each, so record keeps a
+// token, a timeout: ended) as an unanswered check of each, so record keeps a
 // library's last state, due again after the hold, only as it would that
 // check's: at the same mount, within KeptChecks intervals, and while the
 // folder still shows what that state's check found (proveKept, outside r.mu).
