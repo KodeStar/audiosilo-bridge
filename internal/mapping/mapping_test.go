@@ -1039,6 +1039,28 @@ func TestRateLimitedPassProvesTheUnreached(t *testing.T) {
 	}
 }
 
+// Due ends only a kept state that let something write: one that wasn't mapped
+// keeps its own reason, which says more than the server's silence does.
+func TestDueKeepsAnUnmappedState(t *testing.T) {
+	t.Parallel()
+	root, files := library(t)
+	mount := func(int64, string) (string, bool) { return root, true }
+	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	r := NewRegistry()
+	r.Due(at, time.Minute)
+	r.SetLibraries([]link.Library{{ID: 1, Root: root}})
+	wrong := slices.Clone(files)
+	wrong[0].Size++
+	src := &scripted{book: &link.Book{Path: "Author/Book", Files: wrong}, err: map[int64]error{}}
+	r.Check(context.Background(), src, mount, func() time.Time { return at })
+	src.answer(1, &link.APIError{Status: http.StatusTooManyRequests, RetryAfter: time.Hour, RetryAfterSet: true})
+	r.Check(context.Background(), src, mount, func() time.Time { return at.Add(time.Minute) }, 1)
+	r.Due(at.Add(KeptChecks*time.Minute), time.Minute)
+	if st, _ := r.Status(1); st.Mapped || !strings.Contains(st.Error, "doesn't hold the server's copy") {
+		t.Fatalf("Due replaced an unmapped state's reason: %+v", st)
+	}
+}
+
 // bookAndMarkers answers book reads as scripted does and marker reads from the
 // podcast libraries' folders, or with markerErr.
 type bookAndMarkers struct {

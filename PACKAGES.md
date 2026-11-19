@@ -2223,7 +2223,8 @@ internal/
             wait. A kept state stands KeptChecks (3) check intervals from the
             check that set it (the interval Due last took, the heartbeat's
             mapping.check_minutes): the next unanswered check past that records
-            its failure, and Due ends it during a hold. The heartbeat calls Due
+            its failure, and Due ends a mapped one during a hold (an unmapped one
+            lets nothing write and keeps its own reason). The heartbeat calls Due
             on every beat, a failed one too (a server limiting the checks limits
             the heartbeat as well), asking for no check then. A 429, a refused
             token or a request timeout ends the pass: the rest keep their state

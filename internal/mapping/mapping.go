@@ -427,7 +427,7 @@ func (r *Registry) Entries(mount MountFunc) []Entry {
 // the heartbeat's periodic run waits for Due: an admin's mapping edit, Check
 // now and a changed library list call Check at once, hold or not. interval is
 // the configured one (mapping.check_minutes), which also caps a kept state:
-// Due ends the states unanswered checks have kept past KeptChecks of it,
+// Due ends the mapped states unanswered checks have kept past KeptChecks of it,
 // hold or not (the heartbeat calls it on every beat, one that failed too), so
 // the library fails closed and writes wait for a check the server answers.
 func (r *Registry) Due(now time.Time, interval time.Duration) bool {
@@ -435,7 +435,9 @@ func (r *Registry) Due(now time.Time, interval time.Duration) bool {
 	defer r.mu.Unlock()
 	r.interval = interval
 	for id, res := range r.results {
-		if !res.unanswered.IsZero() && r.keptTooLong(res.at, now) {
+		// A kept state that isn't mapped lets nothing write (proveKept): it
+		// keeps its own reason, and the time the server last answered.
+		if res.status.Mapped && !res.unanswered.IsZero() && r.keptTooLong(res.at, now) {
 			r.results[id] = result{status: link.LibraryStatus{
 				LibraryID: id, MountPath: res.status.MountPath,
 				Error: "the server hasn't answered a check of this mapping since " + res.at.Format(time.RFC3339) +
