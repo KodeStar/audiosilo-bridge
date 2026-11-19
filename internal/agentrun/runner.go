@@ -179,6 +179,11 @@ func New(opts Options) (*Runner, error) {
 	if opts.TmpDir == "" {
 		opts.TmpDir = os.TempDir()
 	}
+	// Absolute, as the mount walk's paths are: the per-run folders it passes
+	// over (ownTmp) are matched by their exact paths.
+	if abs, err := filepath.Abs(opts.TmpDir); err == nil {
+		opts.TmpDir = abs
+	}
 	if opts.ClaudeBin == "" {
 		opts.ClaudeBin = agentproto.CLIClaude
 	}
