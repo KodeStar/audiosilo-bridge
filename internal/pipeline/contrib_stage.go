@@ -577,13 +577,13 @@ func (e *Executor) askedLocal(ctx context.Context, id int64) (bool, error) {
 		return local, err
 	}
 	off, err := e.shareOff(ctx, id)
-	switch {
-	case err != nil:
+	if err != nil {
 		e.log.Warn("contributing: the server couldn't be asked whether the book is still to be shared; it waits",
 			"book", id, "err", err)
 		return false, &scheduler.ParkError{Code: state.ParkContribUnavailable, Reason: ShareUnconfirmedMsg, Cause: err,
 			RetryAfter: time.Now().Add(ShareUnconfirmedRetry)}
-	case !off:
+	}
+	if !off {
 		return false, nil
 	}
 	if e.db != nil {

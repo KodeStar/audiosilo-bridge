@@ -1226,10 +1226,15 @@ func (h *Handler) awaitOpenJobEnd(ctx context.Context, r *run, bookID int64) (in
 // refreshJob asks open job id, when it runs here, to report now (acting on the
 // answer: a cancel ends it), and reports whether the server still holds it open.
 func (h *Handler) refreshJob(ctx context.Context, id int64) bool {
-	h.mu.Lock()
-	rep := h.pokes[id].rep
-	h.mu.Unlock()
+	rep := h.reporter(id)
 	return rep != nil && rep.Refresh(ctx) == nil
+}
+
+// reporter is the Reporter of open job id's run here, nil when none is up.
+func (h *Handler) reporter(id int64) *jobs.Reporter {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.pokes[id].rep
 }
 
 // ShareOff answers the contributing stage just before it files for engine book
@@ -1267,9 +1272,7 @@ func (h *Handler) ShareOff(ctx context.Context, bookID int64) (bool, error) {
 			off = true
 			continue
 		}
-		h.mu.Lock()
-		rep := h.pokes[id].rep
-		h.mu.Unlock()
+		rep := h.reporter(id)
 		if rep == nil {
 			return false, fmt.Errorf("job %d isn't running here yet to ask the server", id)
 		}
