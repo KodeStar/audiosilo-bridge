@@ -3105,14 +3105,17 @@ internal/
             the cursor, so the pass reads it again; a cursor the server refuses
             (ErrBadCursor: unreadable, another feed's, past the feed's end), goes back to the feed's start, bridge#50, and that read, push_reread until one reaches
             the feed's end, keeps the baseline's line (historyCutoff: a row changed more than 10 min before push_from,
-            moved onto the server's clock by the page's server_time,
+            moved onto the server's clock by the page's server_time (skew against the Bridge's clock when the
+            page came back, not the pass's start),
             is history again whatever its place, so a server restored from a backup has no place
             from before the baseline written over Audible's) and drops a title's place no later than the one last
-            read or written for it (olderThanKnown: updated_at not after the later of row_seen and at, by the
-            server's clock, so a backup's row changed after the baseline but older than the place handled since is
-            history too; a row changed since is a new place); refused resetStrikes (3) passes in a row (a server
-            refusing even the cursors it gave), the account waits resetWait (1 h), logged once with a push_error,
-            until a pass reads its pages with no refusal), skips rows by audible:<account>, keeps a
+            read for it (olderThanKnown: updated_at not after row_seen, by the server's clock, never at: a place
+            another device wrote between the read and the write to Audible is new; so a backup's row changed
+            after the baseline but older than the place handled since is history too; a row changed since is a
+            new place); refused resetStrikes (3) times with no cursor taken between (a read from the start that
+            fits a page sends none, so it neither counts nor ends the run; a server refusing even the cursors it
+            gave), the account waits resetWait (1 h), logged once, a push_error each refusal from then on,
+            until a pass has a cursor it gave taken), skips rows by audible:<account>, keeps a
             row on a title the last sync didn't list for that book pending (listed 0,
             store.PendAudiblePush) until a sync lists it; for the places still for StillFor (3 min, since
             row_seen: the Bridge's clock) it drops one under 1 s, within 5 s of last_ms (debounce) or

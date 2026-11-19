@@ -153,6 +153,7 @@ type stubServer struct {
 	feedErr   error
 	badSince  string   // a cursor the feed answers 400 for
 	refuseAll bool     // every cursor answered 400, even the ones the feed gave
+	onFeed    func()   // run (under mu) as a feed ask is answered: time passing during the read
 	feedAsks  []string // since values
 	pageSize  int
 	clock     time.Time          // the feed's server_time (zero: none, a server before 2.7.0)
@@ -194,6 +195,9 @@ func (s *stubServer) AudibleProgress(_ context.Context, account, since string, l
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.feedAsks = append(s.feedAsks, since)
+	if s.onFeed != nil {
+		s.onFeed()
+	}
 	if s.feedErr != nil {
 		return nil, s.feedErr
 	}
