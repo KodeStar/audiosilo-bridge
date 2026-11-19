@@ -752,7 +752,11 @@ func (s *service) consume(ctx context.Context, b *budget, job *jobs.Job, root *o
 		file, out.file = next, next
 		return nil
 	}
-	out.check = func(received int64) error {
+	// refused is a check's failure: a mapping or pairing changed, a show not
+	// followed. Nothing more is written to the library after it.
+	var refused error
+	out.check = func(received int64) (err error) {
+		defer func() { refused = err }()
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -814,14 +818,24 @@ func (s *service) consume(ctx context.Context, b *budget, job *jobs.Job, root *o
 	}
 	if copyErr != nil {
 		var guard *netguard.Error
-		if errors.As(copyErr, &guard) {
-			return podcast.Fetch{}, tag, guard
-		}
 		var disk *diskError
-		if errors.As(copyErr, &disk) {
+		isGuard := errors.As(copyErr, &guard)
+		if !isGuard && errors.As(copyErr, &disk) {
 			return podcast.Fetch{}, "", fail("write_failed", "The episode could not be saved.")
 		}
-		if c.Offset > 0 && c.Offset < total && netguard.StrongETag(tag) {
+		resumable := c.Offset > 0 && c.Offset < total && netguard.StrongETag(tag)
+		if resumable && refused == nil && ctx.Err() == nil {
+			// A show folder copied and deleted since the last check: the bytes
+			// held go where the show is now first, so the retry (or the record)
+			// resumes from all of them rather than find a stale copy there. A
+			// failure here leaves the record for loadCheckpoint to judge.
+			lastFollow = time.Time{}
+			_ = home(c.Offset)
+		}
+		if isGuard {
+			return podcast.Fetch{}, tag, guard
+		}
+		if resumable {
 			if err := s.saveCheckpoint(*job, root, c, tag); err != nil {
 				return podcast.Fetch{}, "", err
 			}

@@ -1562,11 +1562,12 @@ func TestAFetchFollowsItsShowCopiedAndDeletedMidDownload(t *testing.T) {
 	}
 }
 
-// The same copy and delete caught on the way (the partial is checked against
-// its path once a second): the bytes so far are written where the show is
-// now, so when the host then cuts the connection the retry resumes from all
-// of them there (a ranged request), not from the stale copy's size, which no
-// longer matches the record, or from byte 0.
+// The same copy and delete caught on the way (the first checkpoint's check,
+// or the once-a-second one): the bytes so far are written where the show is
+// now, and the rest of the response after them, so when the host then
+// cuts the connection the retry resumes from all of them there (a ranged
+// request), not from the stale copy's size, which no longer matches the
+// record, or from byte 0.
 func TestAFetchCopiedAndDeletedMidDownloadResumesFromAllItsBytes(t *testing.T) {
 	requireProbe(t)
 	h, job := audioHarness(t)
@@ -1601,7 +1602,7 @@ func TestAFetchCopiedAndDeletedMidDownloadResumesFromAllItsBytes(t *testing.T) {
 		}
 		w.Write(audio[2000:3000])
 		w.(http.Flusher).Flush()
-		time.Sleep(1100 * time.Millisecond) // a write checks the partial at most once a second
+		time.Sleep(1100 * time.Millisecond) // past the once-a-second check, however the reads fell
 		w.Write(audio[3000:4000])
 		w.(http.Flusher).Flush()
 		if !partialAt(filepath.Join(h.mount, "Renamed Show"), 4000) {
@@ -1677,4 +1678,61 @@ func TestAFetchRetryFindsItsShowPastAFolderAtItsOldName(t *testing.T) {
 		}
 		noRecords(t, h.handler.s)
 	}
+}
+
+// The same copy and delete with the host cutting the connection before the
+// next check (within the second): the interruption writes the bytes held
+// where the show is now before it records them, so the retry resumes from
+// all of them there rather than restart from byte 0 on the stale copy.
+func TestAFetchCopiedAndDeletedJustBeforeACutResumesFromAllItsBytes(t *testing.T) {
+	requireProbe(t)
+	h, job := audioHarness(t)
+	h.scan.knows = func(p string) bool { return strings.HasPrefix(p, "Fixture Show/") }
+	audio := data(t, "chap-v24-reverse.mp3")
+	show := filepath.Join(h.mount, "Fixture Show")
+	moved := "Renamed Show/" + strings.TrimPrefix(*job.Path, "Fixture Show/")
+	var calls atomic.Int32
+	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) > 1 {
+			if r.Header.Get("Range") != "bytes=4000-" || r.Header.Get("If-Range") != `"one"` {
+				t.Error("the retry did not resume from the bytes the fetch held", r.Header.Get("Range"))
+			}
+			w.Header().Set("ETag", `"one"`)
+			w.Header().Set("Content-Range", "bytes 4000-"+strconv.Itoa(len(audio)-1)+"/"+strconv.Itoa(len(audio)))
+			w.Header().Set("Content-Length", strconv.Itoa(len(audio)-4000))
+			w.WriteHeader(206)
+			w.Write(audio[4000:])
+			return
+		}
+		w.Header().Set("ETag", `"one"`)
+		w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
+		w.WriteHeader(200)
+		w.Write(audio[:2000])
+		w.(http.Flusher).Flush()
+		if !partialAt(show, 2000) {
+			t.Error("the download did not start")
+			return
+		}
+		// The first checkpoint (at 2000), then the copy: the next check is a
+		// second away.
+		w.Write(audio[2000:3000])
+		w.(http.Flusher).Flush()
+		if !partialAt(show, 3000) {
+			t.Error("the download did not go on")
+			return
+		}
+		if err := copyThenDelete(t, show, filepath.Join(h.mount, "Renamed Show")); err != nil {
+			t.Error(err)
+		}
+		w.Write(audio[3000:4000])
+		w.(http.Flusher).Flush()
+	})
+	res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+	if got, ok := res.(fetchResult); err != nil || !ok || got.Path != moved || got.Fetch.Bytes != int64(len(audio)) || calls.Load() != 2 {
+		t.Fatal(res, err, calls.Load())
+	}
+	if left := partials(filepath.Join(h.mount, "Renamed Show")); len(left) != 0 {
+		t.Fatal("a partial was left behind", left)
+	}
+	noRecords(t, h.handler.s)
 }
