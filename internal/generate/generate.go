@@ -1111,7 +1111,9 @@ func (h *Handler) queueBook(ctx context.Context, eng Engine, r *run, nb store.Ne
 	if err != nil {
 		return fmt.Errorf("could not queue the book in the engine: %w", err)
 	}
-	if err := h.o.DB.PutGenerateBook(ctx, store.GenerateBook{ServerJobID: r.job.ID, BookID: &b.ID, LibraryID: r.lib.ID, RelPath: r.rel}); err != nil {
+	gb := r.generateBook()
+	gb.BookID = &b.ID
+	if err := h.o.DB.PutGenerateBook(ctx, gb); err != nil {
 		_ = h.o.DB.DeleteBook(context.WithoutCancel(ctx), b.ID)
 		return err
 	}

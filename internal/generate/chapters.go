@@ -478,8 +478,8 @@ func takeUp(ctx context.Context, eng Engine, r *run, id int64, write func() erro
 	return true, nil
 }
 
-// generateBook is r's job mapped to the engine book a continue takes up (the
-// book id is the continue's).
+// generateBook is r's job's mapping to an engine book, its book id left to the
+// caller (a continue's store write sets the book it takes up).
 func (r *run) generateBook() store.GenerateBook {
 	return store.GenerateBook{ServerJobID: r.job.ID, LibraryID: r.lib.ID, RelPath: r.rel}
 }
