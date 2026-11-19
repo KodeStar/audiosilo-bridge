@@ -3648,7 +3648,8 @@ internal/
             agent credential changed on the Accounts tab for
             agent_credential_refused and agent_unavailable, since these wait in
             their own loop, not as engine books: each park is registered in
-            loopParks with its run's own channel and removed only by that
+            loopParks (parkInLoop, which a generate job's owed share shares)
+            with its run's own channel and removed only by that
             run, and every wake is numbered (wakeSeq, woken per code) so a try
             that parks with a code woken while it ran tries again at once rather
             than lose the wake to the drain below),

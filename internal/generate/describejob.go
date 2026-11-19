@@ -328,18 +328,10 @@ func (h *Handler) describeParked(ctx context.Context, r *run, d Describer, bookI
 			return described{}, spent, errDescribeChecks
 		case errors.As(err, &park):
 			parked = true
-			if !park.RetryAfter.IsZero() {
-				// A Retry pressed while that try ran was answered by it: only one
-				// pressed once this park is reported tries again before its
-				// retry_at. (A park without one waits for a press, so a press made
-				// meanwhile is kept.)
-				select {
-				case <-r.poke:
-				default:
-				}
-			}
-			if h.parkDescribe(r, park, spent, mark) {
-				continue // woken while the try ran (the wake-up may have been drained above)
+			pr := jobs.Progress{Step: pipeline.DescribeStage, Message: "Needs attention: Writing a description", Total: 1,
+				Extra: r.describeExtra(spent)}
+			if h.parkInLoop(r, park, pr, mark) {
+				continue // woken while the try ran (the wake-up may have been drained)
 			}
 			if err := h.recheckWait(ctx, r, park.RetryAfter); err != nil {
 				return described{}, spent, err
@@ -348,21 +340,6 @@ func (h *Handler) describeParked(ctx context.Context, r *run, d Describer, bookI
 			return described{}, spent, fmt.Errorf("could not write a description: %w", err)
 		}
 	}
-}
-
-// parkDescribe reports an agent park as the job's, with its hint and retry_at,
-// and registers it for WakeParked (loopParked, whose woken it returns).
-func (h *Handler) parkDescribe(r *run, park *scheduler.ParkError, spent float64, mark uint64) (woken bool) {
-	code, retryAt := string(park.Code), ""
-	if !park.RetryAfter.IsZero() {
-		retryAt = store.Timestamp(park.RetryAfter)
-	}
-	extra := r.describeExtra(spent)
-	extra["park"] = parkExtra(code, retryAt)
-	r.rep.Progress(jobs.Progress{Step: pipeline.DescribeStage, Message: "Needs attention: Writing a description", Total: 1,
-		Extra: extra})
-	r.rep.Park(code, park.Reason)
-	return h.loopParked(r, park.Code, mark)
 }
 
 // describeExtra is a description-only job's progress Extra: the describing

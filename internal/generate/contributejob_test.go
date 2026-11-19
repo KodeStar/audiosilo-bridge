@@ -50,6 +50,13 @@ func (f *fakeSharer) ShareChecked(_ context.Context, bookID int64, workID string
 		Covered: []string{"recaps"}}, nil
 }
 
+// count is how many shares were filed.
+func (f *fakeSharer) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.calls)
+}
+
 // shareRunner runs the generate and contribute jobs with s as the share step.
 func (hr *harness) shareRunner(s Sharer, cred func(context.Context) error) (stop func()) {
 	return hr.shareRunnerRecheck(s, cred, time.Hour)
@@ -182,10 +189,7 @@ func TestContributeJobWaitsWhenTheServerCantBeAsked(t *testing.T) {
 		defer hr.srv.mu.Unlock()
 		return hr.srv.downHits[94] >= 3
 	})
-	s.mu.Lock()
-	calls := len(s.calls)
-	s.mu.Unlock()
-	if calls != 0 {
+	if calls := s.count(); calls != 0 {
 		t.Fatalf("share calls = %d while the server can't be asked, want none", calls)
 	}
 	hr.srv.set(func() { hr.srv.down[94] = false })
@@ -209,10 +213,7 @@ func TestContributeJobAsksBeforeTheHold(t *testing.T) {
 	t.Parallel()
 	hr := newHarness(t)
 	hr.generated(101)
-	mapped, err := hr.db.GetGenerateBook(context.Background(), 101)
-	if err != nil || mapped.BookID == nil {
-		t.Fatalf("the generate job's book: %+v %v", mapped, err)
-	}
+	bookID := hr.engineBook(101).ID
 	s := &fakeSharer{}
 	entered, answer := make(chan struct{}), make(chan struct{})
 	var once sync.Once
@@ -231,7 +232,7 @@ func TestContributeJobAsksBeforeTheHold(t *testing.T) {
 	<-entered
 	// The job's ask waits behind the slow report (or is it): the book is free.
 	time.Sleep(50 * time.Millisecond)
-	release, ok := hr.sched.Hold(*mapped.BookID)
+	release, ok := hr.sched.Hold(bookID)
 	if ok {
 		release()
 	}
@@ -275,10 +276,7 @@ func TestContributeParksGiveTheLightLaneBack(t *testing.T) {
 	})
 	hr.srv.addContribute(114, "Author/Book", `{}`)
 	hr.waitFor("the third share done", func() bool { st, _ := hr.srv.final(114); return st == link.StateDone })
-	s.mu.Lock()
-	calls := len(s.calls)
-	s.mu.Unlock()
-	if calls != 1 {
+	if calls := s.count(); calls != 1 {
 		t.Fatalf("share calls = %d, want only the third job's", calls)
 	}
 	// Back once the server answers: each takes a slot again and files.
@@ -328,10 +326,7 @@ func TestContributeJobConfirmsOnlyOnTheCurrentLink(t *testing.T) {
 		})
 	})
 	time.Sleep(100 * time.Millisecond) // a few rechecks
-	s.mu.Lock()
-	calls := len(s.calls)
-	s.mu.Unlock()
-	if calls != 0 {
+	if calls := s.count(); calls != 0 {
 		t.Fatalf("share calls = %d on another server's link, want none", calls)
 	}
 	hr.srv.set(func() { delete(hr.srv.atStep, 122) })

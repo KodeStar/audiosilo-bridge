@@ -15,7 +15,6 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/pipeline"
 	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
-	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
 
 // ContributeKind is "Share with the community" (BRIDGE-PLAN.md Phase 2b, plan
@@ -157,6 +156,10 @@ func (c *ContributeJob) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporte
 // stepSharing is a share's step while it files.
 const stepSharing = "sharing"
 
+// sharingParked is a share's progress while it is parked (reportPark adds the
+// park's code and retry_at).
+var sharingParked = jobs.Progress{Step: stepSharing, Message: "Needs attention: Sharing with the community", Total: 1}
+
 // shareConfirmed holds the engine book and files its sidecars once the server
 // confirms the share still stands: it is asked (Reporter.AskShareOff) just
 // before filing, as the server stops a share whose Contributions module was
@@ -181,13 +184,13 @@ func (h *Handler) shareConfirmed(ctx context.Context, r *run, sharer Sharer, boo
 	parked := false
 	for {
 		off, err := r.rep.AskShareOff(ctx)
-		if err == nil && !off && r.rep.Yielded() {
-			if err := r.rep.Reclaim(ctx); err != nil {
-				return pipeline.ShareResult{}, err
-			}
-			continue
-		}
 		if err == nil && !off {
+			if r.rep.Yielded() {
+				if err := r.rep.Reclaim(ctx); err != nil {
+					return pipeline.ShareResult{}, err
+				}
+				continue // the wait for the slot can be long: ask again
+			}
 			release, herr := h.holdBook(ctx, bookID)
 			if herr != nil {
 				return pipeline.ShareResult{}, herr
@@ -222,9 +225,7 @@ func (h *Handler) shareConfirmed(ctx context.Context, r *run, sharer Sharer, boo
 			"job", r.job.ID, "err", err)
 		parked = true
 		at := time.Now().Add(h.o.Recheck)
-		r.rep.Progress(jobs.Progress{Step: stepSharing, Message: "Needs attention: Sharing with the community", Total: 1,
-			Extra: map[string]any{"park": parkExtra(string(state.ParkShareUnconfirmed), store.Timestamp(at))}})
-		r.rep.Park(string(state.ParkShareUnconfirmed), unconfirmedMsg(err))
+		reportPark(r, sharingParked, state.ParkShareUnconfirmed, unconfirmedMsg(err), at)
 		if r.kind == ContributeKind {
 			r.rep.Yield()
 		}
@@ -298,8 +299,7 @@ func stoppedBy(ctx context.Context, r *run, stands func(context.Context) (bool, 
 		if err == nil || ctx.Err() != nil || errors.Is(err, jobs.ErrStopped) {
 			return off, err
 		}
-		return false, &scheduler.ParkError{Code: state.ParkShareUnconfirmed, Reason: unconfirmedMsg(err), Cause: err,
-			RetryAfter: time.Now().Add(pipeline.ShareUnconfirmedRetry)}
+		return false, pipeline.ShareUnconfirmedPark(unconfirmedMsg(err), err)
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -139,7 +140,7 @@ type Handler struct {
 	loopParks map[int64]loopPark
 	// wakeSeq numbers WakeParked's calls and woken holds each park code's latest,
 	// so a try that parks on a code woken while it ran tries again at once
-	// (loopParked).
+	// (parkInLoop).
 	wakeSeq uint64
 	woken   map[state.ParkCode]uint64
 	// asker is the runner ShareOff asks the jobs through (AskThrough).
@@ -262,17 +263,47 @@ func (h *Handler) wakeMark() uint64 {
 	return h.wakeSeq
 }
 
-// loopParked registers r's park with code for WakeParked while its own loop
-// waits on it; woken says WakeParked woke code after mark (wakeMark, taken
-// before the try), so the park was answered while the try ran.
-func (h *Handler) loopParked(r *run, code state.ParkCode, mark uint64) (woken bool) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.loopParks[r.job.ID] = loopPark{code: code, poke: r.poke}
-	return h.woken[code] > mark
+// reportPark reports a park as the job's: pr (its step and "Needs attention"
+// message) with the park's code and retry_at (zero: none) in its Extra, then
+// the park itself with reason.
+func reportPark(r *run, pr jobs.Progress, code state.ParkCode, reason string, retryAt time.Time) {
+	at := ""
+	if !retryAt.IsZero() {
+		at = store.Timestamp(retryAt)
+	}
+	extra := maps.Clone(pr.Extra)
+	if extra == nil {
+		extra = map[string]any{}
+	}
+	extra["park"] = parkExtra(string(code), at)
+	pr.Extra = extra
+	r.rep.Progress(pr)
+	r.rep.Park(string(code), reason)
 }
 
-// dropLoopPark drops r's loopParked registration (a later run of the job may
+// parkInLoop reports park as the job's (reportPark, with pr) for a run that
+// waits on it in its own loop, and registers it for WakeParked; woken says
+// WakeParked woke its code after mark (wakeMark, taken before the try), so the
+// park was answered while the try ran and the loop tries again at once. A Retry
+// pressed while that try ran was answered by it: a park with a retry_at drains
+// it first, so only one pressed once this park is reported tries again before
+// its retry_at (a park without one waits for a press, so a press made meanwhile
+// is kept).
+func (h *Handler) parkInLoop(r *run, park *scheduler.ParkError, pr jobs.Progress, mark uint64) (woken bool) {
+	if !park.RetryAfter.IsZero() {
+		select {
+		case <-r.poke:
+		default:
+		}
+	}
+	reportPark(r, pr, park.Code, park.Reason, park.RetryAfter)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.loopParks[r.job.ID] = loopPark{code: park.Code, poke: r.poke}
+	return h.woken[park.Code] > mark
+}
+
+// dropLoopPark drops r's parkInLoop registration (a later run of the job may
 // have its own by then).
 func (h *Handler) dropLoopPark(r *run) {
 	h.mu.Lock()
@@ -650,20 +681,7 @@ func (h *Handler) shareOwedParked(ctx context.Context, r *run, sharer Sharer, b 
 			return err
 		}
 		h.o.Log.Warn("generate: the share it owes waits", "job", r.job.ID, "book", b.ID, "code", park.Code, "err", err)
-		retryAt := ""
-		if !park.RetryAfter.IsZero() {
-			retryAt = store.Timestamp(park.RetryAfter)
-			// A Retry pressed while the try ran was answered by it (as
-			// describeParked drains it).
-			select {
-			case <-r.poke:
-			default:
-			}
-		}
-		r.rep.Progress(jobs.Progress{Step: stepSharing, Message: "Needs attention: Sharing with the community", Total: 1,
-			Extra: map[string]any{"park": parkExtra(string(park.Code), retryAt)}})
-		r.rep.Park(string(park.Code), park.Reason)
-		if h.loopParked(r, park.Code, mark) {
+		if h.parkInLoop(r, park, sharingParked, mark) {
 			continue // woken while the try ran
 		}
 		if err := h.recheckWait(ctx, r, park.RetryAfter); err != nil {

@@ -603,6 +603,13 @@ func (e *Executor) shareUnconfirmed(ctx context.Context, id int64, reason string
 		return ctx.Err()
 	}
 	e.log.Warn("contributing: whether the book is still to be shared couldn't be confirmed; it waits", "book", id, "err", err)
+	return ShareUnconfirmedPark(reason, err)
+}
+
+// ShareUnconfirmedPark is the share_unconfirmed park over err (reason one of
+// ShareUnconfirmedMsg, ShareUnreadMsg), retried after ShareUnconfirmedRetry:
+// the stage's, and a generate job's owed share's (generate's stoppedBy).
+func ShareUnconfirmedPark(reason string, err error) *scheduler.ParkError {
 	return &scheduler.ParkError{Code: state.ParkShareUnconfirmed, Reason: reason, Cause: err,
 		RetryAfter: time.Now().Add(ShareUnconfirmedRetry)}
 }
