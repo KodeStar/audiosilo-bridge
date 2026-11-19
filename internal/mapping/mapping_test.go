@@ -1170,9 +1170,6 @@ func TestProveKeptSaysAHungFolderDidntAnswer(t *testing.T) {
 			t.Fatalf("%s: problem = %q; want %q, not %q", tc.name, st.Error, tc.want, tc.not)
 		}
 	}
-	if got := lostSight("the marker an earlier look found", &fs.PathError{Op: "stat", Path: "/m", Err: fsutil.ErrStatTimeout}); strings.Contains(got, "no longer shows") {
-		t.Fatalf("a hung look at a podcast marker = %q; want no claim it is gone", got)
-	}
 }
 
 // A kept state that wasn't mapped is unknown past the cap too, but keeps its

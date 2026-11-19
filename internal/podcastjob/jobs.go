@@ -348,7 +348,7 @@ func (s *service) libraryFor(ctx context.Context, slot bool, job jobs.Job, rep *
 		if !errors.Is(err, errMappingUnknown) {
 			return lib, mount, err
 		}
-		rep.Progress(jobs.Progress{Step: "waiting", Message: mappingWait})
+		rep.Progress(waitingFor(err))
 		if slot {
 			s.yieldSlot(rep, lib, err)
 		}
@@ -495,11 +495,14 @@ func (s *service) awaitWrite(ctx context.Context, slot *jobs.Reporter, lib link.
 	}
 	for {
 		err := s.writeDecided(ctx, slot, lib, mount, rel)
-		if err != nil || slot == nil || !slot.Yielded() {
-			if err == nil && slot != nil && was.Step != "" {
+		if err != nil || slot == nil {
+			return err
+		}
+		if !slot.Yielded() {
+			if was.Step != "" {
 				slot.Progress(was) // the same progress again is no change (Reporter.Progress)
 			}
-			return err
+			return nil
 		}
 		if err := s.reclaim(ctx, slot); err != nil {
 			return err

@@ -230,13 +230,19 @@ func TestAFetchWaitingForItsFolderSaysSo(t *testing.T) {
 	if f := h.read("Fixture Show"); f.Episodes[0].Fetch == nil {
 		t.Fatal("the episode was not published once the folder answered")
 	}
+}
 
-	// The step before the wait is reported again once the folder answers;
-	// a wait that never started changes nothing.
+// Once the folder answers, a wait reports again the step it interrupted.
+func TestAWaitReportsTheStepItInterruptedAgain(t *testing.T) {
+	requireProbe(t)
+	h, job := audioHarness(t)
+	s := h.handler.s
+	s.o.CheckPoll = 2 * time.Millisecond
 	lib, _ := s.o.Libraries.Library(*job.LibraryID)
 	saving := jobs.Progress{Step: "writing", Message: "Saving the episode"}
-	rep = jobs.LocalReporter()
+	rep := jobs.LocalReporter()
 	rep.Progress(saving)
+	var slow atomic.Bool
 	slow.Store(true)
 	var seen atomic.Value
 	s.o.WriteProbe = func(dir string) error {
