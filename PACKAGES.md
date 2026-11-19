@@ -2586,7 +2586,9 @@ internal/
             the path it holds already never the lock file (takeLock without
             create: the file was there, so one gone is a folder being deleted,
             and an rm -rf would find it made again); nothing is made and the
-            fetch goes on. A folder put back from a copy between two host
+            fetch goes on there. At a new path with no .audiosilo folder
+            nothing is made either, and the follow fails write_failed rather
+            than go on there holding no lock. A folder put back from a copy between two host
             attempts is caught by settle too, which follows when the lock file
             at the path is not the one held (heldLock.held), so the next
             attempt never appends under a copied lock. A partial that is not

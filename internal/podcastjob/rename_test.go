@@ -2116,6 +2116,20 @@ func TestALockRetakeNeverMakesTheFolder(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(h.mount, "Moved Show", ".audiosilo"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// At a new path with no .audiosilo folder the follow fails, making
+	// nothing there and keeping the lock it holds, rather than go on there
+	// holding none.
+	bare := "Bare Show/" + path.Base(*job.Path)
+	if err := os.Mkdir(filepath.Join(h.mount, "Bare Show"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var failure *netguard.Error
+	if err := s.followLock(ctx, l, bare); !errors.As(err, &failure) || failure.Code != "write_failed" || !l.held() || l.p != podcast.AttachmentPath(*job.Path, ".fetch.lock") {
+		t.Fatal("a follow to a path with nothing to lock went on", err)
+	}
+	if _, err := root.Lstat("Bare Show/.audiosilo"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the follow made the .audiosilo folder", err)
+	}
 	moved := "Moved Show/" + path.Base(*job.Path)
 	if err := s.followLock(ctx, l, moved); err != nil || !l.held() || l.p != podcast.AttachmentPath(moved, ".fetch.lock") {
 		t.Fatal("the lock was not taken at the new path", err)

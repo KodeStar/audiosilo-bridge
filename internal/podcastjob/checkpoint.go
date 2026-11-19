@@ -564,20 +564,25 @@ func (l *heldLock) follow(episode string) bool {
 // holds already (a folder put back there from a copy) never the lock file
 // either: the caller saw the file there, so one gone now is a folder being
 // deleted (an rm -rf would find the folder made again and fail to remove the
-// show folder). Nothing is made there and l is left as it is.
+// show folder). Nothing is made there and l is left as it is. At a new path
+// with no .audiosilo folder (a show moved without its hidden folders, or a
+// folder being deleted) nothing is made either, and the follow fails
+// write_failed with l unchanged: the fetch would otherwise go on there
+// holding no lock.
 func (s *service) followLock(ctx context.Context, l *heldLock, episode string) error {
 	if l.follow(episode) {
 		return nil
 	}
 	wait, stop := context.WithTimeout(ctx, ceiling)
 	defer stop()
-	next, err := s.takeLock(wait, l.root, episode, podcast.AttachmentPath(episode, ".fetch.lock") != l.p)
+	moved := podcast.AttachmentPath(episode, ".fetch.lock") != l.p
+	next, err := s.takeLock(wait, l.root, episode, moved)
 	switch {
 	case err == nil:
 		l.release()
 		*l = *next
 		return nil
-	case errors.Is(err, os.ErrNotExist):
+	case errors.Is(err, os.ErrNotExist) && !moved:
 		return nil
 	case ctx.Err() != nil:
 		return ctx.Err()
@@ -585,7 +590,7 @@ func (s *service) followLock(ctx context.Context, l *heldLock, episode string) e
 		// The file there was the one held after all (a check the library
 		// failed just then): waited on, it could never be taken.
 		return nil
-	case wait.Err() != nil:
+	case wait.Err() != nil, errors.Is(err, os.ErrNotExist):
 		return fail("write_failed", "The episode could not be locked where its show folder is now.")
 	}
 	return err
