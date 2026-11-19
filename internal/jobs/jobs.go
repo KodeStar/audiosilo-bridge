@@ -1227,10 +1227,6 @@ type run struct {
 	// under r.mu): it reports nothing more (Reporter.link) and is recorded lost
 	// however it ends (settle), never kept to resume (release).
 	ended atomic.Bool
-	// abandonOwed: the job was dropped before its handler ran (abandonEnded),
-	// so the work an earlier run of it left is still to be released, by
-	// releaseDropped (settle, releaseRun). Its run's goroutine only.
-	abandonOwed bool
 }
 
 // start records a claimed job and runs it. claim is the dispatcher's request
@@ -1464,15 +1460,12 @@ func (r *Runner) execute(ctx, base context.Context, srv Server, h Handler, ru *r
 }
 
 // abandonEnded tells the handler of a job that ended for good (cause) before
-// its handler ran: a cancel or a lost claim at once; a drop only owes it
-// (run.abandonOwed), for settle to hand to releaseDropped (releaseRun), so a
-// release that blocks never keeps the job's lane slot, or its place first in
-// line for one, from a new pairing's work.
+// its handler ran: a cancel or a lost claim at once. A drop's release is left
+// to settle, which hands it to releaseDropped (releaseRun), so a release that
+// blocks never keeps the job's lane slot, or its place first in line for one,
+// from a new pairing's work.
 func (r *Runner) abandonEnded(base context.Context, ru *run, cause error) {
-	switch {
-	case dropped(cause):
-		ru.abandonOwed = true
-	case endsForGood(cause):
+	if endsForGood(cause) && !dropped(cause) {
 		r.abandonFor(base, ru.job, cause)
 	}
 }
@@ -1519,6 +1512,9 @@ func (r *Runner) settle(base context.Context, ru *run, rep *Reporter, result any
 	// nil once the Bridge is paired with another server or was unpaired on its
 	// page: the end is reported nowhere.
 	srv, _ := rep.link()
+	// owed: dropped before its handler ran (abandonEnded), so what an earlier
+	// run of it left is still to be released.
+	owed := !rep.started.Load() && dropped(context.Cause(rep.ctx)) && r.holdsWork(job)
 	var park *ParkError
 	switch {
 	case ru.ended.Load(), r.pairingGone(job):
@@ -1534,7 +1530,7 @@ func (r *Runner) settle(base context.Context, ru *run, rep *Reporter, result any
 			why = r.dropCause(job.serverID)
 		}
 		cause := context.Cause(rep.ctx)
-		if (ru.abandonOwed || cause != nil && !endsForGood(cause)) && r.holdsWork(job) {
+		if owed || cause != nil && !endsForGood(cause) && r.holdsWork(job) {
 			r.releaseRun(base, job, raw, why)
 			return false
 		}
@@ -1551,7 +1547,7 @@ func (r *Runner) settle(base context.Context, ru *run, rep *Reporter, result any
 		r.log.Info("bridge: a job's link ended; it resumes under its claim on the next one", "job", job.ID, "why", err)
 		return true
 	case srv == nil, errors.Is(err, errOtherServer):
-		if ru.abandonOwed && r.holdsWork(job) {
+		if owed {
 			r.releaseRun(base, job, raw, errOtherServer)
 			return false
 		}
@@ -1588,7 +1584,7 @@ func (r *Runner) settle(base context.Context, ru *run, rep *Reporter, result any
 }
 
 // releaseRun drops a run whose handler still holds work (it stopped to resume,
-// or never ran: run.abandonOwed), for why: the release goes to releaseDropped,
+// or never ran: settle's owed), for why: the release goes to releaseDropped,
 // which records the job lost once it is done, the row running and held
 // (dropping, taken before release lets go of the run) until then. So the run
 // frees its lane slot as it returns, and a release that blocks, tried again

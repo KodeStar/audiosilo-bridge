@@ -2640,7 +2640,7 @@ internal/
             recorded, so recover and a later look skip them (one the look
             recorded lost after recover listed it running is found ended at
             its turn). A run's own drop whose handler still holds work (it
-            stopped to resume, or was dropped before it ran: run.abandonOwed)
+            stopped to resume, or was dropped before it ran)
             goes there too (settle, releaseRun), held (dropping) before the run
             lets go, so the run frees its lane slot, or its place first in line
             for one, as it returns: a release that blocks, tried again round
