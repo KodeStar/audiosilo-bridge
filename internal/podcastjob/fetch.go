@@ -179,7 +179,20 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	if err != nil {
 		return nil, err
 	}
-	defer lock.release()
+	defer func() {
+		// A show folder renamed by hand since the lock was taken took its file
+		// along, and a failure before the download (which follows the show)
+		// leaves it there: it is let go where the show is now, its file
+		// removed, rather than left in the folder.
+		if !lock.held() && parent.Err() == nil {
+			sctx, stop := context.WithTimeout(parent, ceiling)
+			if p, err := s.episodeAt(sctx, root, lib, mount, *job.Path, params, job.ID); err == nil {
+				lock.follow(p)
+			}
+			stop()
+		}
+		lock.release()
+	}()
 	// Found elsewhere: its record, under the episode's lock now, is taken
 	// along even when another open row names it (adoptOwn).
 	s.adoptOwn(job, root, claimedAt, params, "")

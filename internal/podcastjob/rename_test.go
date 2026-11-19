@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -2154,5 +2155,40 @@ func TestAbandonClearsBothRecordsOfTheEpisode(t *testing.T) {
 		if _, err := root.Lstat(p); !errors.Is(err, os.ErrNotExist) {
 			t.Fatal("a partial was left", p, err)
 		}
+	}
+}
+
+// renamingVault renames the show folder by hand at the first read of the
+// pairing's token (the fetch's first, after it took the episode's lock).
+type renamingVault struct {
+	secrets.Store
+	once sync.Once
+	move func()
+}
+
+func (v *renamingVault) Get(name string) (string, error) {
+	if name == secrets.ServerToken {
+		v.once.Do(v.move)
+	}
+	return v.Store.Get(name)
+}
+
+// A show folder renamed by hand just after a fetch took the episode's lock,
+// the fetch then failing before its download (the folder gone at the
+// snapshot): the lock file moved with the folder, and the fetch lets it go
+// there, its file removed, rather than leave it in the renamed folder.
+func TestAFetchFailingEarlyLetsGoOfItsLockWhereTheShowIsNow(t *testing.T) {
+	h, job := audioHarness(t)
+	s := h.handler.s
+	s.o.Vault = &renamingVault{Store: s.o.Vault, move: func() { renameShow(t, h, "Fixture Show", "Renamed Show") }}
+	if res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter()); err == nil {
+		t.Fatal("the fetch did not fail", res)
+	}
+	if _, err := os.Lstat(filepath.Join(h.mount, "Renamed Show")); err != nil {
+		t.Fatal("the folder was not renamed", err)
+	}
+	lockFile := filepath.Join(h.mount, podcast.AttachmentPath("Renamed Show/"+path.Base(*job.Path), ".fetch.lock"))
+	if _, err := os.Lstat(lockFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the episode's lock was left in the renamed folder", err)
 	}
 }
