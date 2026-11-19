@@ -487,7 +487,7 @@ func (h *Handler) keepShareLocal(ctx context.Context, eng Engine, r *run, b *sto
 	}
 	if r.shareSkipped == "" {
 		why := ShareSkippedContributionsOff
-		if b != nil && b.ContribMode == store.ContribModeLocal && b.ShareSkipped != "" {
+		if b != nil && b.ShareSkipped != "" {
 			why = b.ShareSkipped
 		}
 		r.params.Contribute, r.shareSkipped = ContributeLocal, why
@@ -552,14 +552,14 @@ func (h *Handler) resumeMapping(ctx context.Context, job jobs.Job) (store.Genera
 		}
 		if i < stopTries {
 			h.o.Log.Warn("generate: reading the job's earlier run failed; trying again", "job", job.ID, "err", err)
-			err = agent.SleepCtx(ctx, h.o.Poll)
-		}
-		if err != nil {
-			if ctx.Err() == nil || !jobs.Resumes(ctx) {
-				h.Abandon(context.WithoutCancel(ctx), job)
+			if err = agent.SleepCtx(ctx, h.o.Poll); err == nil {
+				continue
 			}
-			return store.GenerateBook{}, false, err
 		}
+		if ctx.Err() == nil || !jobs.Resumes(ctx) {
+			h.Abandon(context.WithoutCancel(ctx), job)
+		}
+		return store.GenerateBook{}, false, err
 	}
 }
 

@@ -226,10 +226,6 @@ type NewBook struct {
 	State    string // "" defaults to queued
 	// ContribMode is the book's own contribution mode ("" = the configured one).
 	ContribMode string
-	// ShareSkipped is why a book that was to be shared was kept local
-	// (migration 0019: ShareSkippedContributionsOff or ShareSkippedNoShareJob),
-	// "" while it shares as asked or was never to.
-	ShareSkipped string
 	// Goal is how far the book runs ("" the whole pipeline, "chapters").
 	Goal string
 }

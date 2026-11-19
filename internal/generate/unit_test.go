@@ -1239,6 +1239,30 @@ func TestKeepShareLocalTakesTheBooksReason(t *testing.T) {
 	}
 }
 
+// runningMappedBook is a store with server job 1 (sidecars.generate, attempt
+// 1) mapped to an issue-mode engine book that is running (asr).
+func runningMappedBook(t *testing.T) (*store.DB, store.Book) {
+	t.Helper()
+	ctx := context.Background()
+	db, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.RecordClaim(ctx, store.ServerJob{ID: 1, Kind: Kind, Attempt: 1}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := db.CreateMappedBook(ctx, store.NewBook{SourcePath: "/lib/b", WorkDir: t.TempDir(), Title: "b",
+		ContribMode: store.ContribModeIssue}, store.GenerateBook{ServerJobID: 1, LibraryID: 1, RelPath: "b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetBookState(ctx, b.ID, "asr", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	return db, b
+}
+
 // failingCancelEngine is the engine with its guarded cancel failing while
 // fails is above zero (each call takes one).
 type failingCancelEngine struct {
@@ -1267,20 +1291,7 @@ func TestJobEndThatCantStopItsBookKeepsItLocal(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()
-			db, err := store.Open(ctx, ":memory:")
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { _ = db.Close() })
-			if err := db.RecordClaim(ctx, store.ServerJob{ID: 1, Kind: Kind, Attempt: 1}); err != nil {
-				t.Fatal(err)
-			}
-			b, err := db.CreateMappedBook(ctx, store.NewBook{SourcePath: "/lib/b", WorkDir: t.TempDir(), Title: "b",
-				ContribMode: store.ContribModeIssue}, store.GenerateBook{ServerJobID: 1, LibraryID: 1, RelPath: "b"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			_ = db.SetBookState(ctx, b.ID, "asr", "", "", "")
+			db, b := runningMappedBook(t)
 			fails := &atomic.Int32{}
 			fails.Store(c.fails)
 			sched := scheduler.New(db, events.NewHub(8), scheduler.NewStubExecutor(0, 0), 1, "", false)
@@ -1320,20 +1331,7 @@ func TestResumeMappingReadErrorStopsTheEarlierBook(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()
-			db, err := store.Open(ctx, ":memory:")
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { _ = db.Close() })
-			if err := db.RecordClaim(ctx, store.ServerJob{ID: 1, Kind: Kind, Attempt: 1}); err != nil {
-				t.Fatal(err)
-			}
-			b, err := db.CreateMappedBook(ctx, store.NewBook{SourcePath: "/lib/b", WorkDir: t.TempDir(), Title: "b",
-				ContribMode: store.ContribModeIssue}, store.GenerateBook{ServerJobID: 1, LibraryID: 1, RelPath: "b"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			_ = db.SetBookState(ctx, b.ID, "asr", "", "", "")
+			db, b := runningMappedBook(t)
 			sched := scheduler.New(db, events.NewHub(8), scheduler.NewStubExecutor(0, 0), 1, "", false)
 			h := New(Options{DB: db, RetentionDays: 30, Poll: time.Millisecond, Log: slog.New(slog.DiscardHandler),
 				Engine: func() Engine { return sched }})
