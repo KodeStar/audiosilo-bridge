@@ -103,7 +103,7 @@ func (l looks) checkPodcast(ctx context.Context, src MarkerSource, lib link.Libr
 			_, err = l.stat(full)
 		}
 		if err != nil {
-			st.Error = "the folder no longer shows the marker an earlier look found (" + describeStatError(err) + ")"
+			st.Error = lostSight("the marker an earlier look found", err)
 			return st, folderSlow{error: err, wrote: writes.unsettled()}
 		}
 	}

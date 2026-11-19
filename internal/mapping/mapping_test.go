@@ -1146,6 +1146,35 @@ func TestRateLimitedPassProvesTheUnreached(t *testing.T) {
 	}
 }
 
+// A kept state's folder that doesn't answer the stat in time is unknown, and
+// says the folder didn't answer: only one that answers without the book (or
+// marker) says it no longer shows it.
+func TestProveKeptSaysAHungFolderDidntAnswer(t *testing.T) {
+	t.Parallel()
+	last := link.LibraryStatus{LibraryID: 1, MountPath: "/m", Mapped: true, Writable: true, CheckedPath: "Author/Book"}
+	limited := &link.APIError{Status: http.StatusTooManyRequests}
+	for _, tc := range []struct {
+		name, want, not string
+		err             error
+	}{
+		{"hung", "the folder didn't answer within " + LookTimeout.String() + " to show Author/Book", "no longer shows", fsutil.ErrStatTimeout},
+		{"gone", "the folder no longer shows Author/Book, which the last check found (not found here)", "didn't answer within", fs.ErrNotExist},
+	} {
+		stat := func(p string) (fs.FileInfo, error) { return nil, &fs.PathError{Op: "stat", Path: p, Err: tc.err} }
+		st, err := proveKept(link.LibraryStatus{LibraryID: 1, MountPath: "/m"}, limited, last, stat)
+		var lost unproven
+		if st.Mapped || st.Writable || !errors.As(err, &lost) {
+			t.Fatalf("%s: a kept state the folder doesn't prove = %+v, %v; want unknown", tc.name, st, err)
+		}
+		if !strings.Contains(st.Error, tc.want) || strings.Contains(st.Error, tc.not) {
+			t.Fatalf("%s: problem = %q; want %q, not %q", tc.name, st.Error, tc.want, tc.not)
+		}
+	}
+	if got := lostSight("the marker an earlier look found", &fs.PathError{Op: "stat", Path: "/m", Err: fsutil.ErrStatTimeout}); strings.Contains(got, "no longer shows") {
+		t.Fatalf("a hung look at a podcast marker = %q; want no claim it is gone", got)
+	}
+}
+
 // A kept state that wasn't mapped is unknown past the cap too, but keeps its
 // own reason, which says more than the server's silence does.
 func TestDueKeepsAnUnmappedState(t *testing.T) {

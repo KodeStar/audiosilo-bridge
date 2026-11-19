@@ -156,6 +156,16 @@ func describeStatError(err error) string {
 	return err.Error()
 }
 
+// lostSight says why a stat of what (something an earlier check found in the
+// folder) failed: a mount that didn't answer within LookTimeout says nothing
+// about what is there, so it isn't reported as gone.
+func lostSight(what string, err error) string {
+	if errors.Is(err, fsutil.ErrStatTimeout) {
+		return "the folder didn't answer within " + LookTimeout.String() + " to show " + what
+	}
+	return "the folder no longer shows " + what + " (" + describeStatError(err) + ")"
+}
+
 // ProbePrefix starts a probe file's name. The leading dot keeps a probe a
 // crash leaves behind out of the server's scan (it never walks hidden names).
 const ProbePrefix = ".audiosilo-bridge-probe-"
@@ -870,8 +880,7 @@ func proveKept(st link.LibraryStatus, unanswered error, last link.LibraryStatus,
 	var slow folderSlow
 	switch {
 	case err != nil:
-		st.Error = "the folder no longer shows " + last.CheckedPath + ", which the last check found (" +
-			describeStatError(err) + "), and " + noAnswer(unanswered)
+		st.Error = lostSight(last.CheckedPath+", which the last check found", err) + ", and " + noAnswer(unanswered)
 	case errors.As(unanswered, &slow) && slow.wrote != nil && slow.wrote():
 		// Asked only once the stat answered: a marker it saw was begun before.
 		st.Error = "the folder shows " + last.CheckedPath + ", but a look of this check may have written it, which proves nothing, and " + noAnswer(unanswered)
