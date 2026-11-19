@@ -2149,7 +2149,8 @@ internal/
             (AudiblePlan {library_id, path, file, kind, siblings, state, conflict,
             template}, null when matched; the Plan*/Conflict* constants), 4b owner
             fixes, unreleased on both sides so no capability gate),
-            LibraryBooks (limit <= MaxLibraryBooks 500) and Enrich (PUT
+            LibraryBooks (limit <= MaxLibraryBooks 500; a refused after -> ErrBadCursor, as the
+            feed's since, bridge#50) and Enrich (PUT
             .../enrichment?path= {"asin"}: 409 asin_set -> ErrASINSet, any 404 ->
             ErrNoBook). The server decodes titles and accounts strictly: send only
             the Wire block's fields. Phase 4c, audiblesync.go: AudibleSyncParams/Title (audible.sync's
@@ -3101,11 +3102,17 @@ internal/
             never its time; the baseline, every read until one reaches the feed's end, takes only rows
             of the last 10 min by updated_at (counted back from the page's server_time, the server's
             clock, else the Bridge's from a server before 2.7.0, bridge#50), history after it is none; a row it fails to record keeps
-            the cursor, so the pass reads it again; a cursor the server refuses,
-            400, goes back to the feed's start, bridge#50, and that read, push_reread until one reaches
-            the feed's end, keeps the baseline's line (historyCutoff: a row changed more than 10 min before push_from
+            the cursor, so the pass reads it again; a cursor the server refuses
+            (ErrBadCursor: unreadable, another feed's, past the feed's end), goes back to the feed's start, bridge#50, and that read, push_reread until one reaches
+            the feed's end, keeps the baseline's line (historyCutoff: a row changed more than 10 min before push_from,
+            moved onto the server's clock by the page's server_time,
             is history again whatever its place, so a server restored from a backup has no place
-            from before the baseline written over Audible's; one changed since is a new place)), skips rows by audible:<account>, keeps a
+            from before the baseline written over Audible's) and drops a title's place no later than the one last
+            read or written for it (olderThanKnown: updated_at not after the later of row_seen and at, by the
+            server's clock, so a backup's row changed after the baseline but older than the place handled since is
+            history too; a row changed since is a new place); refused resetStrikes (3) passes in a row (a server
+            refusing even the cursors it gave), the account waits resetWait (1 h), logged once with a push_error,
+            until a pass reads its pages with no refusal), skips rows by audible:<account>, keeps a
             row on a title the last sync didn't list for that book pending (listed 0,
             store.PendAudiblePush) until a sync lists it; for the places still for StillFor (3 min, since
             row_seen: the Bridge's clock) it drops one under 1 s, within 5 s of last_ms (debounce) or
@@ -3192,7 +3199,8 @@ internal/
             and ApplyDestinations went in Phase 4b: audiblejob's import runs the
             steps. The manager's serverapi client went: the Bridge holds
             the paged listing. AllBooks (books.go, LibriVox L6) reads that listing
-            whole for audiblejob and librivoxjob. Deps: link, placement, source,
+            whole for audiblejob and librivoxjob (a cursor the server refuses,
+            link.ErrBadCursor, sends it back to the start once, bridge#50). Deps: link, placement, source,
             audiosilo-server/pkg/match.
   placement/ where a new book goes (the manager's): Auto (series siblings'
             folder and shortcode convention, else author/title) and templates.

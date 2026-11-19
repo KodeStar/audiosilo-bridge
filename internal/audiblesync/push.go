@@ -36,6 +36,12 @@ const (
 	oldServerStrikes = 2
 	// errorWait is the least wait after a failure (the server's or Audible's).
 	errorWait = 2 * time.Minute
+	// resetStrikes is how many passes in a row the server may refuse the
+	// push's cursor (each a read from the start) before the account is left
+	// for resetWait: a server refusing even the cursors it gave would
+	// otherwise send the push back to the feed's start every pass.
+	resetStrikes = 3
+	resetWait    = time.Hour
 	// baselineWindow: the first read of an account's feed to its end (the
 	// baseline, push_from still unset) takes the places changed this recently
 	// (by the row's updated_at) as waiting to be pushed; older ones are
@@ -59,12 +65,16 @@ type Pusher struct {
 	// noFeed counts each account's route-missing 404s in a row
 	// (oldServerStrikes); any other answer ends the run.
 	noFeed map[string]int
+	// resets counts each account's passes in a row that ended on a refused
+	// cursor (resetStrikes); a pass that read its pages without one ends the
+	// run.
+	resets map[string]int
 }
 
 // NewPusher returns the push loop.
 func NewPusher(o Options) *Pusher {
 	o.defaults()
-	return &Pusher{o: o, paused: map[string]time.Time{}, noFeed: map[string]int{}}
+	return &Pusher{o: o, paused: map[string]time.Time{}, noFeed: map[string]int{}, resets: map[string]int{}}
 }
 
 // Run pushes every PushEvery until ctx ends.
@@ -127,17 +137,17 @@ func (p *Pusher) pause(id string, until time.Time) {
 	p.mu.Unlock()
 }
 
-// noFeedStrike counts one more route-missing 404 in a row for id when
-// missing, else ends the run, and returns the count.
-func (p *Pusher) noFeedStrike(id string, missing bool) int {
+// strike counts one more in a row for id in runs (noFeed, resets) when hit,
+// else ends id's run, and returns the count.
+func (p *Pusher) strike(runs map[string]int, id string, hit bool) int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if !missing {
-		delete(p.noFeed, id)
+	if !hit {
+		delete(runs, id)
 		return 0
 	}
-	p.noFeed[id]++
-	return p.noFeed[id]
+	runs[id]++
+	return runs[id]
 }
 
 // account reads a's feed from its cursor, records the places waiting, then
@@ -157,7 +167,7 @@ func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount
 	unrecorded := false // a row wasn't recorded: the cursor stays, so it is read again
 	for range maxPages {
 		page, err := srv.AudibleProgress(ctx, a.ID, cursor, link.MaxAudibleProgress)
-		strikes := p.noFeedStrike(a.ID, errors.Is(err, link.ErrNoAudibleSync))
+		strikes := p.strike(p.noFeed, a.ID, errors.Is(err, link.ErrNoAudibleSync))
 		switch {
 		case errors.Is(err, link.ErrSyncOff):
 			p.pause(a.ID, now.Add(offWait))
@@ -169,15 +179,16 @@ func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount
 			return
 		case errors.Is(err, link.ErrBadCursor):
 			// The server refused the cursor (a server restored from a backup,
-			// its feed rebuilt): sent again it fails the same way every pass,
-			// stopping the push for good. Read the feed again from its start;
-			// the rows recorded already read at the same place change nothing,
-			// and the ones changed before the account's baseline are history
-			// again (historyCutoff), whatever place they have now.
-			p.o.Log.Warn("audible: the server refused the push's cursor, reading its places from the start", "account", a.ID, "err", err)
-			if err := p.o.DB.ResetAudiblePushCursor(ctx, a.ID); err != nil {
-				p.o.Log.Warn("audible: resetting the push's cursor failed", "account", a.ID, "err", err)
-			}
+			// its feed rebuilt, one past the feed's end): sent again it fails
+			// the same way every pass, stopping the push for good. Read the
+			// feed again from its start; the rows recorded already read at the
+			// same place change nothing, and the ones changed before the
+			// account's baseline, or before the place last read or written
+			// for their title, are history again (historyCutoff, olderThanKnown),
+			// whatever place they have now. A server that refuses the cursor
+			// pass after pass (even the next page's it gave) leaves the
+			// account for resetWait after resetStrikes, logged once.
+			p.cursorRefused(ctx, a, err, now)
 			return
 		case strikes > 0 && strikes < oldServerStrikes:
 			// A bare 404 may be a proxy's while the server restarts: asked
@@ -205,9 +216,9 @@ func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount
 			}
 			return
 		}
-		cutoff := historyCutoff(a, page.ServerTime, now)
+		line := readLine{cutoff: historyCutoff(a, page.ServerTime, now), reread: a.PushReread, skew: serverSkew(page.ServerTime, now)}
 		for _, row := range page.Rows {
-			if !p.row(ctx, a, titles, row, cutoff, now) {
+			if !p.row(ctx, a, titles, row, line, now) {
 				unrecorded = true
 			}
 		}
@@ -219,6 +230,7 @@ func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount
 			break
 		}
 	}
+	p.strike(p.resets, a.ID, false) // the pages read with no refusal
 	// A row that wasn't recorded keeps the cursor where it was: the next pass
 	// reads the pages again (the rows recorded read again at the same place
 	// change nothing), never past a place it would then never push.
@@ -240,6 +252,70 @@ func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount
 	}
 }
 
+// cursorRefused sends a's push back to the feed's start after the server
+// refused its cursor (err), and leaves the account for resetWait once that
+// happened resetStrikes passes in a row: the first refusal and the one that
+// starts the waits are logged, the ones between and after are not.
+func (p *Pusher) cursorRefused(ctx context.Context, a store.AudibleAccount, err error, now time.Time) {
+	n := p.strike(p.resets, a.ID, true)
+	switch n {
+	case 1:
+		p.o.Log.Warn("audible: the server refused the push's cursor, reading its places from the start", "account", a.ID, "err", err)
+	case resetStrikes:
+		p.o.Log.Warn("audible: the server keeps refusing the push's cursor, even the ones it gave; reading its places "+
+			"again in an hour", "account", a.ID, "refusals", n, "err", err)
+		p.o.health(ctx, store.SyncPush, a, fmt.Errorf("the server keeps refusing the cursor of its places feed: %w", err), time.Time{})
+	}
+	if n >= resetStrikes {
+		p.pause(a.ID, now.Add(resetWait))
+	}
+	if err := p.o.DB.ResetAudiblePushCursor(ctx, a.ID); err != nil {
+		p.o.Log.Warn("audible: resetting the push's cursor failed", "account", a.ID, "err", err)
+	}
+}
+
+// readLine is what makes a row on one page history rather than a new place:
+// its updated_at before cutoff (historyCutoff), and on a read from the start
+// after a refused cursor (reread) its place no later than the one last read or
+// written for its title (olderThanKnown, the Bridge's clock moved onto the
+// server's by skew, serverSkew).
+type readLine struct {
+	cutoff time.Time
+	reread bool
+	skew   time.Duration
+}
+
+// serverSkew is the server's clock less the Bridge's (now) by the page's
+// server_time, 0 from a server before 2.7.0 (none).
+func serverSkew(serverTime string, now time.Time) time.Duration {
+	at, err := time.Parse(time.RFC3339Nano, serverTime)
+	if err != nil {
+		return 0
+	}
+	return at.Sub(now)
+}
+
+// olderThanKnown reports whether a row read again from the start after a
+// refused cursor holds a place from no later than the last place this Bridge
+// read (row_seen) or wrote (at) for the title x: a server restored from a
+// backup answers the row as it was before then, changed after the baseline
+// perhaps but older than the place already handled, and written again it would
+// move Audible back. A row whose updated_at can't be read counts as older; a
+// title with neither time, as never handled (the baseline's line alone).
+func olderThanKnown(updatedAt string, x store.AudiblePush, skew time.Duration) bool {
+	updated, err := time.Parse(time.RFC3339Nano, updatedAt)
+	if err != nil {
+		return true
+	}
+	var known time.Time
+	for _, s := range []string{x.RowSeen, x.At} {
+		if at, err := time.Parse(time.RFC3339Nano, s); err == nil && at.After(known) {
+			known = at
+		}
+	}
+	return !known.IsZero() && !updated.After(known.Add(skew))
+}
+
 // historyCutoff is when a row's place counts as history: while the baseline
 // reads the feed (push_from unset, perhaps over several passes) a row changed
 // before it is history, after it none is (zero). The rows' updated_at are the
@@ -254,14 +330,15 @@ func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount
 // server restored from a backup answers older places than the ones this Bridge
 // read and wrote to Audible, and written again they would move Audible back.
 // A row changed since the baseline is still a new place. (push_from is the
-// Bridge's clock; one that can't be read draws the line again, as a baseline.)
+// Bridge's clock, moved onto the server's by the page's server_time,
+// serverSkew; one that can't be read draws the line again, as a baseline.)
 func historyCutoff(a store.AudibleAccount, serverTime string, now time.Time) time.Time {
 	if a.PushFrom != "" {
 		if !a.PushReread {
 			return time.Time{}
 		}
 		if from, err := time.Parse(time.RFC3339Nano, a.PushFrom); err == nil {
-			return from.Add(-baselineWindow)
+			return from.Add(serverSkew(serverTime, now) - baselineWindow)
 		}
 	}
 	if at, err := time.Parse(time.RFC3339Nano, serverTime); err == nil {
@@ -278,14 +355,15 @@ func historyCutoff(a store.AudibleAccount, serverTime string, now time.Time) tim
 // its place, never its time: one read again at the same place (whatever else
 // changed: its version, finish, length or device) is no new place and doesn't
 // restart the wait. Audible's own rows (the server leaves them out too) are left,
-// and history (changed before cutoff: the baseline's, and a read from the start
-// after a refused cursor) is recorded with no waiting place. A row on a title the last sync didn't list for that book (the
+// and history (by line: changed before its cutoff, the baseline's, and on a
+// read from the start after a refused cursor, a place no later than the one
+// last read or written for its title) is recorded with no waiting place. A row on a title the last sync didn't list for that book (the
 // server's feed already syncs it: a new match, a re-match, a title synced
 // again) is kept pending until the next sync lists it, never skipped past.
 // titles is account a's rows by ASIN, kept up to date with what row records.
 // ok is false when recording the row failed.
 func (p *Pusher) row(ctx context.Context, a store.AudibleAccount, titles map[string]store.AudiblePush, row link.AudibleProgressRow,
-	cutoff, now time.Time) (ok bool) {
+	line readLine, now time.Time) (ok bool) {
 	if row.DeviceID == DeviceID(a.ID) {
 		return true
 	}
@@ -296,9 +374,12 @@ func (p *Pusher) row(ctx context.Context, a store.AudibleAccount, titles map[str
 		return true
 	}
 	history := false
-	if !cutoff.IsZero() {
+	if !line.cutoff.IsZero() {
 		updated, err := time.Parse(time.RFC3339Nano, row.UpdatedAt)
-		history = err != nil || updated.Before(cutoff)
+		history = err != nil || updated.Before(line.cutoff)
+	}
+	if !history && line.reread && sameBook {
+		history = olderThanKnown(row.UpdatedAt, x, line.skew)
 	}
 	rec := store.AudibleRow{Ms: place, Seen: now}
 	var err error

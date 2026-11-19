@@ -145,18 +145,19 @@ func (s *stubAccounts) SetPosition(_ context.Context, _, asin, acr string, posit
 // place applied and one not ahead behind (furthest only), and serves a feed of
 // rows with an opaque cursor (the index past the last row read).
 type stubServer struct {
-	mu       sync.Mutex
-	server   map[string]float64 // path -> the server's place
-	posted   []link.AudibleListening
-	postErr  error
-	rows     []link.AudibleProgressRow
-	feedErr  error
-	badSince string   // a cursor the feed answers 400 for
-	feedAsks []string // since values
-	pageSize int
-	clock    time.Time          // the feed's server_time (zero: none, a server before 2.7.0)
-	duration map[string]float64 // path -> the book's length on the server (0 unknown)
-	rejected map[string]string  // path -> the reason the server rejects its events
+	mu        sync.Mutex
+	server    map[string]float64 // path -> the server's place
+	posted    []link.AudibleListening
+	postErr   error
+	rows      []link.AudibleProgressRow
+	feedErr   error
+	badSince  string   // a cursor the feed answers 400 for
+	refuseAll bool     // every cursor answered 400, even the ones the feed gave
+	feedAsks  []string // since values
+	pageSize  int
+	clock     time.Time          // the feed's server_time (zero: none, a server before 2.7.0)
+	duration  map[string]float64 // path -> the book's length on the server (0 unknown)
+	rejected  map[string]string  // path -> the reason the server rejects its events
 }
 
 func (s *stubServer) PostAudibleListening(_ context.Context, account string, in link.AudibleListening) (*link.SyncAnswer, error) {
@@ -196,7 +197,7 @@ func (s *stubServer) AudibleProgress(_ context.Context, account, since string, l
 	if s.feedErr != nil {
 		return nil, s.feedErr
 	}
-	if since != "" && since == s.badSince {
+	if since != "" && (since == s.badSince || s.refuseAll) {
 		return nil, fmt.Errorf("%w: %w", link.ErrBadCursor, &link.APIError{Status: http.StatusBadRequest, Code: "invalid_cursor"})
 	}
 	start := 0

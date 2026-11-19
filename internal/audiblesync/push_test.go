@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strings"
@@ -929,5 +930,161 @@ func TestPushRejectedCursorKeepsTheBaseline(t *testing.T) {
 	p.Tick(ctx)
 	if got := e.sets(); len(got) != 3 || got[2] != "B000000003@7200000" {
 		t.Fatalf("sets = %v, want the place written after the read", got)
+	}
+}
+
+// A read from the start after a refused cursor never writes back to Audible a
+// place the server holds from before the one this Bridge last read or wrote
+// for that title (bridge#50): a server restored from a backup taken after the
+// baseline answers a row changed since the baseline, but older than the place
+// handled since. A title's place written on the server after the one handled
+// is still new, the two clocks compared through the page's server_time (here
+// the server's is two hours behind the Bridge's).
+func TestPushRereadSkipsPlacesOlderThanKnown(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	e.list(t, st("B000000001", "A/One", 36000), st("B000000002", "A/Two", 36000))
+	const skew = -2 * time.Hour
+	clock := func(d time.Duration) {
+		e.now = e.now.Add(d)
+		e.srv.mu.Lock()
+		e.srv.clock = e.now.Add(skew)
+		e.srv.mu.Unlock()
+	}
+	clock(0)
+	p := NewPusher(e.o)
+	e.started(t, p)
+
+	// An hour on, One at 5 h and Two at 1 h are read and written.
+	clock(time.Hour)
+	e.srv.add("A/One", "B000000001", 18000, e.now.Add(skew), "web-1")
+	e.srv.add("A/Two", "B000000002", 3600, e.now.Add(skew), "web-1")
+	backup := append([]link.AudibleProgressRow(nil), e.srv.rows...) // the backup is taken now
+	e.read(p)
+	clock(4 * time.Minute)
+	p.Tick(ctx)
+	// An hour later One moves on to 6 h, read and written too.
+	clock(time.Hour)
+	e.srv.add("A/One", "B000000001", 21600, e.now.Add(skew), "web-1")
+	e.read(p)
+	clock(4 * time.Minute)
+	p.Tick(ctx)
+	if got := e.sets(); strings.Join(got, " ") != "B000000001@18000000 B000000002@3600000 B000000001@21600000" {
+		t.Fatalf("sets before the restore = %v", got)
+	}
+
+	// The server is restored from the backup and refuses the cursor; Two is
+	// listened to on it since, to 2 h.
+	clock(30 * time.Minute)
+	e.srv.mu.Lock()
+	e.srv.badSince = e.account(t).PushCursor
+	e.srv.rows = backup
+	e.srv.mu.Unlock()
+	e.srv.add("A/Two", "B000000002", 7200, e.now.Add(skew), "web-1")
+	e.read(p) // refused: back to the start
+	if a := e.account(t); a.PushCursor != "" || !a.PushReread {
+		t.Fatalf("after the refusal: cursor %q reread %v", a.PushCursor, a.PushReread)
+	}
+	e.srv.mu.Lock()
+	e.srv.badSince = ""
+	e.srv.mu.Unlock()
+	e.read(p)
+	clock(4 * time.Minute)
+	p.Tick(ctx)
+	if got := e.sets(); len(got) != 4 || got[3] != "B000000002@7200000" {
+		t.Fatalf("sets after the restore = %v, want Two's new place and not One's older one", got)
+	}
+	if x, err := e.db.GetAudiblePush(ctx, acctID, "B000000001"); err != nil || x.WantMs != nil || x.RowMs != 18_000_000 {
+		t.Fatalf("One after the read = %+v (%v), want the server's row recorded with no place waiting", x, err)
+	}
+}
+
+// A server that refuses even the cursors it gave is not read from the start
+// every pass: after resetStrikes refusals in a row the account waits
+// resetWait, logged once and recorded as the push's failure, until a pass
+// reads its pages with none (bridge#50).
+func TestPushRefusedCursorBacksOff(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	var logs strings.Builder
+	e.o.Log = slog.New(slog.NewTextHandler(&logs, nil))
+	e.list(t, st("B000000001", "A/One", 36000))
+	e.srv.pageSize = 1
+	e.srv.refuseAll = true
+	e.srv.add("A/One", "B000000001", 600, e.now, "web-1")
+	e.srv.add("A/One", "B000000001", 900, e.now, "web-1")
+	p := NewPusher(e.o)
+	asks := func() int {
+		e.srv.mu.Lock()
+		defer e.srv.mu.Unlock()
+		return len(e.srv.feedAsks)
+	}
+	for range resetStrikes {
+		p.Tick(ctx) // the start, then the next page's cursor refused
+	}
+	if n := asks(); n != 2*resetStrikes {
+		t.Fatalf("feed asks = %d, want %d", n, 2*resetStrikes)
+	}
+	if a := e.account(t); a.PushError == "" || a.PushCursor != "" {
+		t.Fatalf("after %d refusals: %+v", resetStrikes, a)
+	}
+	p.Tick(ctx)
+	if n := asks(); n != 2*resetStrikes {
+		t.Fatalf("a pass while waiting asked the feed (%d asks)", n)
+	}
+	e.now = e.now.Add(resetWait)
+	p.Tick(ctx) // refused again: waits again, not logged again
+	p.Tick(ctx)
+	if n := asks(); n != 2*resetStrikes+2 {
+		t.Fatalf("feed asks after the wait = %d", n)
+	}
+	if n := strings.Count(logs.String(), "refused the push's cursor"); n != 1 {
+		t.Fatalf("the first refusal logged %d times:\n%s", n, logs.String())
+	}
+	if n := strings.Count(logs.String(), "keeps refusing"); n != 1 {
+		t.Fatalf("the waits logged %d times:\n%s", n, logs.String())
+	}
+
+	// The server takes its cursors again: the read reaches the end and the
+	// run is over, so a later refusal is the first again.
+	e.srv.mu.Lock()
+	e.srv.refuseAll = false
+	e.srv.mu.Unlock()
+	e.now = e.now.Add(resetWait)
+	p.Tick(ctx)
+	if a := e.account(t); a.PushCursor != "c2" || a.PushReread {
+		t.Fatalf("the read after the waits: cursor %q reread %v", a.PushCursor, a.PushReread)
+	}
+	p.mu.Lock()
+	run := p.resets[acctID]
+	p.mu.Unlock()
+	if run != 0 {
+		t.Fatalf("refusals in a row after a clean read = %d", run)
+	}
+}
+
+// The line a read from the start after a refused cursor draws is the
+// baseline's end (push_from, the Bridge's clock) moved onto the server's clock
+// by the page's server_time, less the window; with no server_time it stays on
+// the Bridge's. The baseline's own read counts back from server_time.
+func TestHistoryCutoffClocks(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	from := now.Add(-24 * time.Hour)
+	behind := now.Add(-2 * time.Hour).Format(time.RFC3339)
+	reread := store.AudibleAccount{PushFrom: store.Timestamp(from), PushReread: true}
+	for name, c := range map[string]struct {
+		a          store.AudibleAccount
+		serverTime string
+		want       time.Time
+	}{
+		"reread, server behind":    {reread, behind, from.Add(-2*time.Hour - baselineWindow)},
+		"reread, no server_time":   {reread, "", from.Add(-baselineWindow)},
+		"baseline":                 {store.AudibleAccount{}, behind, now.Add(-2*time.Hour - baselineWindow)},
+		"after the baseline's end": {store.AudibleAccount{PushFrom: store.Timestamp(from)}, behind, time.Time{}},
+	} {
+		if got := historyCutoff(c.a, c.serverTime, now); !got.Equal(c.want) {
+			t.Errorf("%s: cutoff %v, want %v", name, got, c.want)
+		}
 	}
 }
