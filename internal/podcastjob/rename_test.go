@@ -520,3 +520,33 @@ func TestTakingInMovesRecordsLeftUnderAGoneEarlierName(t *testing.T) {
 		t.Fatal("the record did not follow the folder", resumed, tag)
 	}
 }
+
+// A show folder renamed by hand, taken in, then renamed back while the server
+// still names the old folder: a fetch there takes the folder in again where
+// it is and fetches the episode, rather than failing as not found.
+func TestFetchTakesInAFolderRenamedBack(t *testing.T) {
+	requireProbe(t)
+	h, fetch := audioHarness(t)
+	audio := data(t, "chap-v24-reverse.mp3")
+	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"one"`)
+		w.Write(audio)
+	})
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	renameShow(t, h, "Fixture Show", "Renamed Show")
+	if _, err := h.handler.s.readShow(context.Background(), root, link.Library{ID: 3, Kind: "podcasts", Root: h.mount}, h.mount, "Renamed Show"); err != nil {
+		t.Fatal(err)
+	}
+	renameShow(t, h, "Renamed Show", "Fixture Show")
+	res, err := h.handler.FetchJob().Run(context.Background(), fetch, jobs.LocalReporter())
+	if err != nil {
+		t.Fatal(res, err)
+	}
+	if got := res.(fetchResult); got.Path != *fetch.Path || got.Fetch.Bytes != int64(len(audio)) {
+		t.Fatal(got)
+	}
+}

@@ -140,14 +140,14 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	defer func() { _ = root.Close() }()
 	// Read the show before creating lock artifacts, so invalid paths write
 	// nothing; one the server still names by a show folder renamed by hand is
-	// fetched where it is now.
+	// fetched where it is now. It is read again even at the same path:
+	// episodeAt may have taken the folder in there (renamed back by hand after
+	// a take-in elsewhere, while the server still names it).
 	if _, _, err = s.readEpisode(root, *job.Path, params); err != nil {
-		p := s.episodeAt(waitCtx, root, lib, mount, *job.Path, params, job.ID)
-		if p == *job.Path {
-			return nil, err
+		if p := s.episodeAt(waitCtx, root, lib, mount, *job.Path, params, job.ID); p != *job.Path {
+			job.Path, claimed.Path = &p, &p
 		}
-		job.Path, claimed.Path = &p, &p
-		if _, _, err = s.readEpisode(root, p, params); err != nil {
+		if _, _, err = s.readEpisode(root, *job.Path, params); err != nil {
 			return nil, err
 		}
 	}
@@ -310,8 +310,9 @@ func leaseFailure(ctx context.Context, err error, lost string) error {
 // the show (lockShow, which takes it in when renamed), and the records of the
 // show's interrupted downloads still under the old folder, this job's own
 // included, follow it (adoptCheckpoints). p when its folder holds the show
-// (the episode itself is missing) or none does. Its show lock is taken and
-// released before the fetch's own locks.
+// (the episode itself is missing, or lockShow just took the folder in there)
+// or none does. Its show lock is taken and released before the fetch's own
+// locks.
 func (s *service) episodeAt(ctx context.Context, root *os.Root, lib link.Library, mount, p string, params fetchParams, self int64) string {
 	from := path.Dir(p)
 	f, err := podcast.Read(root, from)

@@ -2399,7 +2399,9 @@ internal/
             would stay in the folder for good. A job still working under the
             old name never saves over, clears or abandons another show's record
             at its path (one moved there when names were swapped), nor its
-            partial. A saved feed.json over
+            partial. A fetch whose folder lockShow takes in where it is (renamed
+            back by hand after a take-in) reads its episode again there rather
+            than failing as not found. A saved feed.json over
             the read cap fails as too_large, not write_failed. A new show never
             takes the old name of a renamed folder not taken in yet (find
             answers those names): the server indexes that name as the renamed
