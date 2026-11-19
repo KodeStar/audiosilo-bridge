@@ -806,12 +806,8 @@ func TestAbandonBeforeTheEngineStartsStopsTheBookAtOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	up.Store(true)
-	deadline := time.Now().Add(testwait.Scaled(10 * time.Second))
-	for got, _ = db.GetBook(ctx, b.ID); !scheduler.IsCancelled(got); got, _ = db.GetBook(ctx, b.ID) {
-		if time.Now().After(deadline) {
-			t.Fatalf("the book runs with no job once the engine is up: status %q", got.Status)
-		}
-		time.Sleep(time.Millisecond)
+	if !poll(func() bool { got, _ = db.GetBook(ctx, b.ID); return scheduler.IsCancelled(got) }) {
+		t.Fatalf("the book runs with no job once the engine is up: status %q", got.Status)
 	}
 	// Each case below is a job whose end Abandon's release recorded.
 	abandoned := func(job int64, slug string) store.Book {

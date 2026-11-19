@@ -313,10 +313,10 @@ type harness struct {
 	root  string
 	work  string
 	h     *Handler
-	// bgCtx and bg are the handlers' Background tasks (Abandon's wait for an
-	// engine still starting): ended, and waited for, before the store closes.
-	bgCtx context.Context
-	bg    sync.WaitGroup
+	// bg is the handlers' Background tasks (Abandon's wait for an engine
+	// still starting): ended with the test's context, waited for before the
+	// store closes.
+	bg sync.WaitGroup
 }
 
 func newHarness(t *testing.T) *harness {
@@ -331,14 +331,11 @@ func newHarness(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		// Runs after the engine, the server and the handlers' background
-		// tasks stopped (cleanups run last first). A stop interrupts a query,
-		// and an interrupted SQLite connection is discarded: database/sql
-		// closes it, and opens another for a request waiting on the one
-		// connection, on goroutines Close doesn't wait for. Late, that
-		// leaves a bridge.db (or its -wal, -shm) in the folder TempDir is
-		// removing ("directory not empty"). A query here waits for the
-		// connection to settle, so Close below closes the last one.
+		// Runs last (after the engine, server and background tasks stop). A
+		// stop interrupts a query, and database/sql replaces the discarded
+		// connection on goroutines Close doesn't wait for, which can leave a
+		// bridge.db in the folder TempDir removes. A query here waits for
+		// the connection to settle, so Close closes the last one.
 		ctx, cancel := context.WithTimeout(context.Background(), testwait.Scaled(10*time.Second))
 		defer cancel()
 		_, _ = db.ListRates(ctx)
@@ -376,19 +373,18 @@ func newHarness(t *testing.T) *harness {
 		t.Fatal("the scheduler never started")
 	}
 	hr := &harness{t: t, db: db, srv: srv, cl: cl, libs: libs, exec: exec, sched: sched, root: root, work: work}
-	bgCtx, bgStop := context.WithCancel(context.Background())
-	hr.bgCtx = bgCtx
-	t.Cleanup(func() { bgStop(); hr.bg.Wait() })
+	t.Cleanup(hr.bg.Wait)
 	hr.h = hr.handler()
 	return hr
 }
 
 // background is the harness's Options.Background: the task runs on the
-// harness's context and the harness waits for it, where the default's
-// goroutine would go on polling the store (and its folder) after the test.
+// test's context and the harness waits for it, where the default's goroutine
+// would go on polling the store (and its folder) after the test.
 func (hr *harness) background(fn func(context.Context)) {
+	ctx := hr.t.Context()
 	hr.bg.Add(1)
-	go func() { defer hr.bg.Done(); fn(hr.bgCtx) }()
+	go func() { defer hr.bg.Done(); fn(ctx) }()
 }
 
 func (hr *harness) handler() *Handler {
