@@ -1187,6 +1187,55 @@ func TestPairingLookRunsOnceTheStoreReads(t *testing.T) {
 	}
 }
 
+// laggingListStore answers its second list of the open jobs (a start's
+// recover, after its look) as read before the look's release of row id was
+// recorded: it lets that release go on (release) once it has read the rows,
+// and answers only once the row is recorded lost.
+type laggingListStore struct {
+	*store.DB
+	id      int64
+	release chan struct{}
+	n       atomic.Int32
+}
+
+func (s *laggingListStore) OpenServerJobs(ctx context.Context) ([]store.ServerJob, error) {
+	list, err := s.DB.OpenServerJobs(ctx)
+	if s.n.Add(1) != 2 {
+		return list, err
+	}
+	close(s.release)
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		if sj, gerr := s.GetServerJob(ctx, s.id); gerr == nil && sj.State == store.JobLost {
+			break
+		}
+	}
+	return list, err
+}
+
+// A start's recover never drops again a row its look is releasing, even one
+// recorded lost (and no longer held) after recover read the rows (denied: its
+// work released twice, its row recorded lost again).
+func TestRecoverLeavesARowTheLookReleased(t *testing.T) {
+	release := make(chan struct{})
+	h := newCountingAbandoner(nil, release, 2)
+	db := &laggingListStore{DB: openStore(t), id: 1, release: release}
+	droppedRows(t, db.DB, h.Kind(), 1)
+	srv := newControlledServer(false)
+	srv.pairing = "p2" // paired again with the same server: a new pairing
+	var cur atomic.Pointer[controlledServer]
+	cur.Store(srv)
+	opts := testOpts()
+	opts.Pairing = linkPairing(&cur)
+	opts.RetryEvery = time.Hour // retryReports never lists the rows
+	r := New(db, linkOf(&cur), nil, opts, h)
+	startControlled(t, r)
+	srv.next(t, false) // recover is done: the dispatchers claim
+	waitFor(t, func() bool { return !r.holds(1) })
+	if got := h.abandoned(); len(got) != 1 {
+		t.Fatal("released:", got)
+	}
+}
+
 // staleListStore lists the open jobs as an earlier read had them (list), while
 // its rows are what claims wrote since: the first list only (the start's
 // look), none after it. listed hears each list.

@@ -596,6 +596,12 @@ func (r *Runner) Run(ctx context.Context) {
 // jobs wait for retryReports. srv is the current link, id its server's. It
 // reports whether it could read them.
 func (r *Runner) recover(ctx context.Context, srv Server, id string, wg *sync.WaitGroup) bool {
+	// The look's drops still being released, taken before the rows are read:
+	// one recorded lost (no longer held) since then is still running in the
+	// list, and is no drop of recover's.
+	r.mu.Lock()
+	releasing := maps.Clone(r.dropping)
+	r.mu.Unlock()
 	open, err := r.store.OpenServerJobs(ctx)
 	if err != nil {
 		r.log.Warn("bridge: reading the open jobs failed", "err", err)
@@ -608,8 +614,9 @@ func (r *Runner) recover(ctx context.Context, srv Server, id string, wg *sync.Wa
 			// Another server's job (the Bridge was paired with this one since):
 			// its id means nothing here, so nothing is reported for it. Or an
 			// earlier pairing's, one the sweep couldn't record: the same. One
-			// the sweep is releasing already is left to it.
-			if r.holds(sj.ID) {
+			// the sweep is releasing (or released since the list was read) is
+			// left to it.
+			if releasing[sj.ID] > 0 || r.holds(sj.ID) {
 				continue
 			}
 			if d, ok := r.dropRecorded(ctx, sj); ok {
