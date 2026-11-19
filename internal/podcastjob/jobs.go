@@ -759,12 +759,12 @@ func (s *service) find(root *os.Root, entries []os.DirEntry, rows []store.Podcas
 // an error.
 func (s *service) lockShow(ctx context.Context, root *os.Root, lib link.Library, mount, show, id string, guard func(string) error) (_ string, _ *podcast.Feed, unlock func(), _ error) {
 	// Keyed and read under its spelling on disk (a case-only rename by hand).
-	show, _ = podcast.RealName(root, show)
+	show, lerr := podcast.RealName(root, show)
 	valid := podcast.ValidID(id)
 	// searched: show is gone and no folder holds id, so the read of show that
 	// then fails does not search every folder a second time.
 	searched := false
-	if _, err := root.Lstat(show); valid && errors.Is(err, os.ErrNotExist) {
+	if valid && errors.Is(lerr, os.ErrNotExist) {
 		if moved := s.relocate(ctx, root, lib, id); moved != "" {
 			show = moved
 		} else {
