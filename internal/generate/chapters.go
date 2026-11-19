@@ -401,8 +401,8 @@ func sidecarsWithoutChapters(p place) bool {
 // and the job's mapping are one transaction, on the job's context (a job
 // cancelled meanwhile leaves the run as it was, for the next one): a continued
 // book always has its job to follow it and is never left stopped. The book is
-// published as stored once continued (Engine.PublishStored), so its last
-// book.state event is no longer the cancel. It reports whether it continued it.
+// published as stored once continued (takeUp), so its last book.state event is
+// no longer the cancel. It reports whether it continued it.
 func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old store.Book, ebookRun int64) (bool, error) {
 	if r.source != SourceAudio || !continuable(old) {
 		return false, nil
@@ -449,8 +449,10 @@ func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old 
 	if err := h.clearEbookRun(ctx, eng, r, ebookRun); err != nil {
 		return false, err
 	}
-	err = h.o.DB.ContinueChapters(ctx, old.ID, old.State, string(to), h.newBook(r, old.AudioSource(), ""),
-		store.GenerateBook{ServerJobID: r.job.ID, LibraryID: r.lib.ID, RelPath: r.rel})
+	err = takeUp(ctx, eng, r, old.ID, func() error {
+		return h.o.DB.ContinueChapters(ctx, old.ID, old.State, string(to), h.newBook(r, old.AudioSource(), ""),
+			store.GenerateBook{ServerJobID: r.job.ID, LibraryID: r.lib.ID, RelPath: r.rel})
+	})
 	if errors.Is(err, store.ErrNotContinuable) {
 		return false, nil
 	} else if err != nil {
@@ -458,18 +460,24 @@ func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old 
 	}
 	h.o.Log.Info("generate: continuing the book's chapters run, its transcription kept", "job", r.job.ID, "book", old.ID,
 		"from", old.State)
-	tookUp(ctx, eng, r, old.ID)
 	return true, nil
 }
 
-// tookUp makes engine book id run r's book once a continue (ContinueChapters,
-// ContinueReadalong) has cleared its stop: it publishes the book as stored
-// (Engine.PublishStored), so its last book.state event is no longer the cancel,
-// and wakes the engine for it. Every continue ends here, so none can skip the publish.
-func tookUp(ctx context.Context, eng Engine, r *run, id int64) {
+// takeUp makes engine book id run r's book through write, the continue
+// (ContinueChapters, ContinueReadalong) that clears its stop. write runs under the
+// book's publish lock (Engine.ContinueStored), so a failed Retry or rewind of the
+// book puts its status back before this clear, never over it, and the book is
+// published as stored once it succeeded: its last book.state event is no longer
+// the cancel. The engine is then woken for it. Every continue goes through here,
+// so none can skip the lock or the publish. write's error is returned as it is
+// (store.ErrNotContinuable included).
+func takeUp(ctx context.Context, eng Engine, r *run, id int64, write func() error) error {
+	if err := eng.ContinueStored(ctx, id, write); err != nil {
+		return err
+	}
 	r.bookID = id
-	eng.PublishStored(ctx, id)
 	eng.Notify()
+	return nil
 }
 
 // resumesAt is where an engine book stopped at asr or chapter_detecting goes on
@@ -530,8 +538,10 @@ func (h *Handler) resumeChapters(ctx context.Context, eng Engine, r *run, old st
 	if !ok {
 		return false, nil
 	}
-	err = h.o.DB.ContinueReadalong(ctx, old.ID, old.State, string(to), state.GoalChapters,
-		store.GenerateBook{ServerJobID: r.job.ID, LibraryID: r.lib.ID, RelPath: r.rel})
+	err = takeUp(ctx, eng, r, old.ID, func() error {
+		return h.o.DB.ContinueReadalong(ctx, old.ID, old.State, string(to), state.GoalChapters,
+			store.GenerateBook{ServerJobID: r.job.ID, LibraryID: r.lib.ID, RelPath: r.rel})
+	})
 	if errors.Is(err, store.ErrNotContinuable) {
 		return false, nil
 	} else if err != nil {
@@ -539,7 +549,6 @@ func (h *Handler) resumeChapters(ctx context.Context, eng Engine, r *run, old st
 	}
 	h.o.Log.Info("chapters: taking up the book's stopped chapters run, its transcription kept", "job", r.job.ID,
 		"book", old.ID, "from", old.State, "at", to)
-	tookUp(ctx, eng, r, old.ID)
 	return true, nil
 }
 

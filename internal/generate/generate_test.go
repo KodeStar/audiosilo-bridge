@@ -335,18 +335,21 @@ func (hr *harness) handlerWith(engine func() Engine) *Handler {
 }
 
 // publishRecorder is the harness's scheduler recording the books a change made
-// outside it published (Engine.PublishStored).
+// outside it continued and published (Engine.ContinueStored).
 type publishRecorder struct {
 	*scheduler.Scheduler
 	mu  sync.Mutex
 	ids []int64
 }
 
-func (p *publishRecorder) PublishStored(ctx context.Context, id int64) {
+func (p *publishRecorder) ContinueStored(ctx context.Context, id int64, write func() error) error {
+	if err := p.Scheduler.ContinueStored(ctx, id, write); err != nil {
+		return err
+	}
 	p.mu.Lock()
 	p.ids = append(p.ids, id)
 	p.mu.Unlock()
-	p.Scheduler.PublishStored(ctx, id)
+	return nil
 }
 
 // published reports whether book id's state was published through the engine.

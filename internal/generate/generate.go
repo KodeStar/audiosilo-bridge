@@ -43,9 +43,10 @@ const Kind = "sidecars.generate"
 // (*scheduler.Scheduler).
 type Engine interface {
 	Notify()
-	// PublishStored publishes book id's state as the store holds it, for a change
-	// written outside the engine (a continue clearing a stopped run's cancel).
-	PublishStored(ctx context.Context, id int64)
+	// ContinueStored runs write, a continue clearing a stopped run's cancel, under
+	// book id's publish lock and publishes the book as stored once it succeeded, so
+	// a failed Retry or rewind of the book never puts its status back over it.
+	ContinueStored(ctx context.Context, id int64, write func() error) error
 	// RetryAsRead re-admits book b as the caller read it: store.ErrStatusChanged
 	// when its status or error changed since (a Cancel landing between).
 	RetryAsRead(ctx context.Context, b store.Book) error

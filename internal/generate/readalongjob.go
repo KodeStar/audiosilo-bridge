@@ -457,15 +457,16 @@ func (h *Handler) reuseForReadalong(ctx context.Context, eng Engine, r *run, old
 	if err := h.writeReadalongRequest(r, old.WorkDir); err != nil {
 		return false, err
 	}
-	err = h.o.DB.ContinueReadalong(ctx, old.ID, old.State, string(to), goal,
-		store.GenerateBook{ServerJobID: r.job.ID, LibraryID: r.lib.ID, RelPath: r.rel})
+	err = takeUp(ctx, eng, r, old.ID, func() error {
+		return h.o.DB.ContinueReadalong(ctx, old.ID, old.State, string(to), goal,
+			store.GenerateBook{ServerJobID: r.job.ID, LibraryID: r.lib.ID, RelPath: r.rel})
+	})
 	if errors.Is(err, store.ErrNotContinuable) {
 		return false, nil
 	} else if err != nil {
 		return false, err
 	}
 	h.o.Log.Info("readalong: continuing the book's earlier run", "job", r.job.ID, "book", old.ID, "from", old.State, "at", to)
-	tookUp(ctx, eng, r, old.ID)
 	return true, nil
 }
 
@@ -516,15 +517,16 @@ func (h *Handler) continueReadalongRun(ctx context.Context, eng Engine, r *run, 
 	if err := h.prepareContinue(ctx, old, state.QASweep); err != nil {
 		return false, fmt.Errorf("could not ready the book's read-along run: %w", err)
 	}
-	err = h.o.DB.ContinueChapters(ctx, old.ID, string(state.Done), string(state.QASweep), h.newBook(r, old.AudioSource(), ""),
-		store.GenerateBook{ServerJobID: r.job.ID, LibraryID: r.lib.ID, RelPath: r.rel})
+	err = takeUp(ctx, eng, r, old.ID, func() error {
+		return h.o.DB.ContinueChapters(ctx, old.ID, string(state.Done), string(state.QASweep), h.newBook(r, old.AudioSource(), ""),
+			store.GenerateBook{ServerJobID: r.job.ID, LibraryID: r.lib.ID, RelPath: r.rel})
+	})
 	if errors.Is(err, store.ErrNotContinuable) {
 		return false, nil
 	} else if err != nil {
 		return false, err
 	}
 	h.o.Log.Info("generate: continuing the book's read-along run, its transcription kept", "job", r.job.ID, "book", old.ID)
-	tookUp(ctx, eng, r, old.ID)
 	return true, nil
 }
 

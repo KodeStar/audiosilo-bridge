@@ -498,3 +498,85 @@ func TestPublishStoredAfterCloseIsQuiet(t *testing.T) {
 		t.Fatal("a publish after the store closed published a frame")
 	}
 }
+
+// generate's continue of a stopped run (ContinueStored) clears its cancel only
+// once a failed re-admit or supersede_rerun of the book has put its park back:
+// that put-back can't tell the continue's clear from its own, so a continue
+// landing in between would end parked again. A Cancel and then a continue
+// landing while either runs end with the book continued.
+func TestFailedRestoreNeverLandsOverAContinue(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(s *Scheduler, ctx context.Context, b store.Book) error
+	}{
+		{"readmit", func(s *Scheduler, ctx context.Context, b store.Book) error { return s.readmit(ctx, b) }},
+		{"supersede_rerun", func(s *Scheduler, ctx context.Context, b store.Book) error {
+			_, err := s.supervisorSupersedeRerun(ctx, b, string(state.Fixing))
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			db := h.openDB(t)
+			bg := context.Background()
+			s := New(db, h.hub, NewStubExecutor(0, 0), 1, h.workRoot, false)
+			read := parkedAudit(t, h, db, "continued")
+
+			ctx, fail := context.WithCancel(bg)
+			defer fail()
+			continued := make(chan error, 1)
+			var once sync.Once
+			s.afterStatusClear = func() {
+				once.Do(func() {
+					if err := CancelStored(bg, db, read.ID); err != nil {
+						t.Error(err)
+					}
+					go func() {
+						continued <- s.ContinueStored(bg, read.ID, func() error {
+							return db.ContinueReadalong(bg, read.ID, read.State, read.State, state.GoalReadalong, store.GenerateBook{})
+						})
+					}()
+					// The continue waits for this change; one that didn't would clear
+					// the cancel here, before the failure below puts the park back.
+					select {
+					case err := <-continued:
+						continued <- err
+					case <-time.After(50 * time.Millisecond):
+					}
+					fail() // the change's store write fails
+				})
+			}
+			if err := tc.change(s, ctx, read); !errors.Is(err, context.Canceled) {
+				t.Fatalf("the failed %s = %v, want context.Canceled", tc.name, err)
+			}
+			select {
+			case err := <-continued:
+				if err != nil {
+					t.Fatalf("the continue after the cancel = %v", err)
+				}
+			case <-time.After(waitLimit):
+				t.Fatal("the continue never ran")
+			}
+			if got := storedFrame(t, db, read.ID); got.Status != "" || got.ParkCode != "" {
+				t.Fatalf("the failed %s parked the continued book again: %+v", tc.name, got)
+			}
+			if f, ok := lastFrame(t, h.hub, read.ID); !ok || f != storedFrame(t, db, read.ID) {
+				t.Fatalf("last frame %+v (%v), stored %+v", f, ok, storedFrame(t, db, read.ID))
+			}
+		})
+	}
+}
+
+// ContinueStored publishes nothing when its write fails: the book is as it was.
+func TestContinueStoredPublishesOnlyAWrite(t *testing.T) {
+	h := newHarness(t)
+	db := h.openDB(t)
+	s := New(db, h.hub, NewStubExecutor(0, 0), 1, h.workRoot, false)
+	b := h.addBook(t, db, "refused", "", "")
+	if err := s.ContinueStored(context.Background(), b.ID, func() error { return store.ErrNotContinuable }); !errors.Is(err, store.ErrNotContinuable) {
+		t.Fatalf("ContinueStored = %v, want the write's error", err)
+	}
+	if f, ok := lastFrame(t, h.hub, b.ID); ok {
+		t.Fatalf("a refused continue published %+v", f)
+	}
+}

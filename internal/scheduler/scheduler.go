@@ -1327,7 +1327,7 @@ func (s *Scheduler) publishStored(ctx context.Context, id int64) {
 }
 
 // publishLocked is publishStored for a caller holding book id's publish lock
-// (readmit).
+// (readmit, supervisorSupersedeRerun, ContinueStored).
 func (s *Scheduler) publishLocked(ctx context.Context, id int64) {
 	b, err := s.db.GetBook(context.WithoutCancel(ctx), id)
 	if err != nil {
@@ -1360,8 +1360,25 @@ func logPublishReadFailed(log *slog.Logger, warned *atomic.Bool, closed bool, id
 }
 
 // PublishStored is publishStored for a change written to the store outside the
-// scheduler (generate's continue of a stopped run, which clears its cancel).
+// scheduler (contrib's park-message write).
 func (s *Scheduler) PublishStored(ctx context.Context, id int64) { s.publishStored(ctx, id) }
+
+// ContinueStored runs write, a change outside the scheduler that clears book id's
+// status (generate's continue of a stopped run, which clears its cancel), under
+// the book's publish lock, and publishes the book as stored once write succeeded.
+// readmit and supersede_rerun hold that lock from their status clear to their
+// publish, so a failed one puts its status back before this clear, never over it
+// (restoreStatus cannot tell this clear from its own). write only writes the
+// store: nothing waits under the lock.
+func (s *Scheduler) ContinueStored(ctx context.Context, id int64, write func() error) error {
+	unlock := s.lockPublish(id)
+	defer unlock()
+	if err := write(); err != nil {
+		return err
+	}
+	s.publishLocked(ctx, id)
+	return nil
+}
 
 // lockPublish takes book id's publish lock and returns its unlock. Books publish
 // independently: only one book's frames are ordered against each other.
