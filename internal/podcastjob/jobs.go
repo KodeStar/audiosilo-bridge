@@ -746,9 +746,14 @@ func (s *service) find(root *os.Root, entries []os.DirEntry, rows []store.Podcas
 // an error.
 func (s *service) lockShow(ctx context.Context, root *os.Root, lib link.Library, mount, show, id string, guard func(string) error) (_ string, _ *podcast.Feed, unlock func(), _ error) {
 	valid := podcast.ValidID(id)
+	// searched: show is gone and no folder holds id, so the read of show that
+	// then fails does not search every folder a second time.
+	searched := false
 	if _, err := root.Lstat(show); valid && errors.Is(err, os.ErrNotExist) {
 		if moved := s.relocate(ctx, root, lib, id); moved != "" {
 			show = moved
+		} else {
+			searched = true
 		}
 	}
 	// open reports, with an error, whether it was show's read that failed.
@@ -778,7 +783,7 @@ func (s *service) lockShow(ctx context.Context, root *os.Root, lib link.Library,
 	case err == nil:
 		unlock()
 		err = changed
-	case !valid || !unread || ctx.Err() != nil || holds(root, show, id):
+	case !valid || !unread || searched || ctx.Err() != nil || holds(root, show, id):
 		return "", nil, nil, err
 	}
 	moved := s.relocate(ctx, root, lib, id)
