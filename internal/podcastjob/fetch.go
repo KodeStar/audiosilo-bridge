@@ -326,7 +326,7 @@ func (s *service) episodeAt(ctx context.Context, root *os.Root, lib link.Library
 	if show == from {
 		return p
 	}
-	_ = s.adoptCheckpoints(ctx, lib, show, from, params.ShowID, self)
+	_ = s.adoptCheckpoints(ctx, root, lib, show, from, params.ShowID, self)
 	return show + "/" + path.Base(p)
 }
 

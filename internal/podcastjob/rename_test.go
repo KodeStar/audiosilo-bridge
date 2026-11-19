@@ -479,3 +479,44 @@ func TestADownloadUnderAnOldNameLeavesAnotherShowsRecord(t *testing.T) {
 	h.handler.FetchJob().Abandon(context.Background(), job)
 	kept("abandon")
 }
+
+// Records moved to a folder's new name by a take-in that went no further
+// (podcast.Adopt refused or stopped before feed.json), then the folder renamed
+// again by hand: the next take-in moves them from that gone earlier name too,
+// or they would hold their partials in the folder for good.
+func TestTakingInMovesRecordsLeftUnderAGoneEarlierName(t *testing.T) {
+	h, job := audioHarness(t)
+	s := h.handler.s
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: "a1b2c3d4e5f60718", EpisodeID: "1cc306d831645e2b", Path: *job.Path, Temp: ".audiosilo-tmp-owned", Offset: 6, Total: 100}
+	if err := root.WriteFile("Fixture Show/"+c.Temp, []byte("prefix"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.saveCheckpoint(job, root, &c, `"one"`); err != nil {
+		t.Fatal(err)
+	}
+	lib := link.Library{ID: 3, Kind: "podcasts", Root: h.mount}
+	renameShow(t, h, "Fixture Show", "Middle Name")
+	if err := s.adoptCheckpoints(context.Background(), root, lib, "Middle Name", "Fixture Show", c.ShowID, 0); err != nil {
+		t.Fatal(err)
+	}
+	base := strings.TrimPrefix(*job.Path, "Fixture Show/")
+	middle, third := "Middle Name/"+base, "Third Name/"+base
+	if _, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &middle}); !ok {
+		t.Fatal("the record did not move to the middle name")
+	}
+	renameShow(t, h, "Middle Name", "Third Name")
+	if _, err := s.readShow(context.Background(), root, lib, h.mount, "Third Name"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &middle}); ok {
+		t.Fatal("the record was left under the gone middle name")
+	}
+	if resumed, tag := s.loadCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &third}, root, c.ShowID, c.EpisodeID); tag != `"one"` || resumed.Temp != c.Temp {
+		t.Fatal("the record did not follow the folder", resumed, tag)
+	}
+}

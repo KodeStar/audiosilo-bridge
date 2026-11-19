@@ -181,13 +181,16 @@ func (s *service) clearCheckpoint(job jobs.Job, root *os.Root, c *checkpoint) {
 // records by their folder) would never clear it and sweepPartials would leave
 // its partial for good, as one a record names. adopt moves them before
 // feed.json, so a stop between the two leaves a folder that is taken in again,
-// moving what is left. A record whose download is still running (a fetch
-// claimed under the old name), other than self's, stays: that job moves it
-// when it finds the folder (Fetch's relocation) or drops it as it ends. A
-// record of another show (names swapped by hand) stays too. An error means
-// the records could not be read; one that could not be moved is left as it
-// was.
-func (s *service) adoptCheckpoints(ctx context.Context, lib link.Library, show, from, id string, self int64) error {
+// moving what is left. The show's records under a gone folder move too: one
+// such stop, or a take-in podcast.Adopt refused after the records moved, then
+// the folder renamed again by hand, leaves them under that earlier name
+// (podcast.Adopt's journals alike). A record whose download is still running
+// (a fetch claimed under the old name), other than self's, stays: that job
+// moves it when it finds the folder (Fetch's relocation) or drops it as it
+// ends. A record of another show (names swapped by hand) stays too. An error
+// means the records could not be read; one that could not be moved is left as
+// it was.
+func (s *service) adoptCheckpoints(ctx context.Context, root *os.Root, lib link.Library, show, from, id string, self int64) error {
 	if s.o.DB == nil || s.o.DataDir == "" {
 		return nil
 	}
@@ -216,8 +219,13 @@ func (s *service) adoptCheckpoints(ctx context.Context, lib link.Library, show, 
 		b, err := io.ReadAll(io.LimitReader(rd, 16385))
 		_ = rd.Close()
 		var c checkpoint
-		if err != nil || len(b) > 16384 || json.Unmarshal(b, &c) != nil || c.ServerHash != pairing || c.LibraryID != lib.ID || c.ShowID != id || !podcast.ValidEpisodePath(c.Path) || path.Dir(c.Path) != from || !podcast.OwnedTemp(c.Temp) {
+		if err != nil || len(b) > 16384 || json.Unmarshal(b, &c) != nil || c.ServerHash != pairing || c.LibraryID != lib.ID || c.ShowID != id || !podcast.ValidEpisodePath(c.Path) || !podcast.OwnedTemp(c.Temp) {
 			continue
+		}
+		if at := path.Dir(c.Path); at != from {
+			if _, err := root.Lstat(at); at == show || !errors.Is(err, os.ErrNotExist) {
+				continue
+			}
 		}
 		old := c.Path
 		if entry.Name() != s.checkpointName(jobs.Job{LibraryID: &lib.ID, Path: &old}) {
