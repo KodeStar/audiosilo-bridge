@@ -2403,10 +2403,16 @@ internal/
             Read refuses: ReadMoved answers the old name (a folder whose old name
             still holds the same show id is a copy and is refused, as is one
             whose old name has a feed.json it cannot read, or none but still
-            holds one of the show's episode files or an owned temp, a partial:
-            the show's own folder that lost its feed.json, so a backup copy of
-            it is never taken in; an old name holding another show, names
-            swapped by hand, or nothing (a new empty folder) is a rename) and Adopt
+            holds an audio file or an owned temp, a partial (ErrHeld, an
+            ErrInvalidFile): the show's own folder that lost its feed.json, so
+            a backup copy of it is never taken in. Any audio file counts, not
+            only the episodes the copy's feed.json names: a backup older than
+            an episode does not name it, and a normalising filesystem spells a
+            name otherwise. No sweep reads a folder with no feed.json, so the
+            refusal stands until those files go by hand, and podcastjob says so
+            in the log, naming the folder ReadMoved answers with it
+            (warnHeld). An old name holding another show, names
+            swapped by hand, or no audio (a new empty folder) is a rename) and Adopt
             moves the paths of the pending journals, the committed trash
             manifests and then feed.json, so a stop part way through adopts
             again (a manifest it could not rewrite stops it before feed.json).

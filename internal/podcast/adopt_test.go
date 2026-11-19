@@ -220,10 +220,13 @@ func TestReadMovedTakesARenameWhoseOldNameHoldsAnotherShow(t *testing.T) {
 // A show folder that lost its feed.json but still holds the show's audio or a
 // partial of the Bridge's is the show's own: a copy of it elsewhere (a backup)
 // names it as its old folder and must not be taken in, or the show would
-// move to the copy and leave the audio and the downloads behind. A new empty
-// folder at the old name after a rename by hand is still a rename.
+// move to the copy and leave the audio and the downloads behind. Audio the
+// copy's feed.json does not name counts too (an episode that joined the feed
+// after the backup was made, or one a normalising filesystem spells
+// otherwise). A new empty folder at the old name after a rename by hand is
+// still a rename, as is one holding only what is no audio.
 func TestReadMovedRefusesACopyOfAFolderThatLostItsFeed(t *testing.T) {
-	for _, left := range []string{"", "episode", "partial"} {
+	for _, left := range []string{"", "notes", "episode", "later episode", "partial"} {
 		root, j := journalFixture(t)
 		if err := os.CopyFS(root.Name()+"/Backup", os.DirFS(root.Name()+"/Fixture Show")); err != nil {
 			t.Fatal(err)
@@ -235,8 +238,16 @@ func TestReadMovedRefusesACopyOfAFolderThatLostItsFeed(t *testing.T) {
 			t.Fatal(err)
 		}
 		switch left {
+		case "notes":
+			if err := root.WriteFile("Fixture Show/notes.txt", []byte("notes"), 0o644); err != nil {
+				t.Fatal(err)
+			}
 		case "episode":
 			if err := root.WriteFile(j.Path, []byte("audio"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		case "later episode":
+			if err := root.WriteFile("Fixture Show/An Episode Published Since.MP3", []byte("audio"), 0o644); err != nil {
 				t.Fatal(err)
 			}
 		case "partial":
@@ -245,13 +256,15 @@ func TestReadMovedRefusesACopyOfAFolderThatLostItsFeed(t *testing.T) {
 			}
 		}
 		_, from, err := ReadMoved(root, "Backup")
-		if left == "" {
+		if left == "" || left == "notes" {
 			if err != nil || from != "Fixture Show" {
-				t.Fatal("a rename with an empty folder at its old name was refused", from, err)
+				t.Fatal("a rename with a folder holding no audio at its old name was refused", left, from, err)
 			}
 			continue
 		}
-		if !errors.Is(err, ErrInvalidFile) {
+		// ErrHeld, so the job can say why in its log, and an ErrInvalidFile still.
+		// It names the folder that holds them, the one to act on.
+		if !errors.Is(err, ErrHeld) || !errors.Is(err, ErrInvalidFile) || from != "Fixture Show" {
 			t.Fatal("a copy was taken in while the show's folder still holds its", left, from, err)
 		}
 	}
