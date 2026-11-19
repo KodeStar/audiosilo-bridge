@@ -2223,11 +2223,13 @@ internal/
             BEFORE RecordClaim. A failure records sanitized empty params, fails
             closed without Run, and calls Abandon for any secret already sealed;
             a *SealFailure is reported as its code and message, any other error
-            only as a generic write_failed (its text may hold the secret). A claim
-            the store can't record is abandoned (the server hands it out again)
-            only when its handler seals, or is a ClaimRowNeeder that needs the row
-            for that job (generate's share jobs: their share_off lives on it);
-            other kinds run anyway, as before.
+            only as a generic write_failed (its text may hold the secret). The
+            claim's write is tried claimRecordTries (3) times, 100 ms then 200 ms
+            apart (recordClaim): an abandon spends one of the server's attempts at
+            the job. A claim the store still can't record is abandoned (the server
+            hands it out again) only when its handler seals, or is a
+            ClaimRowNeeder that needs the row for that job (generate's share jobs:
+            their share_off lives on it); other kinds run anyway, as before.
             Handlers declare a kind and a lane (lanes: light=2,
             and Phase 1a's pipeline=25 for the jobs that follow an engine book: the
             engine's scheduler does the throttling, so such a job sits in its lane

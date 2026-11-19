@@ -614,7 +614,7 @@ func (r *Runner) start(ctx context.Context, srv Server, job Job, wg *sync.WaitGr
 	}
 	// Recorded even when the runner is stopping: a claim that raced the stop
 	// is then resumed under its lease at the next start, not left to lapse.
-	if err := r.store.RecordClaim(context.WithoutCancel(ctx), store.ServerJob{ID: job.ID, Kind: job.Kind, LibraryID: job.LibraryID, Path: job.Path,
+	if err := r.recordClaim(context.WithoutCancel(ctx), store.ServerJob{ID: job.ID, Kind: job.Kind, LibraryID: job.LibraryID, Path: job.Path,
 		Params: job.Params, Attempt: job.Attempt, ServerID: serverID, Priority: job.Priority, ShareOff: job.shareOff}); err != nil {
 		r.log.Warn("bridge: recording a claim failed", "job", job.ID, "err", err)
 		if needer, ok := r.handlers[job.Kind].(ClaimRowNeeder); sealing || ok && needer.NeedsClaimRow(job) {
@@ -636,6 +636,31 @@ func (r *Runner) start(ctx context.Context, srv Server, job Job, wg *sync.WaitGr
 		return
 	}
 	r.launch(ctx, srv, job, wg, "", nil, claim)
+}
+
+// claimRecordTries is how many times recordClaim tries the store's write, and
+// claimRecordBackoff the wait before the first retry (doubled before each
+// next).
+const (
+	claimRecordTries   = 3
+	claimRecordBackoff = 100 * time.Millisecond
+)
+
+// recordClaim records a claim (store RecordClaim), trying a write that fails
+// again a few times, a short backoff apart: a claim that can't be recorded is
+// abandoned when its handler needs the row (start), which spends one of the
+// server's attempts at the job, so a passing blip (a locked database) must not.
+func (r *Runner) recordClaim(ctx context.Context, sj store.ServerJob) error {
+	wait := claimRecordBackoff
+	for i := 1; ; i++ {
+		err := r.store.RecordClaim(ctx, sj)
+		if err == nil || i == claimRecordTries {
+			return err
+		}
+		r.log.Debug("bridge: recording a claim failed; trying again", "job", sj.ID, "err", err)
+		sleep(ctx, wait)
+		wait *= 2
+	}
 }
 
 // launch runs a recorded job in its lane, parked with message parked when a
