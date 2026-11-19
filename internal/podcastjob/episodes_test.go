@@ -652,6 +652,22 @@ func TestEpisodeFailureCodes(t *testing.T) {
 			t.Fatalf("the ceiling passed: %q, want timeout", c)
 		}
 	})
+	// The ceiling passing while the host has not answered yet: net/http reports
+	// the ceiling's cause (errOverBudget), still the episode's timeout, never
+	// network (BR-CANCEL-RACE).
+	t.Run("ceiling mid-request", func(t *testing.T) {
+		h, job := audioHarness(t)
+		timer := ceiling(h)
+		setAudio(h, func(_ http.ResponseWriter, r *http.Request) {
+			timer.fn()
+			<-r.Context().Done()
+		})
+		_, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+		var failure *netguard.Error
+		if !errors.As(err, &failure) || failure.Code != "timeout" || failure.Message != "The episode download did not finish in time." {
+			t.Fatalf("the ceiling passed mid-request: %v, want the episode's timeout", err)
+		}
+	})
 	t.Run("cut retry wait", func(t *testing.T) {
 		h, job := audioHarness(t)
 		timer := ceiling(h)

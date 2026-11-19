@@ -102,9 +102,12 @@ func (b *budget) close() { b.timer.Stop(); b.cancel(nil) }
 func overBudget(ctx context.Context) bool { return errors.Is(context.Cause(ctx), errOverBudget) }
 
 // failure is err as the job reports it: a stop the ceiling made (ctx is the
-// budget's) is the episode's timeout wherever it surfaced.
+// budget's) is the episode's timeout wherever it surfaced, a request it ended
+// too (netguard's own timeout, which words it as the feed's).
 func (b *budget) failure(ctx context.Context, err error) error {
-	if (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) && overBudget(ctx) {
+	var guard *netguard.Error
+	stopped := errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.As(err, &guard) && guard.Code == "timeout"
+	if stopped && overBudget(ctx) {
 		return fail("timeout", "The episode download did not finish in time.")
 	}
 	return err
