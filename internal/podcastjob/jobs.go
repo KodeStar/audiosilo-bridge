@@ -214,6 +214,10 @@ func (h *Subscribe) Lane() string   { return jobs.LaneLight }
 func (h *Poll) Kind() string        { return PollKind }
 func (h *Poll) Lane() string        { return jobs.LaneLight }
 
+// ServerQueued: the server queues and schedules podcast jobs again itself.
+func (h *Subscribe) ServerQueued() bool { return true }
+func (h *Poll) ServerQueued() bool      { return true }
+
 type subscribeParams struct {
 	FeedURL       string `json:"feed_url"`
 	FeedURLSHA256 string `json:"feed_url_sha256"`

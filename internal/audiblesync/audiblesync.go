@@ -321,6 +321,9 @@ func New(o Options) *Handler {
 // Kind is audible.sync.
 func (h *Handler) Kind() string { return Kind }
 
+// ServerQueued: the server queues and schedules syncs again itself.
+func (h *Handler) ServerQueued() bool { return true }
+
 // Lane is the light lane: a sync is a few API calls.
 func (h *Handler) Lane() string { return jobs.LaneLight }
 

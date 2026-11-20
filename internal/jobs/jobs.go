@@ -158,6 +158,15 @@ type InteractiveHandler interface {
 	Interactive() bool
 }
 
+// ServerQueuedHandler marks a kind the server queues and schedules again
+// itself (podcasts, Audible, LibriVox). After a 429 that outlasts the link's
+// retries its job fails with the handler's own error, so the server can
+// schedule the next run; a park would leave the job open without a lease.
+// Any other kind's job needs attention, for an admin to queue it again.
+type ServerQueuedHandler interface {
+	ServerQueued() bool
+}
+
 // ParamSealer removes sensitive claim params before any execution row is
 // written. A handler resumes from these stored params and its sealed secrets.
 // A failure fails the job without running it: a *SealFailure is reported as it
@@ -1463,7 +1472,7 @@ func (r *Runner) execute(ctx, base context.Context, srv Server, h Handler, ru *r
 	var err error
 	if r.awaitAdmission(ctx, ru) {
 		rep.started.Store(true)
-		if serverQueued(ru.job.Kind) {
+		if r.serverQueued(ru.job.Kind) {
 			ctx = link.WithLastError(ctx)
 		}
 		result, err = h.Run(ctx, ru.job, rep)
@@ -1485,15 +1494,10 @@ func firstErr(cause, err error) error {
 	return err
 }
 
-// serverQueued kinds finish failed on a lasting 429 so the server can schedule
-// their next run. A terminal park would leave the job open without a lease.
-func serverQueued(kind string) bool {
-	switch kind {
-	case "podcast.subscribe", "podcast.poll", "podcast.fetch", "podcast.retain",
-		"audible.poll", "audible.import", link.KindAudibleSync, "librivox.fetch":
-		return true
-	}
-	return false
+// serverQueued reports whether kind's handler is a ServerQueuedHandler.
+func (r *Runner) serverQueued(kind string) bool {
+	h, ok := r.handlers[kind].(ServerQueuedHandler)
+	return ok && h.ServerQueued()
 }
 
 // settle records and reports a job's end, on the link its Reporter reports on
@@ -1603,7 +1607,7 @@ func (r *Runner) settle(base context.Context, ru *run, rep *Reporter, result any
 		r.finish(base, srv, job, store.JobCancelled, progress, raw, "")
 	case err == nil:
 		r.finish(base, srv, job, store.JobDone, progress, raw, "")
-	case rateLimited && !serverQueued(job.Kind):
+	case rateLimited && !r.serverQueued(job.Kind):
 		r.finish(base, srv, job, store.JobNeedsAttention, progress, raw, err.Error()+". Cancel and queue the job again when the server is ready.")
 	case errors.As(err, &park):
 		r.finish(base, srv, job, store.JobNeedsAttention, progress, raw, park.Error())
@@ -2478,10 +2482,7 @@ func (p *Reporter) failed(err error) {
 	if p.failing {
 		delay = p.r.opts.ReportRetry
 	}
-	if busy, ok := link.RateLimited(err); ok {
-		delay = max(delay, min(busy.RetryAfter, time.Minute))
-	}
-	p.nextIdle = time.Now().Add(delay)
+	p.nextIdle = time.Now().Add(retryAfter(delay, err))
 	first := !p.warned
 	p.warned = true
 	p.mu.Unlock()
@@ -2490,6 +2491,15 @@ func (p *Reporter) failed(err error) {
 	} else {
 		p.r.log.Debug("bridge: reporting progress failed again", "job", p.job.ID, "err", err)
 	}
+}
+
+// retryAfter stretches delay to a 429's Retry-After, at most one minute (a
+// claim's pause and a report's alike).
+func retryAfter(delay time.Duration, err error) time.Duration {
+	if busy, ok := link.RateLimited(err); ok {
+		return min(max(delay, busy.RetryAfter), time.Minute)
+	}
+	return delay
 }
 
 // unreached reports whether the job's last report didn't reach the server

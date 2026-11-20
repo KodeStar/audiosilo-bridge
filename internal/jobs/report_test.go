@@ -304,14 +304,14 @@ func TestRateLimitedJob(t *testing.T) {
 	const attention = "the server is still rate limiting the Bridge (attempt 3): " + refused +
 		". Cancel and queue the job again when the server is ready."
 	for _, tc := range []struct {
-		name, kind     string
+		name           string
+		queued         bool
 		refusals       int32
 		state, message string
 	}{
-		{"recovers", "podcast.poll", 2, store.JobDone, ""},
-		{"podcast", "podcast.subscribe", 3, store.JobFailed, refused},
-		{"audible", "audible.poll", 3, store.JobFailed, refused},
-		{"admin", "sidecars.generate", 3, store.JobNeedsAttention, attention},
+		{"recovers", true, 2, store.JobDone, ""},
+		{"server queued", true, 3, store.JobFailed, refused},
+		{"admin", false, 3, store.JobNeedsAttention, attention},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -327,8 +327,8 @@ func TestRateLimitedJob(t *testing.T) {
 			defer api.Close()
 			cl, _ := link.New(api.URL, "", "dev")
 			db, srv := openStore(t), newFakeServer()
-			srv.add(&link.Job{ID: 31, Kind: tc.kind, Attempts: 1})
-			r := New(db, func() Server { return srv }, nil, testOpts(), handler{kind: tc.kind, lane: LaneLight,
+			srv.add(&link.Job{ID: 31, Kind: "k.scan", Attempts: 1})
+			r := New(db, func() Server { return srv }, nil, testOpts(), handler{kind: "k.scan", lane: LaneLight, queued: tc.queued,
 				fn: func(ctx context.Context, _ Job, _ *Reporter) (any, error) {
 					runs.Add(1)
 					_, err := cl.Rescan(ctx, 1, "A/B")

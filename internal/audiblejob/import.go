@@ -280,6 +280,9 @@ func NewImport(o ImportOptions) *Importer {
 // Kind is audible.import.
 func (h *Importer) Kind() string { return ImportKind }
 
+// ServerQueued: the server queues and schedules imports again itself.
+func (h *Importer) ServerQueued() bool { return true }
+
 // Lane is the download lane.
 func (h *Importer) Lane() string { return jobs.LaneDownload }
 

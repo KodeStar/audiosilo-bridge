@@ -35,6 +35,7 @@ func (h *Subscribe) FetchJob() *Fetch { return &Fetch{s: h.s} }
 func (h *Fetch) Kind() string         { return FetchKind }
 func (h *Fetch) Lane() string         { return jobs.LaneDownload }
 func (h *Fetch) Interactive() bool    { return true }
+func (h *Fetch) ServerQueued() bool   { return true }
 
 // SealParams records, beside the server's params, the pairing hash the claim
 // is made under (podcast.ClaimHashParam): its download records are kept under it, and a

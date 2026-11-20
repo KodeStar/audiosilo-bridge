@@ -24,6 +24,7 @@ type Retain struct{ s *service }
 func (h *Subscribe) RetainJob() *Retain { return &Retain{s: h.s} }
 func (h *Retain) Kind() string          { return RetainKind }
 func (h *Retain) Lane() string          { return jobs.LaneLight }
+func (h *Retain) ServerQueued() bool    { return true }
 
 type retainResult struct {
 	LibraryID int64  `json:"library_id"`

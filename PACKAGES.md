@@ -2365,8 +2365,9 @@ internal/
             and queued checks; a run of the old link still going records nothing
             more and holds nothing.
   jobs/     the generic runner. After a required request exhausts its 429
-            retries, server-queued podcast, Audible and LibriVox jobs report
-            failed with the handler's usual error. This closes the job so the
+            retries, a server-queued job (its handler a ServerQueuedHandler:
+            podcast, Audible and LibriVox kinds) reports failed with the
+            handler's usual error. This closes the job so the
             server can schedule another. Admin-started jobs report
             needs_attention and ask the admin to cancel and queue the job
             again once the server is ready. A claim's idle pacing counts

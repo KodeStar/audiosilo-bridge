@@ -308,10 +308,7 @@ func (r *Runner) dispatch(ctx context.Context, reserve bool, wg *sync.WaitGroup)
 		case errors.Is(result.err, link.ErrNoHeartbeat):
 			r.pauseClaims(ctx, q, 2*time.Second)
 		case result.err != nil:
-			delay := backoff
-			if busy, limited := link.RateLimited(result.err); limited {
-				delay = min(max(delay, busy.RetryAfter), time.Minute)
-			}
+			delay := retryAfter(backoff, result.err)
 			r.log.Warn("bridge: claiming a job failed", "err", result.err, "retry_in", delay)
 			r.pauseClaims(ctx, q, delay)
 			backoff = min(backoff*2, time.Minute)

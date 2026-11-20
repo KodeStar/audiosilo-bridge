@@ -106,6 +106,9 @@ func New(o Options) *Handler {
 // Kind is audible.poll.
 func (h *Handler) Kind() string { return Kind }
 
+// ServerQueued: the server queues and schedules polls again itself.
+func (h *Handler) ServerQueued() bool { return true }
+
 // Lane is the light lane: a poll is a few API calls, then the paced ASIN
 // backfill (up to enrichBudget, the rest deferred to the next poll).
 func (h *Handler) Lane() string { return jobs.LaneLight }
