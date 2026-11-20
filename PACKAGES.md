@@ -2468,10 +2468,12 @@ internal/
             through and three failed would lapse the lease. Only an answerless
             failure, a 5xx, 408 or 429 counts (unreachable). A progress report
             under the send lock makes one HTTP attempt. After a 429 the next
-            idle report waits at least ReportRetry and honors a longer
-            Retry-After up to one minute. Fresh progress and a finish can go at once.
-            An explicit Refresh waits outside the lock and sends current
-            progress on each attempt. Any other 4xx waits the Keepalive. The first failed
+            idle report, and changed progress of the same step, waits at least
+            ReportRetry and honors a longer Retry-After up to one minute. A new
+            step, a park and the finish go at once. An explicit Refresh waits
+            outside the lock and sends current progress on each attempt, and
+            sends nothing once settle reports the job's end. Any other 4xx
+            waits the Keepalive. The first failed
             report warns, the rest log at debug, and the first one through after
             them logs one Info (bridge#31); a ConfirmLease or Refresh that gets
             through clears failing too (under the Reporter's lock: they run on

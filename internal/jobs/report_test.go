@@ -445,6 +445,70 @@ func TestIdleReportDelayAfterRateLimit(t *testing.T) {
 	})
 }
 
+// Changed progress waits out a 429's Retry-After as the keepalive does, so a
+// busy job does not ask a rate-limiting server again every ProgressEvery.
+func TestProgressWaitsOutRateLimit(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		r := New(nil, nil, nil, testOpts())
+		rep := &Reporter{r: r}
+		rep.reached()
+		rep.Progress(Progress{Step: "copying", Done: 1})
+		time.Sleep(r.opts.ProgressEvery)
+		if !rep.due(time.Now()) {
+			t.Fatal("changed progress not sent after ProgressEvery")
+		}
+		rep.failed(&link.APIError{Status: http.StatusTooManyRequests, RetryAfter: 30 * time.Second, RetryAfterSet: true})
+		rep.Progress(Progress{Step: "copying", Done: 2})
+		time.Sleep(time.Second)
+		if rep.due(time.Now()) {
+			t.Fatal("changed progress sent before the 429's Retry-After")
+		}
+		time.Sleep(29 * time.Second)
+		if !rep.due(time.Now()) {
+			t.Fatal("changed progress held past the 429's Retry-After")
+		}
+		rep.failed(&link.APIError{Status: http.StatusServiceUnavailable})
+		time.Sleep(r.opts.ProgressEvery)
+		if !rep.due(time.Now()) {
+			t.Fatal("a 5xx held changed progress")
+		}
+	})
+}
+
+// A 429 never shortens the delay a report or claim would wait anyway.
+func TestRetryAfterKeepsLongerDelay(t *testing.T) {
+	limited := &link.APIError{Status: http.StatusTooManyRequests, RetryAfter: 10 * time.Second, RetryAfterSet: true}
+	if got := retryAfter(90*time.Second, limited); got != 90*time.Second {
+		t.Fatalf("retryAfter(90s, 429 10s) = %v", got)
+	}
+	if got := retryAfter(time.Second, limited); got != 10*time.Second {
+		t.Fatalf("retryAfter(1s, 429 10s) = %v", got)
+	}
+}
+
+// A Refresh waiting out a 429 when its job settles reports nothing more: a
+// running report after the end could land after it.
+func TestRefreshAfterSettleSendsNothing(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		srv := &limitedRefreshServer{fakeServer: newFakeServer()}
+		r := New(nil, func() Server { return srv }, nil, testOpts())
+		rep := &Reporter{r: r, srv: srv, ctx: t.Context(), job: Job{serverID: testServer, ID: 31, Attempt: 1}}
+		srv.refuseNext.Store(true)
+		done := make(chan error, 1)
+		go func() { done <- rep.Refresh(t.Context()) }()
+		synctest.Wait()
+		rep.sendMu.Lock()
+		rep.settled = true
+		rep.sendMu.Unlock()
+		if err := <-done; !errors.Is(err, ErrStopped) {
+			t.Fatalf("Refresh after settle = %v, want ErrStopped", err)
+		}
+		if n := len(srv.updates[31]); n != 0 {
+			t.Fatalf("got %d updates after settle, want none", n)
+		}
+	})
+}
+
 type limitedRefreshServer struct {
 	*fakeServer
 	refuseNext atomic.Bool

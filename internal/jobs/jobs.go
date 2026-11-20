@@ -1505,6 +1505,11 @@ func (r *Runner) serverQueued(kind string) bool {
 // running, for resumeStranded).
 func (r *Runner) settle(base context.Context, ru *run, rep *Reporter, result any, err error) (stranded bool) {
 	job := ru.job
+	// A Refresh another job asked for may be waiting out a 429: its next
+	// attempt must not report the job running after its end.
+	rep.sendMu.Lock()
+	rep.settled = true
+	rep.sendMu.Unlock()
 	var raw json.RawMessage
 	if result != nil {
 		b, merr := json.Marshal(result)
@@ -1982,6 +1987,9 @@ type Reporter struct {
 	// sendMu orders state snapshots and their HTTP attempts. A 429 releases
 	// it before any wait so newer progress or a finish can go through.
 	sendMu sync.Mutex
+	// settled (under sendMu): settle is reporting the job's end, so a Refresh
+	// still waiting out a 429 sends no running report after it.
+	settled bool
 
 	// started: the handler runs (or ran): it may hold the link it started on,
 	// so a new link to its server restarts it there (link, errRelinked).
@@ -2001,6 +2009,9 @@ type Reporter struct {
 	failing  bool
 	warned   bool
 	nextIdle time.Time // next report due if the job makes no progress
+	// limited: the last report was a 429, so changed progress of the same
+	// step waits for nextIdle too (due; a new step or a park goes at once).
+	limited bool
 	// parked: the job reports needs_attention with parkMsg as its error, until
 	// Unpark. Unparked, every report clears the error (one a park left, even
 	// across a restart that came before the clear got through).
@@ -2300,11 +2311,7 @@ func (p *Reporter) loop(done <-chan struct{}) {
 				continue
 			}
 		case <-t.C:
-			p.mu.Lock()
-			changed := p.dirty && time.Since(p.sentAt) >= p.r.opts.ProgressEvery
-			idleDue := !time.Now().Before(p.nextIdle)
-			p.mu.Unlock()
-			if !changed && !idleDue {
+			if !p.due(time.Now()) {
 				continue
 			}
 		}
@@ -2315,6 +2322,18 @@ func (p *Reporter) loop(done <-chan struct{}) {
 			return
 		}
 	}
+}
+
+// due reports whether a tick at now sends: the keepalive at nextIdle, or
+// changed progress ProgressEvery after the last report, which after a 429
+// waits for nextIdle too, so a busy job does not ask a rate-limiting server
+// again every ProgressEvery (a new step or a park still goes at once).
+func (p *Reporter) due(now time.Time) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	idle := !now.Before(p.nextIdle)
+	changed := p.dirty && now.Sub(p.sentAt) >= p.r.opts.ProgressEvery && !p.limited
+	return idle || changed
 }
 
 // link is the link the job reports on now, by the one rule (Runner.linkFor):
@@ -2478,6 +2497,7 @@ func withParkMessage(pr Progress, msg string) Progress {
 func (p *Reporter) failed(err error) {
 	p.mu.Lock()
 	p.failing = unreachable(err)
+	_, p.limited = link.RateLimited(err)
 	delay := p.r.opts.Keepalive
 	if p.failing {
 		delay = p.r.opts.ReportRetry
@@ -2494,10 +2514,10 @@ func (p *Reporter) failed(err error) {
 }
 
 // retryAfter stretches delay to a 429's Retry-After, at most one minute (a
-// claim's pause and a report's alike).
+// claim's pause and a report's alike), never shorter than delay itself.
 func retryAfter(delay time.Duration, err error) time.Duration {
 	if busy, ok := link.RateLimited(err); ok {
-		return min(max(delay, busy.RetryAfter), time.Minute)
+		return max(delay, min(busy.RetryAfter, time.Minute))
 	}
 	return delay
 }
@@ -2515,7 +2535,7 @@ func (p *Reporter) unreached() bool {
 func (p *Reporter) reached() {
 	p.mu.Lock()
 	warned := p.warned
-	p.failing, p.warned = false, false
+	p.failing, p.warned, p.limited = false, false, false
 	p.nextIdle = time.Now().Add(p.r.opts.Keepalive)
 	p.mu.Unlock()
 	if warned {
@@ -2693,6 +2713,9 @@ func (p *Reporter) refreshOnce(ctx context.Context) error {
 	srv, got, stop, err := func() (Server, *link.Job, error, error) {
 		p.sendMu.Lock()
 		defer p.sendMu.Unlock()
+		if p.settled {
+			return nil, nil, nil, nil // its end is reported (or on its way)
+		}
 		srv, _ := p.link()
 		if srv == nil {
 			return nil, nil, nil, nil
@@ -2715,7 +2738,7 @@ func (p *Reporter) refreshOnce(ctx context.Context) error {
 		return srv, got, stop, err
 	}()
 	if srv == nil || p.acted(srv, got, stop, err) {
-		return ErrStopped // srv nil: link dropped the job (another server, an unpair)
+		return ErrStopped // srv nil: link dropped the job (another server, an unpair) or it settled
 	}
 	return err
 }
