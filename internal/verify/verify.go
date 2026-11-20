@@ -32,8 +32,9 @@ type Libraries interface {
 	Library(id int64) (link.Library, bool)
 }
 
-// The book read's retry: an answer that may change (mapping.BookReadSettled's:
-// no answer, a refused token, a 408, a 5xx) is asked again after
+// The book read's retry: an answer that may change (mapping.BookReadSettled's,
+// less the 429 the link has already waited out: no answer, a refused token, a
+// 408, a 5xx) is asked again after
 // bookRetryFirst, doubling up to bookRetryMax, until bookRetryFor has passed
 // since the first ask (the last ask at its end), so a server restarting under a
 // verify doesn't fail it, and one that stays down does in a time an admin
