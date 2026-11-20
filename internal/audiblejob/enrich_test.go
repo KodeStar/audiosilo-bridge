@@ -93,6 +93,10 @@ func TestEnrichHonoursRetryAfter(t *testing.T) {
 	// backoff (the second in a row: 4 s), then through; the last two at the
 	// slower pace (two 429s doubled the gap twice).
 	want := []time.Duration{enrichGap, 3 * time.Second, 2 * enrichBackoff, 4 * enrichGap, 4 * enrichGap}
+	if len(c.waits) != len(want) || c.waits[2] < enrichBackoff || c.waits[2] > 2*enrichBackoff {
+		t.Fatalf("waits = %v, want a jittered second backoff", c.waits)
+	}
+	want[2] = c.waits[2]
 	if fmt.Sprint(c.waits) != fmt.Sprint(want) {
 		t.Fatalf("waits = %v, want %v", c.waits, want)
 	}

@@ -24,6 +24,7 @@ type controlledClaim struct {
 	wait      time.Duration
 	min       *int32
 	answer    chan *link.Job
+	err       error // set before sending the answer
 	cancelled chan struct{}
 	cancelJob atomic.Pointer[link.Job]
 	hold      atomic.Bool
@@ -61,7 +62,7 @@ func (s *controlledServer) claim(ctx context.Context, kinds []string, wait time.
 	}
 	select {
 	case job := <-c.answer:
-		return job, nil
+		return job, c.err
 	case <-ctx.Done():
 		close(c.cancelled)
 		if c.hold.Load() {
@@ -2027,6 +2028,35 @@ func TestClaimRefreshReissuesWithoutTimeAdvance(t *testing.T) {
 		srv.next(t, false)
 		if elapsed := time.Since(start); elapsed != 0 {
 			t.Fatal("refresh waited or backed off", elapsed)
+		}
+		cancel()
+		await(t, done)
+	})
+}
+
+func TestClaimPacingAfterRateLimitWait(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		srv := newControlledServer(false)
+		r := New(nil, func() Server { return srv }, nil, testOpts(), handler{kind: "light", lane: LaneLight})
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		done := make(chan struct{})
+		var wg sync.WaitGroup
+		go func() { r.dispatch(ctx, false, &wg); close(done) }()
+		poll := srv.next(t, false)
+		start := time.Now()
+		time.Sleep(750 * time.Millisecond) // the link waited, then got a 204
+		poll.answer <- nil
+		poll = srv.next(t, false)
+		if elapsed := time.Since(start); elapsed != time.Second {
+			t.Fatalf("empty claim polled again after %s", elapsed)
+		}
+		start = time.Now()
+		poll.err = &link.APIError{Status: 429, RetryAfter: 2 * time.Second, RetryAfterSet: true}
+		poll.answer <- nil
+		srv.next(t, false)
+		if elapsed := time.Since(start); elapsed != 2*time.Second {
+			t.Fatalf("exhausted claim polled again after %s", elapsed)
 		}
 		cancel()
 		await(t, done)

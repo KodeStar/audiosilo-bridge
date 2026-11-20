@@ -1527,6 +1527,7 @@ func (r *Runner) settle(base context.Context, ru *run, rep *Reporter, result any
 	// report hearing the cancel or the lost claim again.
 	owed := !rep.started.Load() && endsForGood(context.Cause(rep.ctx)) && r.holdsWork(job)
 	var park *ParkError
+	_, rateLimited := link.RateLimited(err)
 	switch {
 	case ru.ended.Load(), r.pairingGone(job):
 		// Unpaired on the Bridge's page (or paired with another server since),
@@ -1588,6 +1589,8 @@ func (r *Runner) settle(base context.Context, ru *run, rep *Reporter, result any
 		r.finish(base, srv, job, store.JobCancelled, progress, raw, "")
 	case err == nil:
 		r.finish(base, srv, job, store.JobDone, progress, raw, "")
+	case rateLimited:
+		r.finish(base, srv, job, store.JobNeedsAttention, progress, raw, err.Error()+". Cancel and queue the job again when the server is ready.")
 	case errors.As(err, &park):
 		r.finish(base, srv, job, store.JobNeedsAttention, progress, raw, park.Error())
 	default:

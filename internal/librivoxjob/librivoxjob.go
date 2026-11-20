@@ -938,7 +938,7 @@ func (h *Handler) finish(ctx context.Context, f *fetch, srv Server) (*Result, er
 		if bookPath, err = srv.Rescan(ctx, f.lib.ID, f.st.Dest); err == nil {
 			break
 		}
-		if ctx.Err() != nil || attempt == rescanAttempts {
+		if _, limited := link.RateLimited(err); limited || ctx.Err() != nil || attempt == rescanAttempts {
 			return nil, fmt.Errorf("the book is in the library at %s, but the server couldn't index it: %w", f.st.Dest, err)
 		}
 		if werr := h.o.Wait(ctx, time.Duration(attempt)*5*time.Second); werr != nil {

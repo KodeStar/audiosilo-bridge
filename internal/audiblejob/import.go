@@ -624,33 +624,30 @@ func (h *Importer) finish(ctx context.Context, rep *jobs.Reporter, srv ImportSer
 // on, an ASIN set meanwhile or a moved book is no failure, only no ASIN.
 func (h *Importer) enrichPlaced(ctx context.Context, rep *jobs.Reporter, srv ImportServer, account string, libraryID int64,
 	bookPath, asin string) (bool, error) {
-	for limited := 0; ; {
-		err := srv.Enrich(ctx, libraryID, bookPath, asin)
-		if retry, ok := link.RateLimited(err); ok {
-			limited++
-			wait, ok := enrichLimit.Wait(retry, limited)
-			if !ok {
-				h.o.Log.Info("audible: the server kept refusing an imported book's ASIN (429): the book is placed without it",
-					"account", account, "library", libraryID, "path", bookPath)
-				return false, nil
-			}
-			h.report(rep, jobs.Progress{Step: StepEnrich, Message: "The server asked the Bridge to slow down: waiting"})
-			if err := h.o.Wait(ctx, wait); err != nil {
-				return false, err
-			}
-			continue
-		}
-		switch {
-		case err == nil:
-			return true, nil
-		case errors.Is(err, link.ErrASINSet), errors.Is(err, link.ErrNoBook):
-		case ctx.Err() != nil:
-			return false, ctx.Err()
-		default:
-			h.o.Log.Warn("audible: adding an imported book's ASIN failed", "account", account, "library", libraryID, "err", err)
-		}
-		return false, nil
+	var waitErr error
+	err := enrichLimit.Do(ctx, func(ctx context.Context, wait time.Duration) error {
+		h.report(rep, jobs.Progress{Step: StepEnrich, Message: "The server asked the Bridge to slow down: waiting"})
+		waitErr = h.o.Wait(ctx, wait)
+		return waitErr
+	}, func(ctx context.Context) error {
+		return srv.Enrich(ctx, libraryID, bookPath, asin)
+	})
+	_, limited := link.RateLimited(err)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, link.ErrASINSet), errors.Is(err, link.ErrNoBook):
+	case ctx.Err() != nil:
+		return false, ctx.Err()
+	case waitErr != nil:
+		return false, waitErr
+	case limited:
+		h.o.Log.Info("audible: the server kept refusing an imported book's ASIN (429): the book is placed without it",
+			"account", account, "library", libraryID, "path", bookPath)
+	default:
+		h.o.Log.Warn("audible: adding an imported book's ASIN failed", "account", account, "library", libraryID, "err", err)
 	}
+	return false, nil
 }
 
 // placedRequest is the placement a job asked for (its trimmed dest_path and
@@ -1191,7 +1188,7 @@ func (h *Importer) rescan(ctx context.Context, srv ImportServer, libraryID int64
 			}
 			return book, nil
 		}
-		if ctx.Err() != nil || attempt == rescanAttempts {
+		if _, limited := link.RateLimited(err); limited || ctx.Err() != nil || attempt == rescanAttempts {
 			break
 		}
 		if werr := h.o.Wait(ctx, time.Duration(attempt)*5*time.Second); werr != nil {

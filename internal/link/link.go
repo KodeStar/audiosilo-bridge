@@ -404,8 +404,8 @@ func (e *APIError) Error() string {
 // maxBody bounds what the Bridge reads of any answer.
 const maxBody = 4 << 20
 
-// requestTimeout bounds every call but the claim, whose bound is its wait plus
-// claimSlack.
+// requestTimeout bounds an HTTP attempt. A claim gets its poll wait plus
+// claimSlack on each attempt that reaches the server.
 const (
 	requestTimeout = 30 * time.Second
 	claimSlack     = 15 * time.Second
@@ -420,6 +420,7 @@ type Client struct {
 	client           string
 	httpc            *http.Client
 	timeout          time.Duration
+	wait             func(context.Context, time.Duration) error
 	claimMinPriority *negotiation
 	// serverID is the id of the server the pairing reached (Paired.ServerID),
 	// "" until WithServerID sets it.
@@ -446,7 +447,7 @@ func New(serverURL, token, version string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Client{base: u, token: token, client: clientValue(version), httpc: &http.Client{}, timeout: requestTimeout, claimMinPriority: &negotiation{}}, nil
+	return &Client{base: u, token: token, client: clientValue(version), httpc: &http.Client{}, timeout: requestTimeout, wait: waitContext, claimMinPriority: &negotiation{}}, nil
 }
 
 // clientValue is the ClientHeader value: "AudioSilo Bridge/<version> (<os>)",
@@ -655,21 +656,37 @@ func (c *Client) do(ctx context.Context, method, path string, q url.Values, body
 	return err
 }
 
-// doFound sends one request and decodes a 2xx answer into out; found is false
-// for a 204.
-func (c *Client) doFound(ctx context.Context, method, path string, q url.Values, body, out any) (found bool, err error) {
-	ctx, cancel := context.WithTimeout(ctx, c.timeout)
-	defer cancel()
+// doFound retries only an explicit 429. The server's limiter refuses the
+// request before the route runs, so even consuming a pairing code, claiming
+// a job, updating its lease, rescanning or posting listening events is safe
+// to retry. A lost response gives no such assurance.
+func (c *Client) doFound(ctx context.Context, method, path string, q url.Values, body, out any) (bool, error) {
 	u := *c.base
 	u.Path = strings.TrimRight(u.Path, "/") + path
 	u.RawQuery = q.Encode()
-	var rd io.Reader
+	var payload []byte
 	if body != nil {
-		b, err := json.Marshal(body)
+		var err error
+		payload, err = json.Marshal(body)
 		if err != nil {
 			return false, err
 		}
-		rd = bytes.NewReader(b)
+	}
+	var found bool
+	err := requestBackoff.Do(ctx, c.wait, func(ctx context.Context) error {
+		var err error
+		found, err = c.attempt(ctx, method, &u, payload, out)
+		return err
+	})
+	return found, err
+}
+
+func (c *Client) attempt(ctx context.Context, method string, u *url.URL, payload []byte, out any) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	var rd io.Reader
+	if payload != nil {
+		rd = bytes.NewReader(payload)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, u.String(), rd)
 	if err != nil {
@@ -677,7 +694,7 @@ func (c *Client) doFound(ctx context.Context, method, path string, q url.Values,
 	}
 	req.Header.Set(ClientHeader, c.client)
 	req.Header.Set("Accept", "application/json")
-	if body != nil {
+	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	if c.token != "" {
@@ -689,7 +706,7 @@ func (c *Client) doFound(ctx context.Context, method, path string, q url.Values,
 	}
 	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
-	if err != nil {
+	if err != nil && resp.StatusCode != http.StatusTooManyRequests {
 		return false, err
 	}
 	if resp.StatusCode == http.StatusNoContent {
@@ -700,7 +717,7 @@ func (c *Client) doFound(ctx context.Context, method, path string, q url.Values,
 			return true, nil
 		}
 		if err := json.Unmarshal(raw, out); err != nil {
-			return false, unusableError{fmt.Errorf("decode the server's answer to %s %s: %w", method, path, err)}
+			return false, unusableError{fmt.Errorf("decode the server's answer to %s %s: %w", method, u.Path, err)}
 		}
 		return true, nil
 	}
@@ -726,12 +743,11 @@ const maxRetryAfter = 24 * time.Hour
 // clamped at maxRetryAfter. A past date is a valid zero wait.
 func retryAfter(v string, now time.Time) (time.Duration, bool) {
 	v = strings.TrimSpace(v)
-	if n, err := strconv.Atoi(v); err == nil {
-		if n < 0 {
-			return 0, false
-		}
-		// Clamped before the multiply so a huge value can't overflow.
-		return time.Duration(min(n, int(maxRetryAfter/time.Second))) * time.Second, true
+	if v != "" && strings.Trim(v, "0123456789") == "" {
+		// An out-of-range digit string parses to MaxUint64. Clamp before
+		// multiplying so even that header waits the maximum.
+		n, _ := strconv.ParseUint(v, 10, 64)
+		return time.Duration(min(n, uint64(maxRetryAfter/time.Second))) * time.Second, true
 	}
 	if t, err := http.ParseTime(v); err == nil {
 		return min(max(t.Sub(now), 0), maxRetryAfter), true

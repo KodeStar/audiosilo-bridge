@@ -231,6 +231,9 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	rep.Progress(jobs.Progress{Step: "books", Message: "Reading the library's books on the server"})
 	books, err := allBooks(ctx, srv, acct.LibraryID)
 	if err != nil {
+		if _, limited := link.RateLimited(err); limited {
+			return nil, err
+		}
 		return nil, h.fail(ctx, acct.ID, "could not read the library's books on the server: "+err.Error())
 	}
 
@@ -350,6 +353,9 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		end := min(start+link.MaxAudibleTitles, len(titles))
 		final := end == len(titles)
 		if _, err := srv.PutAudibleTitles(ctx, acct.ID, link.AudibleTitles{PollID: res.PollID, Final: final, Titles: titles[start:end]}); err != nil {
+			if _, limited := link.RateLimited(err); limited {
+				return nil, err
+			}
 			if errors.Is(err, link.ErrUnknownAccount) {
 				return nil, h.fail(ctx, acct.ID, "the server has no such Audible account: sign in or map the account again on the Bridge's Accounts tab")
 			}

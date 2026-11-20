@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -146,8 +145,17 @@ func TestEpisodeRescanWaitsOutTheServersLimit(t *testing.T) {
 			if err := s.episodeRescan(context.Background(), 3, *job.Path); err != nil {
 				t.Fatal("a limited rescan failed the job", err)
 			}
-			if got := h.scan.calls.Load(); got != tc.asks || !slices.Equal(waits, tc.waits) {
+			if got := h.scan.calls.Load(); got != tc.asks || len(waits) != len(tc.waits) {
 				t.Fatal("asks", got, "waits", waits)
+			}
+			for i, d := range waits {
+				lo, hi := tc.waits[i], tc.waits[i]
+				if tc.limit == nil {
+					lo /= 2
+				}
+				if d < lo || d > hi {
+					t.Fatalf("wait %d = %v, want %v..%v", i, d, lo, hi)
+				}
 			}
 			if s.isIndexed(3, "Fixture Show") != tc.indexed {
 				t.Fatal("indexed", !tc.indexed)

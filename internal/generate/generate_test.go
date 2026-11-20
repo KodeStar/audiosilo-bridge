@@ -33,6 +33,23 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/testwait"
 )
 
+func TestAttachmentRescanLeavesExhaustedLimitForNextScan(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+	cl, _ := link.New(srv.URL, "", "dev")
+	h := &Handler{o: Options{Log: slog.Default()}}
+	h.rescan(t.Context(), &run{srv: cl, lib: link.Library{ID: 1}, rel: "Author/Book"})
+	if n := calls.Load(); n != 3 {
+		t.Fatalf("attachment rescan made %d requests, want 3", n)
+	}
+}
+
 // fakeServer implements the server's Bridge routes the job calls: the claim,
 // job updates (with a cancel or a 409 on demand), the book lookup with its book
 // block, and the attachments rescan.

@@ -400,6 +400,20 @@ func TestRetainServerOutOfReachIsBridgeLost(t *testing.T) {
 	}
 }
 
+func TestRetainPreservesServerRateLimit(t *testing.T) {
+	h, fetch := audioHarness(t)
+	busy := &link.APIError{Status: http.StatusTooManyRequests}
+	h.handler.s.o.Server = func() Server { return &retainServer{scanServer: h.scan, policyErr: busy} }
+	show := "Fixture Show"
+	job := jobs.Job{ID: 83, Kind: RetainKind, LibraryID: fetch.LibraryID, Path: &show, Params: json.RawMessage(`{"show_id":"a1b2c3d4e5f60718"}`), Attempt: 1}
+	if _, err := h.handler.RetainJob().Run(t.Context(), job, jobs.LocalReporter()); !errors.Is(err, busy) {
+		t.Fatalf("policy read = %v", err)
+	}
+	if _, err := outcome(nil, leaseFailure(t.Context(), busy, "lost")); !errors.Is(err, busy) {
+		t.Fatalf("lease check = %v", err)
+	}
+}
+
 // A retain deleting several episodes while the server keeps answering its
 // rescans 429: the first deletion's rescan waits the limit out (askRescan's
 // bounds) and leaves the show to its next poll, and the other deletions leave

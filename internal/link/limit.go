@@ -1,7 +1,10 @@
 package link
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"math/rand/v2"
 	"net/http"
 	"time"
 )
@@ -13,6 +16,7 @@ import (
 type Backoff struct {
 	Tries      int
 	First, Max time.Duration
+	clamp      bool // wait Max for a longer Retry-After instead of giving up
 }
 
 // Wait is the wait before asking again after the limited-th 429 (e) in a row.
@@ -35,9 +39,66 @@ func (b Backoff) Wait(e *APIError, limited int) (time.Duration, bool) {
 		}
 	}
 	if wait > b.Max {
+		if b.clamp {
+			return b.Max, true
+		}
 		return 0, false
 	}
 	return wait, true
+}
+
+// The default bounds one call to three attempts and two minutes of waiting.
+// Jobs with an earlier point at which to defer work supply their own Backoff.
+var requestBackoff = Backoff{Tries: 3, First: time.Second, Max: time.Minute, clamp: true}
+
+type retryingKey struct{}
+
+// Do retries a rate-limited request within b. A job can own the wait (for
+// example, to slow subsequent enrichment PUTs). Its call must use the supplied
+// context so the link shares that budget. Only missing or invalid headers get
+// jitter, between half and all of the exponential delay.
+func (b Backoff) Do(ctx context.Context, wait func(context.Context, time.Duration) error, call func(context.Context) error) error {
+	if ctx.Value(retryingKey{}) != nil {
+		return call(ctx)
+	}
+	ctx = context.WithValue(ctx, retryingKey{}, true)
+	for attempt := 1; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := call(ctx)
+		busy, limited := RateLimited(err)
+		if !limited {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		delay, retry := b.Wait(busy, attempt)
+		if !retry {
+			return fmt.Errorf("the server is still rate limiting the Bridge (attempt %d): %w", attempt, err)
+		}
+		if !busy.RetryAfterSet && delay > 0 {
+			delay = delay/2 + rand.N(delay-delay/2) //nolint:gosec // jitter only spreads retries
+		}
+		if err := wait(ctx, delay); err != nil {
+			return err
+		}
+	}
+}
+
+func waitContext(ctx context.Context, delay time.Duration) error {
+	if delay == 0 {
+		return ctx.Err()
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // Transient reports whether the same call may be answered differently if made

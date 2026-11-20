@@ -474,6 +474,17 @@ func TestPollRefusals(t *testing.T) {
 	}
 }
 
+func TestRateLimitedPollDoesNotRecordAnAccountFailure(t *testing.T) {
+	t.Parallel()
+	fs, accts := backfill(1)
+	fs.titleErr = http.StatusTooManyRequests
+	h := setup(t, fs, accts)
+	_, err := run(t, h, "acct0001")
+	if _, limited := link.RateLimited(err); !limited || len(accts.failed) != 0 {
+		t.Fatalf("poll error %v, account failures %v", err, accts.failed)
+	}
+}
+
 func TestHandlerShape(t *testing.T) {
 	t.Parallel()
 	h := New(Options{})

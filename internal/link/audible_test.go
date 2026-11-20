@@ -223,6 +223,7 @@ func TestRateLimitedRetryAfter(t *testing.T) {
 	}))
 	defer server.Close()
 	c, _ := New(server.URL, "tok", "0.9.0")
+	c.wait = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
 	for _, tc := range []struct {
 		header   string
 		min, max time.Duration
@@ -233,6 +234,8 @@ func TestRateLimitedRetryAfter(t *testing.T) {
 		{"", 0, 0, false},
 		{"soon", 0, 0, false},
 		{"-3", 0, 0, false},
+		{"+3", 0, 0, false},
+		{"987654321012345678901234567890", 24 * time.Hour, 24 * time.Hour, true},
 		{"99999999999999", 24 * time.Hour, 24 * time.Hour, true},
 		{time.Now().Add(90 * time.Second).UTC().Format(http.TimeFormat), 80 * time.Second, 90 * time.Second, true},
 		{time.Now().Add(-time.Hour).UTC().Format(http.TimeFormat), 0, 0, true},

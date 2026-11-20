@@ -2245,7 +2245,7 @@ func (h *Handler) rescan(ctx context.Context, r *run) {
 				"description", got.Description, "chapters", got.Chapters, "readalong", got.Readalong)
 			return
 		}
-		if i == rescanTries || errors.Is(err, link.ErrNotIndexable) || ctx.Err() != nil {
+		if _, limited := link.RateLimited(err); limited || i == rescanTries || errors.Is(err, link.ErrNotIndexable) || ctx.Err() != nil {
 			h.o.Log.Warn("generate: the server didn't re-read the attachments (its next scan will)", "job", r.job.ID, "err", err)
 			return
 		}

@@ -378,7 +378,7 @@ func (b *Bridge) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 	wg.Add(5)
 	go func() { defer wg.Done(); b.runEngine(ctx) }()
-	go func() { defer wg.Done(); b.heartbeatLoop(ctx) }()
+	go func() { defer wg.Done(); heartbeatLoop(ctx, b.kick, b.beat) }()
 	go func() { defer wg.Done(); b.runner.Run(ctx) }()
 	go func() { defer wg.Done(); b.audiblePush.Run(ctx) }()
 	serveErr := make(chan error, 1)
@@ -437,16 +437,16 @@ func (t *bgTasks) stop() {
 }
 
 // heartbeatLoop reports every HeartbeatEvery, and at once when kicked.
-func (b *Bridge) heartbeatLoop(ctx context.Context) {
-	t := time.NewTicker(HeartbeatEvery)
-	defer t.Stop()
-	for {
-		b.beat(ctx)
+func heartbeatLoop(ctx context.Context, kick <-chan struct{}, beat func(context.Context)) {
+	for ctx.Err() == nil {
+		beat(ctx)
+		// A delayed heartbeat has just sent the status. Start the next
+		// interval here so no tick accumulated during Retry-After.
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
-		case <-b.kick:
+		case <-time.After(HeartbeatEvery):
+		case <-kick:
 		}
 	}
 }

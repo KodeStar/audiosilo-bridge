@@ -643,6 +643,9 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 // bridge_lost (the Bridge and its server lost each other), never network, which
 // the server reads as the episode's host or the feed's being out of reach.
 func leaseFailure(ctx context.Context, err error, lost string) error {
+	if _, limited := link.RateLimited(err); limited {
+		return err
+	}
 	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, link.ErrNotHeld) || errors.Is(err, link.ErrUnauthorized) {
 		return fail("identity_changed", lost)
 	}
@@ -831,24 +834,13 @@ const (
 
 var rescanLimit = link.Backoff{Tries: rescanTries, First: rescanBackoff, Max: rescanMaxWait}
 
-// askRescan asks the server to index target (a show folder or an episode),
-// waiting out its 429s as audiblejob's enrichment does (rescanLimit): the
-// server's Retry-After (an explicit 0 asks again at once, none waits
-// rescanBackoff, doubling), rescanTries asks in all, each wait at most
-// rescanMaxWait. The last answer's error: still a 429 (link.RateLimited)
-// past those bounds or after a stop meanwhile.
+// askRescan uses the rescan's shorter budget so a saved episode can leave
+// its indexing to the next poll.
 func (s *service) askRescan(ctx context.Context, srv Server, id int64, target string) error {
-	for limited := 1; ; limited++ {
+	return rescanLimit.Do(ctx, s.o.Wait, func(ctx context.Context) error {
 		_, err := srv.RescanPodcast(ctx, id, target)
-		busy, ok := link.RateLimited(err)
-		if !ok {
-			return err
-		}
-		wait, ok := rescanLimit.Wait(busy, limited)
-		if !ok || ctx.Err() != nil || s.o.Wait(ctx, wait) != nil {
-			return err
-		}
-	}
+		return err
+	})
 }
 
 // episodeRescan asks the server to index episode p. One whose show folder was

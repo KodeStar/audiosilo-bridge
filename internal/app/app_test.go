@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/api"
@@ -21,6 +22,24 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/secrets"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
+
+func TestHeartbeatIntervalAfterRateLimitWait(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		var firstReply time.Time
+		heartbeatLoop(ctx, nil, func(context.Context) {
+			if firstReply.IsZero() {
+				time.Sleep(2 * HeartbeatEvery)
+				firstReply = time.Now()
+				return
+			}
+			if gap := time.Since(firstReply); gap != HeartbeatEvery {
+				t.Errorf("next heartbeat after %s, want %s", gap, HeartbeatEvery)
+			}
+			cancel()
+		})
+	})
+}
 
 // fakeServer is the server side of the Bridge routes, enough for the app: a
 // pairing code, heartbeats (recorded), one library with one book, no jobs.

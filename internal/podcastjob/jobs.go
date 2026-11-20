@@ -837,7 +837,12 @@ func (h *Poll) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	if !s.isIndexed(lib.ID, show) {
 		rep.Progress(jobs.Progress{Step: "indexing", Message: "Indexing the podcast show"})
 		if err := s.rescan(ctx, lib.ID, show); err != nil {
-			return nil, err
+			if _, limited := link.RateLimited(err); !limited {
+				return nil, err
+			}
+			// The feed is saved. Even a 304 on the next poll comes through
+			// this check and pays the rescan still owed.
+			slog.Info("podcasts: the server asked the Bridge to slow down; the next poll will index the show", "library", lib.ID, "show", show)
 		}
 	}
 	return map[string]any{"library_id": lib.ID, "show_path": show, "show_id": f.ShowID, "status": resp.Status, "changed": changed, "new_episodes": added, "episodes": len(f.Episodes), "skipped": skipped, "moved": moved, "etag": resp.ETag, "last_modified": resp.LastModified, "next_poll_seconds": podcast.NextPoll(f, resp.CacheControl, s.o.Now())}, nil
@@ -924,13 +929,16 @@ func (s *service) persist(ctx context.Context, root *os.Root, lib link.Library, 
 	return added, changed, nil
 }
 
-// rescan asks the server to index show, waiting out its 429s (askRescan).
+// rescan indexes the show, marking it indexed only once the server accepts it.
 func (s *service) rescan(ctx context.Context, id int64, show string) error {
 	srv := s.o.Server()
 	if srv == nil {
 		return fail("write_failed", "The server is unavailable for indexing. Check the feed again.")
 	}
-	if err := s.askRescan(ctx, srv, id, show); err != nil {
+	if _, err := srv.RescanPodcast(ctx, id, show); err != nil {
+		if _, limited := link.RateLimited(err); limited {
+			return err
+		}
 		return fail("write_failed", "The server could not index the podcast show. Check the feed again.")
 	}
 	s.setIndexed(id, show, true)
@@ -1447,6 +1455,9 @@ func fail(code, message string) *netguard.Error { return &netguard.Error{Code: c
 func outcome(result any, err error) (any, error) {
 	if err == nil {
 		return result, nil
+	}
+	if _, limited := link.RateLimited(err); limited {
+		return nil, err
 	}
 	var failure *netguard.Error
 	if errors.As(err, &failure) {

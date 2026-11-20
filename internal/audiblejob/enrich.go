@@ -48,33 +48,32 @@ func (h *Handler) enrich(ctx context.Context, srv Server, acct store.AudibleAcco
 	msg := "Adding the ASINs of the matched books"
 	rep.Progress(jobs.Progress{Step: "enriching", Message: msg, Total: len(hits)})
 	deadline := h.now().Add(enrichBudget)
-	gap, limited := enrichGap, 0
-	for i := 0; i < len(hits); {
-		if i > 0 && limited == 0 { // a retry after a 429 has waited already
+	gap := enrichGap
+	for i, book := range hits {
+		if i > 0 {
 			if err := h.sleep(ctx, gap); err != nil {
 				return err
 			}
 		}
-		if !h.now().Before(deadline) {
+		var waitErr error
+		err := enrichLimit.Do(ctx, func(ctx context.Context, wait time.Duration) error {
+			gap = min(gap*2, enrichMaxGap)
+			rep.Progress(jobs.Progress{Step: "enriching", Message: "The server asked the Bridge to slow down: waiting", Done: i, Total: len(hits)})
+			waitErr = h.sleep(ctx, wait)
+			return waitErr
+		}, func(ctx context.Context) error {
+			if !h.now().Before(deadline) {
+				return errEnrichBudget
+			}
+			return srv.Enrich(ctx, acct.LibraryID, book.path, book.asin)
+		})
+		if waitErr != nil {
+			return waitErr
+		}
+		if _, limited := link.RateLimited(err); limited || errors.Is(err, errEnrichBudget) {
 			res.EnrichDeferred = len(hits) - i
 			break
 		}
-		err := srv.Enrich(ctx, acct.LibraryID, hits[i].path, hits[i].asin)
-		if retry, ok := link.RateLimited(err); ok {
-			limited++
-			wait, ok := enrichLimit.Wait(retry, limited)
-			if !ok {
-				res.EnrichDeferred = len(hits) - i
-				break
-			}
-			gap = min(gap*2, enrichMaxGap)
-			rep.Progress(jobs.Progress{Step: "enriching", Message: "The server asked the Bridge to slow down: waiting", Done: i, Total: len(hits)})
-			if err := h.sleep(ctx, wait); err != nil {
-				return err
-			}
-			continue // the same book again
-		}
-		limited = 0
 		switch {
 		case err == nil:
 			res.Enriched++
@@ -86,8 +85,7 @@ func (h *Handler) enrich(ctx context.Context, srv Server, acct store.AudibleAcco
 			res.EnrichFailed++
 			h.o.Log.Warn("audible: adding a book's ASIN failed", "account", acct.ID, "library", acct.LibraryID, "err", err)
 		}
-		i++
-		rep.Progress(jobs.Progress{Step: "enriching", Message: msg, Done: i, Total: len(hits)})
+		rep.Progress(jobs.Progress{Step: "enriching", Message: msg, Done: i + 1, Total: len(hits)})
 	}
 	if res.EnrichDeferred > 0 {
 		h.o.Log.Info("audible: the rest of the ASIN backfill waits for the next poll", "account", acct.ID,
@@ -95,6 +93,8 @@ func (h *Handler) enrich(ctx context.Context, srv Server, acct store.AudibleAcco
 	}
 	return nil
 }
+
+var errEnrichBudget = errors.New("the poll has spent its time adding ASINs")
 
 // enrichLimit is how an enrichment PUT waits out the server's 429s: its
 // Retry-After, else enrichBackoff doubling; enrichMaxLimited 429s in a row,

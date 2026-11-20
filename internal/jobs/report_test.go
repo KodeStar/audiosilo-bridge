@@ -6,6 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -291,6 +294,51 @@ func TestCancelCauseWordsTheServersReason(t *testing.T) {
 func storedAs(db *store.DB, id int64, state string) bool {
 	sj, err := db.GetServerJob(context.Background(), id)
 	return err == nil && sj.State == state && sj.Reported
+}
+
+// The runner sees the final result of one link call. A burst finishes the
+// same job and sustained throttling on required work is reported for attention.
+func TestRateLimitedJob(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		refusals int32
+		state    string
+	}{
+		{"recovers", 2, store.JobDone},
+		{"limit persists", 100, store.JobNeedsAttention},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var requests, runs atomic.Int32
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if requests.Add(1) <= tc.refusals {
+					w.Header().Set("Retry-After", "0")
+					w.WriteHeader(http.StatusTooManyRequests)
+					return
+				}
+				_, _ = w.Write([]byte(`{"path":"A/B"}`))
+			}))
+			defer api.Close()
+			cl, _ := link.New(api.URL, "", "dev")
+			db, srv := openStore(t), newFakeServer()
+			srv.add(&link.Job{ID: 31, Kind: "k.scan", Attempts: 1})
+			r := New(db, func() Server { return srv }, nil, testOpts(), handler{kind: "k.scan", lane: LaneLight,
+				fn: func(ctx context.Context, _ Job, _ *Reporter) (any, error) {
+					runs.Add(1)
+					_, err := cl.Rescan(ctx, 1, "A/B")
+					return nil, err
+				}})
+			runFor(t, r, func() bool { return storedAs(db, 31, tc.state) })
+			state, final := srv.finalState(31)
+			if state != tc.state || runs.Load() != 1 || requests.Load() != 3 {
+				t.Fatalf("state %s, runs %d, requests %d", state, runs.Load(), requests.Load())
+			}
+			if state == store.JobNeedsAttention && (final.Error == nil || !strings.Contains(*final.Error, "429")) {
+				t.Fatalf("missing rate limit in final report: %+v", final)
+			}
+		})
+	}
 }
 
 // A cancel asked for after the job's last report, which a failure beat to the
