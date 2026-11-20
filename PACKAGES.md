@@ -2136,7 +2136,11 @@ internal/
             pairing, claiming a job and posting listening events. An exhausted
             limit wraps the last APIError, which RateLimited recognizes.
             Episode rescans and Audible enrichment use Backoff.Do with their
-            own budgets. Only the outer call waits or retries.
+            own budgets. Only the outer call waits or retries. A call a person
+            waits for on the page (Pair, Client.Prompt: the Accounts tab's
+            people read) waits at most 10 s per 429 and answers a longer
+            Retry-After (a pairing lockout's) at once, inside the page's 60 s
+            write timeout.
             Backoff.Wait also supplies the mapping check's hold duration.
             A 2xx it can't use (not the JSON expected, a pairing with no token)
             is ErrUnusableAnswer (bridge#28), worded as its cause, which the

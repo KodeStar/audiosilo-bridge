@@ -428,6 +428,9 @@ type Client struct {
 	// pairing is the Bridge's pairing identity the link was made for
 	// (WithPairing), recorded with every job claimed on it.
 	pairing string
+	// retry bounds how a 429 is waited out: requestBackoff, or promptBackoff
+	// for a call a person waits for on the page (Pair, Prompt).
+	retry Backoff
 }
 
 // negotiation is a pairing's claim_min_priority: accepted by its last
@@ -447,7 +450,18 @@ func New(serverURL, token, version string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Client{base: u, token: token, client: clientValue(version), httpc: &http.Client{}, timeout: requestTimeout, wait: Wait, claimMinPriority: &negotiation{}}, nil
+	return &Client{base: u, token: token, client: clientValue(version), httpc: &http.Client{}, timeout: requestTimeout, wait: Wait,
+		retry: requestBackoff, claimMinPriority: &negotiation{}}, nil
+}
+
+// Prompt returns a copy of the client for a call a person waits for on the
+// Bridge's page: its 429s are waited out only as long as promptBackoff allows,
+// so the answer comes inside the page's write timeout. The copy shares the
+// client's transport and claim negotiation.
+func (c *Client) Prompt() *Client {
+	cp := *c
+	cp.retry = promptBackoff
+	return &cp
 }
 
 // clientValue is the ClientHeader value: "AudioSilo Bridge/<version> (<os>)",
@@ -485,6 +499,9 @@ func Pair(ctx context.Context, serverURL, code, version string) (*Paired, error)
 	if err != nil {
 		return nil, err
 	}
+	// A person waits on the page (or a start waits to serve it), and a
+	// pairing lockout's Retry-After runs to minutes: never waited out.
+	c = c.Prompt()
 	var out Paired
 	if err := c.do(ctx, http.MethodPost, "/api/v1/bridge/pair", nil, map[string]string{"code": strings.TrimSpace(code)}, &out); err != nil {
 		return nil, err
@@ -659,7 +676,8 @@ func (c *Client) do(ctx context.Context, method, path string, q url.Values, body
 // doFound retries only an explicit 429. The server's limiter refuses the
 // request before the route runs, so even consuming a pairing code, claiming
 // a job, updating its lease, rescanning or posting listening events is safe
-// to retry. A lost response gives no such assurance.
+// to retry. A lost response gives no such assurance. How long a 429 is
+// waited out is the client's retry (a page call's is shorter: Prompt).
 func (c *Client) doFound(ctx context.Context, method, path string, q url.Values, body, out any) (bool, error) {
 	u := *c.base
 	u.Path = strings.TrimRight(u.Path, "/") + path
@@ -673,7 +691,7 @@ func (c *Client) doFound(ctx context.Context, method, path string, q url.Values,
 		}
 	}
 	var found bool
-	err := requestBackoff.Do(ctx, c.wait, func(ctx context.Context) error {
+	err := c.retry.Do(ctx, c.wait, func(ctx context.Context) error {
 		var err error
 		found, err = c.attempt(ctx, method, &u, payload, out)
 		return err

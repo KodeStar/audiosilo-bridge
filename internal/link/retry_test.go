@@ -198,6 +198,44 @@ func TestRateLimitedRequestStopsAtBound(t *testing.T) {
 	}
 }
 
+// A call a person waits for on the page (a pairing, Prompt) never waits out a
+// long Retry-After, such as a pairing lockout's: the page's 60 s write timeout
+// would drop the answer. A short one is still waited out.
+func TestPromptCallsLeaveALongLimit(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int32
+	var short atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 || r.URL.Path == "/api/v1/bridge/pair" {
+			w.Header().Set("Retry-After", "900")
+			if short.Load() {
+				w.Header().Set("Retry-After", "2")
+			}
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		_, _ = io.WriteString(w, `{"users":[]}`)
+	}))
+	defer srv.Close()
+	start := time.Now()
+	_, err := Pair(t.Context(), srv.URL, "code", "dev")
+	if _, limited := RateLimited(err); !limited || calls.Load() != 1 || time.Since(start) > 5*time.Second {
+		t.Fatalf("pair = %v after %d calls and %s", err, calls.Load(), time.Since(start))
+	}
+	c, _ := New(srv.URL, "tok", "dev")
+	var waits []time.Duration
+	c.wait = func(_ context.Context, d time.Duration) error { waits = append(waits, d); return nil }
+	calls.Store(0)
+	if _, err := c.Prompt().Users(t.Context()); err == nil || calls.Load() != 1 || len(waits) != 0 {
+		t.Fatalf("prompt users = %v, calls %d, waits %v", err, calls.Load(), waits)
+	}
+	short.Store(true)
+	calls.Store(0)
+	if _, err := c.Prompt().Users(t.Context()); err != nil || calls.Load() != 2 || !slices.Equal(waits, []time.Duration{2 * time.Second}) {
+		t.Fatalf("prompt users = %v, calls %d, waits %v", err, calls.Load(), waits)
+	}
+}
+
 // An ended ctx wins over any wait, even a zero one (Retry-After: 0), so a
 // cancelled job never sends another request; a zero wait on a live ctx is none.
 func TestWaitEndedContextWins(t *testing.T) {

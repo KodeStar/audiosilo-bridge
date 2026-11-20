@@ -51,6 +51,12 @@ func (b Backoff) Wait(e *APIError, limited int) (time.Duration, bool) {
 // Jobs with an earlier point at which to defer work supply their own Backoff.
 var requestBackoff = Backoff{Tries: 3, First: time.Second, Max: time.Minute, clamp: true}
 
+// promptBackoff bounds a call a person waits for on the Bridge's page (Pair,
+// Client.Prompt), whose answer must come inside the page's 60 s write timeout:
+// a Retry-After over 10 s (a pairing lockout's runs to minutes) is answered
+// at once rather than clamped and waited.
+var promptBackoff = Backoff{Tries: 3, First: time.Second, Max: 10 * time.Second}
+
 type retryingKey struct{}
 
 // Do retries a rate-limited request within b. A job can own the wait (for
