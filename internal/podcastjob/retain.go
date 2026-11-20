@@ -57,9 +57,6 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 		return nil, fail("bridge_lost", "The retention policy could not be verified.")
 	}
 	policy, err := srv.PodcastRetention(ctx, lib.ID, show, p.ShowID)
-	if _, limited := link.RateLimited(err); limited {
-		return nil, err
-	}
 	var apiErr *link.APIError
 	if err != nil && !errors.As(err, &apiErr) {
 		// The server could not be reached: a retryable failure, not a changed show

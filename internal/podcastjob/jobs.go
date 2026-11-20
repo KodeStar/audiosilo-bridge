@@ -753,7 +753,7 @@ func (h *Subscribe) run(parent context.Context, job jobs.Job, rep *jobs.Reporter
 	}
 	done = true
 	rep.Progress(jobs.Progress{Step: "indexing", Message: "Indexing the podcast show"})
-	if err := s.rescan(ctx, lib.ID, show); err != nil {
+	if err := s.rescan(ctx, lib.ID, show, false); err != nil {
 		return nil, err
 	}
 	return map[string]any{"library_id": lib.ID, "show_path": show, "show_id": f.ShowID, "created": created, "private": f.Private, "episodes": len(f.Episodes), "skipped": parsed.Skipped, "status": resp.Status, "etag": resp.ETag, "last_modified": resp.LastModified, "next_poll_seconds": podcast.NextPoll(f, resp.CacheControl, s.o.Now())}, nil
@@ -836,13 +836,8 @@ func (h *Poll) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	}
 	if !s.isIndexed(lib.ID, show) {
 		rep.Progress(jobs.Progress{Step: "indexing", Message: "Indexing the podcast show"})
-		if err := s.rescan(ctx, lib.ID, show); err != nil {
-			if _, limited := link.RateLimited(err); !limited {
-				return nil, err
-			}
-			// The feed is saved. Even a 304 on the next poll comes through
-			// this check and pays the rescan still owed.
-			slog.Info("podcasts: the server asked the Bridge to slow down; the next poll will index the show", "library", lib.ID, "show", show)
+		if err := s.rescan(ctx, lib.ID, show, true); err != nil {
+			return nil, err
 		}
 	}
 	return map[string]any{"library_id": lib.ID, "show_path": show, "show_id": f.ShowID, "status": resp.Status, "changed": changed, "new_episodes": added, "episodes": len(f.Episodes), "skipped": skipped, "moved": moved, "etag": resp.ETag, "last_modified": resp.LastModified, "next_poll_seconds": podcast.NextPoll(f, resp.CacheControl, s.o.Now())}, nil
@@ -929,15 +924,17 @@ func (s *service) persist(ctx context.Context, root *os.Root, lib link.Library, 
 	return added, changed, nil
 }
 
-// rescan indexes the show, marking it indexed only once the server accepts it.
-func (s *service) rescan(ctx context.Context, id int64, show string) error {
+// rescan marks the show indexed once the server accepts it. A poll can defer
+// indexing a saved feed until its next run, even if that poll receives a 304.
+func (s *service) rescan(ctx context.Context, id int64, show string, deferOnLimit bool) error {
 	srv := s.o.Server()
 	if srv == nil {
 		return fail("write_failed", "The server is unavailable for indexing. Check the feed again.")
 	}
 	if _, err := srv.RescanPodcast(ctx, id, show); err != nil {
-		if _, limited := link.RateLimited(err); limited {
-			return err
+		if _, limited := link.RateLimited(err); limited && deferOnLimit {
+			slog.Info("podcasts: the server asked the Bridge to slow down; the next poll will index the show", "library", id, "show", show)
+			return nil
 		}
 		return fail("write_failed", "The server could not index the podcast show. Check the feed again.")
 	}
@@ -1455,9 +1452,6 @@ func fail(code, message string) *netguard.Error { return &netguard.Error{Code: c
 func outcome(result any, err error) (any, error) {
 	if err == nil {
 		return result, nil
-	}
-	if _, limited := link.RateLimited(err); limited {
-		return nil, err
 	}
 	var failure *netguard.Error
 	if errors.As(err, &failure) {

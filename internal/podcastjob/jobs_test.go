@@ -663,12 +663,13 @@ func TestPollRescanWaitsOutTheServersLimit(t *testing.T) {
 	}
 }
 
-func TestSubscribePreservesRateLimitOnFirstIndex(t *testing.T) {
+func TestSubscribeReportsFailedFirstIndexAfterRateLimit(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	h.scan.limited.Store(1) // the link's final answer
 	res, err := h.handler.Run(t.Context(), h.claim(h.http.URL+"/feed", false), jobs.LocalReporter())
-	if _, limited := link.RateLimited(err); !limited || res != nil || h.handler.s.isIndexed(3, "Example Show") {
+	if err == nil || err.Error() != "The server could not index the podcast show. Check the feed again." ||
+		fields(t, res)["code"] != "write_failed" || h.handler.s.isIndexed(3, "Example Show") {
 		t.Fatalf("subscribe = %v, %v", res, err)
 	}
 }

@@ -122,6 +122,11 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/api/v1/bridge/audible/accounts/") &&
 		strings.HasSuffix(r.URL.Path, "/titles"):
 		if f.titleErr != 0 {
+			if f.titleErr == http.StatusTooManyRequests {
+				w.Header().Set("Retry-After", "0")
+				w.WriteHeader(f.titleErr)
+				return
+			}
 			w.WriteHeader(f.titleErr)
 			_, _ = w.Write([]byte(`{"error":"no such Audible account","code":"unknown_account"}`))
 			return
@@ -480,7 +485,8 @@ func TestRateLimitedPollDoesNotRecordAnAccountFailure(t *testing.T) {
 	fs.titleErr = http.StatusTooManyRequests
 	h := setup(t, fs, accts)
 	_, err := run(t, h, "acct0001")
-	if _, limited := link.RateLimited(err); !limited || len(accts.failed) != 0 {
+	if _, limited := link.RateLimited(err); !limited || len(accts.failed) != 0 ||
+		err.Error() != "could not report the titles to the server: server answered 429: Too Many Requests" {
 		t.Fatalf("poll error %v, account failures %v", err, accts.failed)
 	}
 }

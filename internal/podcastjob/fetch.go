@@ -643,9 +643,6 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 // bridge_lost (the Bridge and its server lost each other), never network, which
 // the server reads as the episode's host or the feed's being out of reach.
 func leaseFailure(ctx context.Context, err error, lost string) error {
-	if _, limited := link.RateLimited(err); limited {
-		return err
-	}
 	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, link.ErrNotHeld) || errors.Is(err, link.ErrUnauthorized) {
 		return fail("identity_changed", lost)
 	}

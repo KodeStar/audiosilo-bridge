@@ -8,10 +8,10 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/link"
@@ -296,17 +296,22 @@ func storedAs(db *store.DB, id int64, state string) bool {
 	return err == nil && sj.State == state && sj.Reported
 }
 
-// The runner sees the final result of one link call. A burst finishes the
-// same job and sustained throttling on required work is reported for attention.
+// The server schedules another run of its own jobs after a failure. Only an
+// admin-started job can wait for someone to cancel and queue it again.
 func TestRateLimitedJob(t *testing.T) {
 	t.Parallel()
+	const refused = "server answered 429: Too Many Requests"
+	const attention = "the server is still rate limiting the Bridge (attempt 3): " + refused +
+		". Cancel and queue the job again when the server is ready."
 	for _, tc := range []struct {
-		name     string
-		refusals int32
-		state    string
+		name, kind     string
+		refusals       int32
+		state, message string
 	}{
-		{"recovers", 2, store.JobDone},
-		{"limit persists", 100, store.JobNeedsAttention},
+		{"recovers", "podcast.poll", 2, store.JobDone, ""},
+		{"podcast", "podcast.subscribe", 3, store.JobFailed, refused},
+		{"audible", "audible.poll", 3, store.JobFailed, refused},
+		{"admin", "sidecars.generate", 3, store.JobNeedsAttention, attention},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -322,8 +327,8 @@ func TestRateLimitedJob(t *testing.T) {
 			defer api.Close()
 			cl, _ := link.New(api.URL, "", "dev")
 			db, srv := openStore(t), newFakeServer()
-			srv.add(&link.Job{ID: 31, Kind: "k.scan", Attempts: 1})
-			r := New(db, func() Server { return srv }, nil, testOpts(), handler{kind: "k.scan", lane: LaneLight,
+			srv.add(&link.Job{ID: 31, Kind: tc.kind, Attempts: 1})
+			r := New(db, func() Server { return srv }, nil, testOpts(), handler{kind: tc.kind, lane: LaneLight,
 				fn: func(ctx context.Context, _ Job, _ *Reporter) (any, error) {
 					runs.Add(1)
 					_, err := cl.Rescan(ctx, 1, "A/B")
@@ -334,11 +339,153 @@ func TestRateLimitedJob(t *testing.T) {
 			if state != tc.state || runs.Load() != 1 || requests.Load() != 3 {
 				t.Fatalf("state %s, runs %d, requests %d", state, runs.Load(), requests.Load())
 			}
-			if state == store.JobNeedsAttention && (final.Error == nil || !strings.Contains(*final.Error, "429")) {
-				t.Fatalf("missing rate limit in final report: %+v", final)
+			if final.Error == nil || *final.Error != tc.message {
+				t.Fatalf("final report = %+v, want error %q", final, tc.message)
 			}
 		})
 	}
+}
+
+func TestRateLimitedKeepaliveAllowsProgressAndFinish(t *testing.T) {
+	t.Parallel()
+	const kind = "bridge.verify"
+	var claimed atomic.Bool
+	var running atomic.Int32
+	var sawProgress atomic.Bool
+	refused := make(chan struct{})
+	expires := make(chan time.Time, 1)
+	finish := make(chan link.Update, 1)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch req.URL.Path {
+		case "/api/v1/bridge/jobs/next":
+			if claimed.Swap(true) {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(link.Job{ID: 31, Kind: kind, Attempts: 1})
+		case "/api/v1/bridge/jobs/31":
+			var u link.Update
+			if err := json.NewDecoder(req.Body).Decode(&u); err != nil || u.State == nil {
+				t.Errorf("invalid update: %+v, %v", u, err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if *u.State == link.StateRunning {
+				switch running.Add(1) {
+				case 1:
+					end := time.Now().Add(time.Second)
+					expires <- end
+					until := end.UTC().Format(time.RFC3339Nano)
+					_ = json.NewEncoder(w).Encode(link.Job{LeaseUntil: &until})
+					return
+				case 2:
+					w.Header().Set("Retry-After", "120")
+					w.WriteHeader(http.StatusTooManyRequests)
+					close(refused)
+					return
+				}
+				var pr Progress
+				if json.Unmarshal(u.Progress, &pr) == nil && pr.Step == "checked" {
+					sawProgress.Store(true)
+				}
+			} else {
+				finish <- u
+			}
+			_ = json.NewEncoder(w).Encode(link.Job{State: *u.State})
+		default:
+			http.NotFound(w, req)
+		}
+	}))
+	t.Cleanup(api.Close)
+	cl, err := link.New(api.URL, "", "dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cl = cl.WithServerID(testServer)
+	r := New(openStore(t), func() Server { return cl }, nil, testOpts(), handler{kind: kind, lane: LaneLight,
+		fn: func(ctx context.Context, _ Job, rep *Reporter) (any, error) {
+			select {
+			case <-refused:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			rep.Progress(Progress{Step: "checked"})
+			return nil, rep.Refresh(ctx)
+		}})
+	startControlled(t, r)
+	end := await(t, expires)
+	select {
+	case u := <-finish:
+		if *u.State != store.JobDone || !sawProgress.Load() {
+			t.Fatalf("finish = %+v, server saw progress = %t", u, sawProgress.Load())
+		}
+	case <-time.After(time.Until(end)):
+		t.Fatal("the keepalive's Retry-After held up progress or finish past the lease")
+	}
+}
+
+func TestIdleReportDelayAfterRateLimit(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		r := New(nil, nil, nil, testOpts())
+		rep := &Reporter{r: r}
+		for _, tc := range []struct{ after, want time.Duration }{
+			{0, r.opts.ReportRetry},
+			{15 * time.Second, 15 * time.Second},
+			{2 * time.Minute, time.Minute},
+		} {
+			rep.failed(&link.APIError{Status: http.StatusTooManyRequests, RetryAfter: tc.after, RetryAfterSet: true})
+			if delay := time.Until(rep.nextIdle); delay != tc.want {
+				t.Fatalf("Retry-After %v: next idle report in %v, want %v", tc.after, delay, tc.want)
+			}
+		}
+		rep.reached()
+		if delay := time.Until(rep.nextIdle); delay != r.opts.Keepalive {
+			t.Fatalf("after recovery: next idle report in %v, want %v", delay, r.opts.Keepalive)
+		}
+	})
+}
+
+type limitedRefreshServer struct {
+	*fakeServer
+	refuseNext atomic.Bool
+}
+
+func (s *limitedRefreshServer) UpdateJob(ctx context.Context, id int64, u link.Update) (*link.Job, error) {
+	if s.refuseNext.Swap(false) {
+		return nil, &link.APIError{Status: http.StatusTooManyRequests, RetryAfter: time.Minute, RetryAfterSet: true}
+	}
+	return s.fakeServer.UpdateJob(ctx, id, u)
+}
+
+func TestRateLimitedRefreshRetriesWithCurrentProgress(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		srv := &limitedRefreshServer{fakeServer: newFakeServer()}
+		r := New(nil, func() Server { return srv }, nil, testOpts())
+		rep := &Reporter{r: r, srv: srv, ctx: t.Context(), job: Job{serverID: testServer, ID: 31, Attempt: 1}}
+		srv.refuseNext.Store(true)
+		rep.Progress(Progress{Step: "reading"})
+		start := time.Now()
+		done := make(chan error, 1)
+		go func() { done <- rep.Refresh(t.Context()) }()
+		synctest.Wait()
+		rep.Progress(Progress{Step: "saving"})
+		if err := rep.Refresh(t.Context()); err != nil || time.Since(start) != 0 {
+			t.Fatalf("new progress sent after %v: %v", time.Since(start), err)
+		}
+		if err := <-done; err != nil || time.Since(start) != time.Minute {
+			t.Fatalf("refresh retried after %v: %v", time.Since(start), err)
+		}
+		updates := srv.updates[31]
+		if len(updates) != 2 {
+			t.Fatalf("got %d accepted updates, want 2", len(updates))
+		}
+		for _, u := range updates {
+			var pr Progress
+			if err := json.Unmarshal(u.Progress, &pr); err != nil || pr.Step != "saving" {
+				t.Fatalf("stale refresh: %s, %v", u.Progress, err)
+			}
+		}
+	})
 }
 
 // A cancel asked for after the job's last report, which a failure beat to the

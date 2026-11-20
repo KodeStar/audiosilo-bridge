@@ -58,6 +58,25 @@ var requestBackoff = Backoff{Tries: 3, First: time.Second, Max: time.Minute, cla
 var promptBackoff = Backoff{Tries: 3, First: time.Second, Max: 10 * time.Second}
 
 type retryingKey struct{}
+type lastErrorKey struct{}
+
+// WithLastError keeps the last refusal's original message after retries.
+// Server-queued handlers use it to report their usual failure to the server.
+func WithLastError(ctx context.Context) context.Context {
+	return context.WithValue(ctx, lastErrorKey{}, true)
+}
+
+// SingleAttempt leaves retries to the caller. The job reporter uses it while
+// holding its send lock so a 429 wait cannot delay newer progress or a finish.
+func SingleAttempt(ctx context.Context) context.Context {
+	return context.WithValue(ctx, retryingKey{}, true)
+}
+
+// Retry applies the link's usual 429 budget to a call that must prepare each
+// attempt itself, such as a refresh that takes a fresh progress snapshot.
+func Retry(ctx context.Context, call func(context.Context) error) error {
+	return requestBackoff.Do(ctx, Wait, call)
+}
 
 // Do retries a rate-limited request within b. A job can own the wait (for
 // example, to slow subsequent enrichment PUTs). Its call must use the supplied
@@ -67,7 +86,7 @@ func (b Backoff) Do(ctx context.Context, wait func(context.Context, time.Duratio
 	if ctx.Value(retryingKey{}) != nil {
 		return call(ctx)
 	}
-	ctx = context.WithValue(ctx, retryingKey{}, true)
+	ctx = SingleAttempt(ctx)
 	for attempt := 1; ; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -82,6 +101,9 @@ func (b Backoff) Do(ctx context.Context, wait func(context.Context, time.Duratio
 		}
 		delay, retry := b.Wait(busy, attempt)
 		if !retry {
+			if ctx.Value(lastErrorKey{}) != nil {
+				return err
+			}
 			return fmt.Errorf("the server is still rate limiting the Bridge (attempt %d): %w", attempt, err)
 		}
 		if !busy.RetryAfterSet && delay > 0 {

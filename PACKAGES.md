@@ -2135,6 +2135,7 @@ internal/
             The limiter refuses the request before the route acts, including
             pairing, claiming a job and posting listening events. An exhausted
             limit wraps the last APIError, which RateLimited recognizes.
+            Server-queued handlers get the last error with its original wording.
             Episode rescans and Audible enrichment use Backoff.Do with their
             own budgets. Only the outer call waits or retries. A call a person
             waits for on the page (Pair, Client.Prompt: the Accounts tab's
@@ -2363,10 +2364,13 @@ internal/
             pair, an unpair, a refused token) drops the libraries, checks, hold
             and queued checks; a run of the old link still going records nothing
             more and holds nothing.
-  jobs/     the generic runner. A handler that returns a server 429 after the
-            request's retry budget reports needs_attention. The error explains
-            that the admin can cancel and queue the job again once the server
-            is ready. A claim's idle pacing counts time already spent waiting.
+  jobs/     the generic runner. After a required request exhausts its 429
+            retries, server-queued podcast, Audible and LibriVox jobs report
+            failed with the handler's usual error. This closes the job so the
+            server can schedule another. Admin-started jobs report
+            needs_attention and ask the admin to cancel and queue the job
+            again once the server is ready. A claim's idle pacing counts
+            time already spent waiting.
             Phase 4b: CancelContext(parent) is a context
             whose cancel reads as an admin's cancel (Resumes false), for handler
             tests; Lost(ctx) says a job ended because the server no longer holds
@@ -2461,8 +2465,12 @@ internal/
             server the next goes after ReportRetry (DefaultReportRetry 10 s) instead,
             until one gets through, then Keepalive again: at 30 s alone one report
             through and three failed would lapse the lease. Only an answerless
-            failure, a 5xx, 408 or 429 counts (unreachable); any other 4xx would be
-            refused again however soon, so it waits the Keepalive. The first failed
+            failure, a 5xx, 408 or 429 counts (unreachable). A progress report
+            under the send lock makes one HTTP attempt. After a 429 the next
+            idle report waits at least ReportRetry and honors a longer
+            Retry-After up to one minute. Fresh progress and a finish can go at once.
+            An explicit Refresh waits outside the lock and sends current
+            progress on each attempt. Any other 4xx waits the Keepalive. The first failed
             report warns, the rest log at debug, and the first one through after
             them logs one Info (bridge#31); a ConfirmLease or Refresh that gets
             through clears failing too (under the Reporter's lock: they run on
