@@ -835,12 +835,21 @@ const (
 var rescanLimit = link.Backoff{Tries: rescanTries, First: rescanBackoff, Max: rescanMaxWait}
 
 // askRescan uses the rescan's shorter budget so a saved episode can leave
-// its indexing to the next poll.
+// its indexing to the next poll. A stop while it waits out a 429 (the job's,
+// or an episode's ceiling) answers that 429, as running out of tries does:
+// the episode is saved either way.
 func (s *service) askRescan(ctx context.Context, srv Server, id int64, target string) error {
-	return rescanLimit.Do(ctx, s.o.Wait, func(ctx context.Context) error {
-		_, err := srv.RescanPodcast(ctx, id, target)
-		return err
+	var last error
+	err := rescanLimit.Do(ctx, s.o.Wait, func(ctx context.Context) error {
+		_, last = srv.RescanPodcast(ctx, id, target)
+		return last
 	})
+	if _, limited := link.RateLimited(last); limited && err != nil {
+		if _, ok := link.RateLimited(err); !ok {
+			return last
+		}
+	}
+	return err
 }
 
 // episodeRescan asks the server to index episode p. One whose show folder was

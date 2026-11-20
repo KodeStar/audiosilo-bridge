@@ -3041,7 +3041,8 @@ internal/
             its Retry-After, else jittered backoff starting at 1 to 2 s and doubling;
             3 asks, each wait at most 30 s,
             as audiblejob's enrichment). One an episode's rescan could not wait
-            out leaves the saved episode for the show's next poll's rescan
+            out (its tries spent, or a stop or the episode's ceiling while it
+            waited) leaves the saved episode for the show's next poll's rescan
             (isIndexed) and the fetch succeeds, never index_failed (a retain
             then leaves its other deletions' rescans to that poll too, rather
             than wait again for each). A poll can also leave its show rescan to

@@ -163,6 +163,24 @@ func TestEpisodeRescanWaitsOutTheServersLimit(t *testing.T) {
 		})
 	}
 }
+
+// A stop while an episode's rescan waits out a 429 (an episode's ceiling, which
+// is the fetch's ctx and not the job's) leaves the saved episode for the show's
+// next poll, as running out of tries does: never index_failed.
+func TestEpisodeRescanStoppedDuringLimitWait(t *testing.T) {
+	h, job := audioHarness(t)
+	s := h.handler.s
+	ctx, stop := context.WithCancel(context.Background())
+	s.o.Wait = func(context.Context, time.Duration) error { stop(); return context.Canceled }
+	second := time.Second
+	h.scan.limited.Store(100)
+	h.scan.limit = &second
+	s.setIndexed(3, "Fixture Show", true)
+	if err := s.episodeRescan(ctx, 3, *job.Path); err != nil || h.scan.calls.Load() != 1 || s.isIndexed(3, "Fixture Show") {
+		t.Fatal("a rescan stopped while it waited out a 429:", err, h.scan.calls.Load())
+	}
+}
+
 func TestFetchInterruptedStrongResumeAndFreshFallback(t *testing.T) {
 	requireProbe(t)
 	for _, scenario := range []string{"strong", "weak", "no-tag", "200", "bad206", "416", "encoded206"} {
