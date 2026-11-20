@@ -1545,10 +1545,11 @@ func (s *service) abandonLock(ctx context.Context, root *os.Root, at string) (re
 // every download record the claim's pairing kept of the episode (pairHash,
 // at the job's path and wherever one moved with its show) goes with its
 // partial and its sealed ETag, under the mount the record names
-// (checkpoint.Mount) rather than a mapping. The library's marker must still
-// be at that mount (a share unmounted since leaves its record), and the
-// episode's lock is waited on for abandonWait, as Abandon's own: a lock still
-// held is a download's, whose own end clears what it shares. A record from
+// (checkpoint.Mount) rather than a mapping. The record's library's marker
+// must still be at that mount (a share unmounted since, or the folder another
+// library's now, leaves its record), and the episode's lock is waited on for
+// abandonWait, as Abandon's own: a lock still held is a download's, whose own
+// end clears what it shares. A record from
 // before records named their mount goes with its ETag, its partial left for
 // a sweep. The pairing's records folder goes once nothing is left in it.
 func (s *service) abandonEnded(ctx context.Context, job jobs.Job, p fetchParams) {
@@ -1584,7 +1585,7 @@ func (s *service) releaseEnded(ctx context.Context, job jobs.Job, c checkpoint) 
 		return
 	}
 	defer func() { _ = root.Close() }()
-	if !markerThere(root) {
+	if !mapping.MarkerNames(root, c.LibraryID) {
 		return
 	}
 	release, ok := s.abandonLock(ctx, root, c.Path)

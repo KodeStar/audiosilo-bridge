@@ -266,9 +266,11 @@ func claimFetchUnder(t *testing.T, h *harness, job jobs.Job) jobs.Job {
 // the pairing ended (its token cannot be read: a live job's resumable
 // download is never released for a vault's fault), nor while its library's
 // marker is gone from the mount its record names (a share unmounted: the
-// path there is not the library).
+// path there is not the library), unreadable, or names another library (the
+// folder is another library's now). The marker naming the record's library
+// releases it (TestAbandonReleasesAFetchOfAnEndedPairing).
 func TestAbandonOfAnEndedPairingNeedsItToBeKnownAndItsLibraryThere(t *testing.T) {
-	for _, c := range []string{"token unreadable", "marker gone"} {
+	for _, c := range []string{"token unreadable", "marker gone", "marker unreadable", "marker of another library"} {
 		t.Run(c, func(t *testing.T) {
 			h, job := audioHarness(t)
 			end := pairings(t, h)
@@ -284,6 +286,26 @@ func TestAbandonOfAnEndedPairingNeedsItToBeKnownAndItsLibraryThere(t *testing.T)
 			switch c {
 			case "token unreadable":
 				s.o.Vault = lockedVault{s.o.Vault}
+			case "marker unreadable":
+				if err := root.WriteFile(mapping.MarkerPath, []byte("{"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			case "marker of another library":
+				var marker map[string]any
+				b, err := root.ReadFile(mapping.MarkerPath)
+				if err == nil {
+					err = json.Unmarshal(b, &marker)
+				}
+				if err != nil || marker["library_id"] != float64(*job.LibraryID) {
+					t.Fatal("the harness marker does not name the job's library", marker, err)
+				}
+				marker["library_id"] = *job.LibraryID + 1
+				if b, err = json.Marshal(marker); err == nil {
+					err = root.WriteFile(mapping.MarkerPath, b, 0o644)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
 			default:
 				if err := root.Remove(mapping.MarkerPath); err != nil {
 					t.Fatal(err)
