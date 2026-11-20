@@ -447,7 +447,7 @@ func New(serverURL, token, version string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Client{base: u, token: token, client: clientValue(version), httpc: &http.Client{}, timeout: requestTimeout, wait: waitContext, claimMinPriority: &negotiation{}}, nil
+	return &Client{base: u, token: token, client: clientValue(version), httpc: &http.Client{}, timeout: requestTimeout, wait: Wait, claimMinPriority: &negotiation{}}, nil
 }
 
 // clientValue is the ClientHeader value: "AudioSilo Bridge/<version> (<os>)",

@@ -41,7 +41,8 @@ func TestRateLimitedRescanReplaysPOST(t *testing.T) {
 			}))
 			defer srv.Close()
 			c, _ := New(srv.URL, "tok", "dev")
-			start := time.Now()
+			var waits []time.Duration
+			c.wait = func(_ context.Context, d time.Duration) error { waits = append(waits, d); return nil }
 			path, err := c.Rescan(t.Context(), 7, "A/B")
 			if status == http.StatusOK && (err != nil || path != "A/B") {
 				t.Fatalf("rescan = %q, %v", path, err)
@@ -50,8 +51,8 @@ func TestRateLimitedRescanReplaysPOST(t *testing.T) {
 			if status != http.StatusOK && (!errors.As(err, &ae) || ae.Status != status) {
 				t.Fatalf("rescan = %v, want %d", err, status)
 			}
-			if took := time.Since(start); took < time.Second || calls.Load() != 2 {
-				t.Fatalf("rescan took %v, calls %d", took, calls.Load())
+			if !slices.Equal(waits, []time.Duration{time.Second}) || calls.Load() != 2 {
+				t.Fatalf("rescan waited %v, calls %d", waits, calls.Load())
 			}
 		})
 	}
@@ -152,7 +153,7 @@ func TestRateLimitedHeartbeatCancelledDuringWait(t *testing.T) {
 	waiting := make(chan struct{})
 	c.wait = func(ctx context.Context, d time.Duration) error {
 		close(waiting)
-		return waitContext(ctx, d)
+		return Wait(ctx, d)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -194,5 +195,20 @@ func TestRateLimitedRequestStopsAtBound(t *testing.T) {
 	if !limited || !busy.RetryAfterSet || busy.RetryAfter != 0 ||
 		!strings.Contains(err.Error(), "attempt 3") || calls.Load() != 3 {
 		t.Fatalf("book = %v, calls %d", err, calls.Load())
+	}
+}
+
+// An ended ctx wins over any wait, even a zero one (Retry-After: 0), so a
+// cancelled job never sends another request; a zero wait on a live ctx is none.
+func TestWaitEndedContextWins(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := Wait(ctx, 0); err != nil {
+		t.Fatalf("zero wait on a live ctx = %v", err)
+	}
+	cancel()
+	for _, d := range []time.Duration{0, time.Hour} {
+		if err := Wait(ctx, d); err != context.Canceled {
+			t.Errorf("Wait(cancelled, %v) = %v, want context.Canceled", d, err)
+		}
 	}
 }

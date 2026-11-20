@@ -333,18 +333,3 @@ func TestPollPackOnVolumeNotEnriched(t *testing.T) {
 		t.Fatalf("enriched %v, want %v", fs.enrichedNow(), want)
 	}
 }
-
-// An ended ctx wins over any wait, even a zero one (Retry-After: 0), so a
-// cancelled job never sends another request; a zero wait on a live ctx is none.
-func TestSleepCtxEndedContextWins(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	if err := sleepCtx(ctx, 0); err != nil {
-		t.Fatalf("zero wait on a live ctx = %v", err)
-	}
-	cancel()
-	for _, d := range []time.Duration{0, time.Hour} {
-		if err := sleepCtx(ctx, d); err != context.Canceled {
-			t.Errorf("sleepCtx(cancelled, %v) = %v, want context.Canceled", d, err)
-		}
-	}
-}

@@ -87,16 +87,18 @@ func (b Backoff) Do(ctx context.Context, wait func(context.Context, time.Duratio
 	}
 }
 
-func waitContext(ctx context.Context, delay time.Duration) error {
-	if delay == 0 {
-		return ctx.Err()
+// Wait waits d, or until ctx ends. An ended ctx always wins, so a zero wait
+// (an explicit Retry-After: 0) never lets a cancelled job go on.
+func Wait(ctx context.Context, d time.Duration) error {
+	if err := ctx.Err(); err != nil || d <= 0 {
+		return err
 	}
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
+	t := time.NewTimer(d)
+	defer t.Stop()
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-timer.C:
+	case <-t.C:
 		return nil
 	}
 }

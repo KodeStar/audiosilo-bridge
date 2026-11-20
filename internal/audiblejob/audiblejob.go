@@ -100,7 +100,7 @@ func New(o Options) *Handler {
 	if o.ServerID == nil {
 		o.ServerID = func() string { return "" }
 	}
-	return &Handler{o: o, now: time.Now, sleep: sleepCtx}
+	return &Handler{o: o, now: time.Now, sleep: link.Wait}
 }
 
 // Kind is audible.poll.

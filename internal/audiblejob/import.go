@@ -272,7 +272,7 @@ func NewImport(o ImportOptions) *Importer {
 		o.Free = fsutil.FreeBytes
 	}
 	if o.Wait == nil {
-		o.Wait = sleepCtx
+		o.Wait = link.Wait
 	}
 	return &Importer{o: o, local: transfer.NewLocal(), gates: map[string]chan struct{}{}}
 }

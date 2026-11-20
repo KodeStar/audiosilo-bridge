@@ -100,19 +100,3 @@ var errEnrichBudget = errors.New("the poll has spent its time adding ASINs")
 // Retry-After, else enrichBackoff doubling; enrichMaxLimited 429s in a row,
 // or a wait over enrichMaxWait, leaves the PUT.
 var enrichLimit = link.Backoff{Tries: enrichMaxLimited, First: enrichBackoff, Max: enrichMaxWait}
-
-// sleepCtx waits d, or until ctx ends. An ended ctx always wins, so a zero
-// wait (an explicit Retry-After: 0) never lets a cancelled job go on.
-func sleepCtx(ctx context.Context, d time.Duration) error {
-	if err := ctx.Err(); err != nil || d <= 0 {
-		return err
-	}
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.C:
-		return nil
-	}
-}
