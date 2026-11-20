@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"path"
+	"path/filepath"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
@@ -34,6 +35,50 @@ func (h *Subscribe) FetchJob() *Fetch { return &Fetch{s: h.s} }
 func (h *Fetch) Kind() string         { return FetchKind }
 func (h *Fetch) Lane() string         { return jobs.LaneDownload }
 func (h *Fetch) Interactive() bool    { return true }
+
+// SealParams records, beside the server's params, the pairing hash the claim
+// is made under (podcast.ClaimHashParam): its download records are kept under it, and a
+// job whose pairing has ended since (an unpair, a pairing made again with the
+// same server or another) is released there (Abandon), where the pairing now
+// would name another folder. A claim whose link no longer reaches its
+// pairing records none (one in the params is never the server's to set), and
+// its job is dropped before it runs; so does one whose server token could not
+// be read (a vault's fault names no pairing: its run pins the one it starts
+// under). Params that are not an object go as they are: the run fails them as
+// an episode not found.
+func (h *Fetch) SealParams(job jobs.Job) (json.RawMessage, error) {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(job.Params, &fields) != nil || fields == nil {
+		return job.Params, nil
+	}
+	delete(fields, podcast.ClaimHashParam)
+	s := h.s.forJob(job)
+	if hash, known := s.livePair(); known && s.linked() { // the token read was the claim's pairing's
+		fields[podcast.ClaimHashParam], _ = json.Marshal(hash)
+	}
+	return json.Marshal(fields)
+}
+
+// NeedsClaimRow is false: a fetch's sealed params hold no secret (only its
+// claim's pairing), so a claim the store could not record runs as it did
+// before fetches sealed their params, rather than be abandoned and its
+// earlier attempt's resumable download cleared.
+func (h *Fetch) NeedsClaimRow(jobs.Job) bool { return false }
+
+// runView is job's view (forJob) for its run, its records' pairing pinned:
+// the claim's (SealParams), or the pairing's token the run starts under when
+// the claim recorded none (claimed before claims recorded their pairing, or
+// while the token could not be read) or when its link still reaches the
+// claim's pairing under a new token (a refused token's re-pair with the same
+// server keeps the pairing, and its jobs resume on the new link). The run's
+// release reads it even once that pairing has ended.
+func (s *service) runView(job jobs.Job) *service {
+	view := *s.forJob(job)
+	if live, known := view.livePair(); view.claimHash == "" || known && live != view.claimHash && view.linked() {
+		view.claimHash = live
+	}
+	return &view
+}
 
 type fetchParams struct {
 	ShowID    string `json:"show_id"`
@@ -134,9 +179,10 @@ func (b *budget) failure(ctx context.Context, err error) error {
 
 func (h *Fetch) Run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (any, error) {
 	kept := ""
-	result, err := (&Fetch{s: h.s.forJob(job)}).run(parent, &job, rep, &kept)
+	own := &Fetch{s: h.s.runView(job)}
+	result, err := own.run(parent, &job, rep, &kept)
 	if err != nil && (parent.Err() == nil || !jobs.Resumes(parent)) {
-		h.abandon(parent, job, kept)
+		own.abandon(parent, job, kept)
 	}
 	return outcome(result, err)
 }
@@ -185,7 +231,7 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	}
 	if _, _, err = s.readEpisode(root, *job.Path, params); err != nil {
 		var p string
-		if p, err = s.episodeAt(waitCtx, root, lib, mount, *job.Path, params, job.ID); err != nil {
+		if p, err = s.episodeAt(waitCtx, root, lib, mount, *job.Path, params, job); err != nil {
 			return nil, err
 		}
 		if p != *job.Path {
@@ -214,7 +260,7 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 		// removed, rather than left in the folder.
 		if !settled && !lock.held() && parent.Err() == nil {
 			sctx, stop := context.WithTimeout(parent, ceiling)
-			if p, err := s.episodeAt(sctx, root, lib, mount, *job.Path, params, job.ID); err == nil {
+			if p, err := s.episodeAt(sctx, root, lib, mount, *job.Path, params, job); err == nil {
 				lock.follow(p)
 			}
 			stop()
@@ -224,7 +270,6 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	// Found elsewhere: its record, under the episode's lock now, is taken
 	// along even when another open row names it (adoptOwn).
 	s.adoptOwn(job, root, claimedAt, params, "")
-	pairing := s.pairHash()
 	f, e, err := s.fetchSnapshot(parent, rep, root, lib, mount, *job.Path, params)
 	if err != nil {
 		return nil, err
@@ -272,7 +317,7 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	// lock file, not the one held: the lock there is taken anew (followLock).
 	// No lock file there (a folder being deleted) is left so, never made again.
 	follow := func(ctx context.Context) error {
-		p, err := s.episodeAt(ctx, root, lib, mount, e.Path, params, job.ID)
+		p, err := s.episodeAt(ctx, root, lib, mount, e.Path, params, job)
 		if err != nil {
 			return err
 		}
@@ -323,7 +368,20 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	// partial it loaded.
 	unresolved := false
 	defer func() {
-		if s.writable(lib, mount) != nil || pairing != s.pairHash() {
+		live, known := s.livePair()
+		if known && live != s.pairHash() {
+			// Dropped mid-run (unpaired, or paired again): no attempt resumes
+			// under that pairing, and no mapping of its library is the
+			// Bridge's to check any more. Its own partial and record go now,
+			// under the episode's lock it holds, in the library it wrote
+			// them in while its marker is still there (a share unmounted
+			// since leaves them for Abandon, which reads the record's mount).
+			if !committed && markerThere(root) {
+				s.clearCheckpoint(job, root, &c)
+			}
+			return
+		}
+		if s.writable(lib, mount) != nil || live != s.pairHash() {
 			return
 		}
 		keep := false
@@ -530,7 +588,7 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 			}
 			return false, leaseFailure(ctx, err, "The episode job no longer owns its claim.")
 		}
-		if pairing != s.pairHash() {
+		if s.pairingEnded() {
 			return false, fail("identity_changed", "The Bridge pairing changed.")
 		}
 		// The lease's round trip since the lock's own look (lockForWrite).
@@ -606,7 +664,7 @@ func leaseFailure(ctx context.Context, err error, lost string) error {
 // own locks; during one (settle) and after it, under them (the
 // episode's lock before the show's, as the publication takes them), the
 // episode's lock then following to the new path (followLock).
-func (s *service) episodeAt(ctx context.Context, root *os.Root, lib link.Library, mount, p string, params fetchParams, self int64) (string, error) {
+func (s *service) episodeAt(ctx context.Context, root *os.Root, lib link.Library, mount, p string, params fetchParams, self jobs.Job) (string, error) {
 	from := path.Dir(p)
 	// Only under its spelling on disk: on a case-insensitive filesystem the
 	// old spelling of a folder renamed by hand only in case still reads its
@@ -1132,7 +1190,7 @@ func (s *service) consume(ctx context.Context, b *budget, job *jobs.Job, root *o
 		if err := s.writable(lib, root.Name()); err != nil && !errors.Is(err, errMappingUnknown) {
 			return err
 		}
-		if c.ServerHash != s.pairHash() {
+		if c.ServerHash != s.pairHash() || s.pairingEnded() {
 			return fail("identity_changed", "The Bridge pairing changed.")
 		}
 		if err := home(received); err != nil {
@@ -1419,6 +1477,10 @@ func (h *Fetch) abandon(ctx context.Context, job jobs.Job, kept string) {
 		return
 	}
 	s := h.s.forJob(job)
+	if s.claimHash != "" && s.pairingEndedForSure() {
+		s.abandonEnded(ctx, job, p)
+		return
+	}
 	lib, ok := s.o.Libraries.Library(*job.LibraryID)
 	if !ok {
 		return
@@ -1439,27 +1501,16 @@ func (h *Fetch) abandon(ctx context.Context, job jobs.Job, kept string) {
 		if err != nil {
 			return // not known: nothing is cleared (the day-old cleanup's then)
 		}
-		running = s.runningRecords(rows, lib.ID, job.ID)
+		running = s.runningRecords(rows, lib.ID, job)
 	}
 	for _, at := range s.recordsOf(job, p) {
 		job.Path = &at
 		if running(checkpoint{ShowID: p.ShowID, EpisodeID: p.EpisodeID, Path: at}) {
 			continue
 		}
-		wait, stop := context.WithTimeout(ctx, abandonWait)
-		release, err := s.fileLock(wait, root, at)
-		stop()
-		if err != nil {
-			// Its folder is gone (renamed by hand while this job's row ran, so
-			// the take-in left its record here): no download works at this
-			// path, so the record goes rather than stay for good. Its partial,
-			// moved with the folder, is unrecorded then, and sweepPartials takes
-			// it once old. A lock still held after the wait is a download's,
-			// and so is the record.
-			if folderThere(root, path.Dir(at)) {
-				continue
-			}
-			release = func() {}
+		release, ok := s.abandonLock(ctx, root, at)
+		if !ok {
+			continue
 		}
 		if c, _, err := s.loadCheckpoint(job, root, p.ShowID, p.EpisodeID); err == nil && (kept == "" || c.Temp != kept) {
 			s.clearCheckpoint(job, root, &c)
@@ -1468,4 +1519,85 @@ func (h *Fetch) abandon(ctx context.Context, job jobs.Job, kept string) {
 	}
 }
 
-var _ jobs.Abandoner = (*Fetch)(nil)
+// abandonLock takes episode at's lock for a release, waiting abandonWait at
+// most. Its folder gone (renamed by hand while the job's row ran, so the
+// take-in left its record here), no download works at the path: the release
+// goes ahead unlocked, so the record goes rather than stay for good (its
+// partial, moved with the folder, is unrecorded then, and sweepPartials takes
+// it once old). ok is false while the lock is still held after the wait: a
+// download's, and so is the record.
+func (s *service) abandonLock(ctx context.Context, root *os.Root, at string) (release func(), ok bool) {
+	wait, stop := context.WithTimeout(ctx, abandonWait)
+	defer stop()
+	release, err := s.fileLock(wait, root, at)
+	if err != nil {
+		if folderThere(root, path.Dir(at)) {
+			return nil, false
+		}
+		return func() {}, true
+	}
+	return release, true
+}
+
+// abandonEnded is Abandon for a job whose pairing has ended (unpaired, or
+// paired again with the same server or another): its server's libraries are
+// no longer the Bridge's to read, and no job resumes under that pairing, so
+// every download record the claim's pairing kept of the episode (pairHash,
+// at the job's path and wherever one moved with its show) goes with its
+// partial and its sealed ETag, under the mount the record names
+// (checkpoint.Mount) rather than a mapping. The record's library's marker
+// must still be at that mount (a share unmounted since, or the folder another
+// library's now, leaves its record), and the episode's lock is waited on for
+// abandonWait, as Abandon's own: a lock still held is a download's, whose own
+// end clears what it shares. A record from
+// before records named their mount goes with its ETag, its partial left for
+// a sweep. The pairing's records folder goes once nothing is left in it.
+func (s *service) abandonEnded(ctx context.Context, job jobs.Job, p fetchParams) {
+	dir, err := s.checkpointRoot()
+	if err != nil {
+		return
+	}
+	defer func() {
+		_ = dir.Close()
+		_ = os.Remove(dir.Name()) // only once empty
+	}()
+	records, err := s.records(dir, *job.LibraryID)
+	if err != nil {
+		return
+	}
+	for _, c := range records {
+		if !p.recordOf(c, *job.Path) {
+			continue
+		}
+		if !filepath.IsAbs(c.Mount) {
+			s.forgetRecord(dir, records, c)
+			continue
+		}
+		s.releaseEnded(ctx, job, c)
+	}
+}
+
+// releaseEnded clears record c of an ended pairing's job, its partial and its
+// ETag, at the mount it names (abandonEnded).
+func (s *service) releaseEnded(ctx context.Context, job jobs.Job, c checkpoint) {
+	root, err := os.OpenRoot(c.Mount)
+	if err != nil {
+		return
+	}
+	defer func() { _ = root.Close() }()
+	if !mapping.MarkerNames(root, c.LibraryID) {
+		return
+	}
+	release, ok := s.abandonLock(ctx, root, c.Path)
+	if !ok {
+		return
+	}
+	defer release()
+	job.Path = &c.Path
+	s.clearCheckpoint(job, root, &c)
+}
+
+var (
+	_ jobs.Abandoner      = (*Fetch)(nil)
+	_ jobs.ClaimRowNeeder = (*Fetch)(nil)
+)

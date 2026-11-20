@@ -2590,12 +2590,14 @@ internal/
             never resumed or reported: the claim loop looks (sweepPairings) at its
             start, before recover, and whenever the pairing changes, again every 5
             s until the store reads; a running row no run holds (holdsLocked: a
-            run, a claim start is recording, a stranded or unpaired job) is
-            Abandoned and recorded lost (dropLost, dropCause: errOtherServer for
-            another server's, else errPairingEnded), a finished one's end marked
-            reported, never sent; each row is read again first, so one a new
-            pairing's claim took under the listed id (and ended) since the list
-            was read is left to that claim. A run whose pairing the app forgot reports
+            run, a claim start is recording, a stranded or unpaired job, one
+            being released) is Abandoned and recorded lost (releaseDropped,
+            dropCause: errOtherServer for another server's, else
+            errPairingEnded), a finished one's end marked
+            reported, never sent; each row is read again first, and again as its
+            release's turn comes (dropStands), so one a new pairing's claim took
+            under the listed id (and ended) since the list was read is left to
+            that claim. A run whose pairing the app forgot reports
             nothing more and is dropped however it ends (pairingGone in
             Reporter.link and settle), and a claim answered on its link is stale.
             So a restart after an unpair, a pairing with the same server
@@ -2608,16 +2610,61 @@ internal/
             once): every run is cancelled
             (errPairingEnded: Resumes false, Lost false) and recorded lost
             however it ends (run.ended; one the Bridge's stop interrupted
-            too, its kept work Abandoned), Reporter.link answers nil so nothing
+            is left running for the next start's look, which drops it),
+            Reporter.link answers nil so nothing
             more goes to that server (no report, no end; its leases lapse the
             jobs), stranded jobs are dropped by the claim loop (dropUnpaired),
             the rows still running that no run holds are the claim loop's look
-            (sweepPairings: each Abandon bounded by abandonTimeout, 2 min, a slow
-            one logged), and nothing is launched on the ended link again; a new
-            pairing, with that server or another, resumes and reports none of
-            them.
+            (sweepPairings), and nothing is launched on the ended link again; a
+            new pairing, with that server or another, resumes and reports none
+            of them. RELEASING DROPPED JOBS (BR-LINK-RULE-2): every drop of a job
+            no run holds (the look, recover, resumeStranded, dropUnpaired) goes
+            to releaseDropped, which Abandons them off the caller's goroutine,
+            4 at a time (dropConcurrency), in rounds of ONE deadline each
+            (abandonTimeout, 2 min; releaseRound), then records each lost; so N
+            slow releases hold up neither a start's resumes nor the claiming,
+            nor take N x 2 min. A job is recorded lost ONLY once its release
+            returned inside its round's deadline: one the deadline cut short
+            (logged) or that the round never reached stays running and held,
+            and goes to the next round, the unreached first (a release that
+            keeps giving up never starves the rest), never told under a
+            context that had ended already. generate's Abandon reads the job's
+            engine book first: recorded lost with that release cut or never
+            run, the book would run on beside a job that waited for the row's
+            end (awaitOpenJobEnd). A kind that holds no work (not an Abandoner)
+            is recorded at its turn. Each job's row
+            is read again as its turn comes (dropStands): one that is no longer
+            the running claim it was dropped for (a new pairing's claim of its
+            kind took its id while it waited, or it ended) is neither released
+            nor recorded; one another server's or pairing's claim of another
+            kind took is still released (that claim's handler keeps none of its
+            state; generate guards its mapping by the claim, store.StopGuard)
+            and its row left to that claim. The jobs are held (Runner.dropping, holdsLocked) until
+            recorded, so recover and a later look skip them (one the look
+            recorded lost after recover listed it running is found ended at
+            its turn). A run's own drop whose handler still holds work (it
+            stopped to resume, or was dropped before it ran)
+            goes there too (settle, releaseRun), held (dropping) before the run
+            lets go, so the run frees its lane slot, or its place first in line
+            for one, as it returns: a release that blocks, tried again round
+            after round, never keeps a new pairing's claims out of the lane.
+            So does a run a cancel or a lost claim ends before its handler ran
+            (settle's owed): its release goes there too, its row running and held
+            until it returns, then the end recorded (lost, as a drop's, or for a
+            cancel cancelled and reported, drop.end).
+            Never past a stop. Everything runs under the runner's context:
+            a stop cuts a round short (or finds it unstarted) and the rows it
+            left running are the next start's look (a job the stop interrupted
+            as the pairing was ended included, before settle looked or after:
+            left running, in no list of the runner's, never released on the
+            run's goroutine past the stop, where it could hold the stop up to
+            2 min).
             retryReports sends only the current server's and pairing's
-            ends. HANDLERS key a job's durable state and filings by its own server,
+            ends. ONE CLAIM is a job's server, id, attempt and pairing
+            (Job.ServerID, Job.Pairing): a handler that asks whether the row
+            under its job's id is its own asks Job.OwnRow, never the id alone
+            (podcastjob's runningRecords, librivox's state.claimedBy keeps the
+            same four). HANDLERS key a job's durable state and filings by its own server,
             never the pairing's now (Job.ServerID, Job.KeyServer: correct's result
             and filing keys, podcastjob's show rows, artwork, locks and records
             through service.forJob, librivox's state, audible's account checks),
@@ -2630,7 +2677,7 @@ internal/
             job), which the runner calls when it ends a job WITHOUT running the
             handler (a resumed job's first report answered with a cancel or a lost
             claim, another server's job dropped, one an unpair stopped), so that work is released as the
-            handler's own end would; dropLost records the job lost only once
+            handler's own end would; releaseDropped records the job lost only once
             Abandon returned, so Abandon releases before it returns (generate does
             even with no engine yet, bridge#65). Resumes(ctx) tells a handler whether its ended
             context will run again under the claim (the Bridge stopping, a refused
@@ -2842,7 +2889,12 @@ internal/
             is swept once old). It never clears the record of a download still
             running (a duplicate claim's, which shares it): one another running
             row names stays (runningRecords, as a take-in and the day-old
-            cleanup leave it), and the episode's lock is waited on for
+            cleanup leave it; only the row of the calling job's OWN claim is
+            set aside, jobs.Job.OwnRow: the row under its id may be a later
+            claim of the job by then, handed out again at a later attempt
+            while this one's release was on its way, and that download is a
+            running one like any other; cleanOwned and busy read "other than
+            self" the same way), and the episode's lock is waited on for
             abandonWait (10 s) at most, a record whose lock is still held
             staying too. A job still working under the old name never
             saves over, clears or abandons another show's record at its path
@@ -3011,7 +3063,26 @@ internal/
             and the records are read show by show, only for a show holding such a name, and
             nothing goes while the pairing's token can't be read. A job claimed
             before its library's mapping check (a start or re-pair) waits for it
-            (CheckPoll). A subscribe's 3-minute ceiling starts once it holds the
+            (CheckPoll). A fetch's download records are kept under the pairing
+            its claim was made under (BR-LINK-RULE-2): SealParams records that
+            pairing's hash in the claim's params (bridge_server_hash, never on
+            the page: podcast.RedactParams; no secret, so NeedsClaimRow is false
+            and a claim the store could not record still runs), forJob keys the
+            job's records by it
+            (claimHash; a claim from before it, or made while the token
+            could not be read, or resumed on its own pairing under a new
+            token (a refused token's re-pair), pins the hash its run starts
+            under: runView), and each record names the mount it was written under
+            (checkpoint.Mount). A fetch whose pairing ended (unpaired, or paired
+            again with its server or another) saves no record after it
+            (identity_changed); its run's exit clears its own partial and record
+            under the lock it holds, and its Abandon (abandonEnded, only when the
+            server token could be read to tell) clears the claim's records of
+            the episode, their partials and ETags at the records' mounts while
+            the library's marker is there, never through a mapping no longer
+            the Bridge's, then the ended pairing's records folder once empty;
+            the pairing now's records of the episode are another folder's and
+            stay. A subscribe's 3-minute ceiling starts once it holds the
             library lock, a poll's once it holds the show lock (the mapping wait and
             the lock wait get one more); artwork gets at most a minute and half the time left; a
             follow that fails before feed.json takes back the folder it made. A
@@ -3784,9 +3855,14 @@ internal/
             (adopt), never fetched again. A stop or a lost claim keeps staging
             and state; a cancel, a
             failure or Abandon (not on a lost claim; only a state proven the
-            abandoned job's own: its server's id and job id recorded, in its own
+            abandoned CLAIM's own: its server's id, job id, attempt and pairing
+            recorded (state.claimedBy; a run takes a state up for its claim,
+            state.claim), in its own
             library, and the pairing's server the job's, so the libraries listed
-            are its server's, while unpaired too; a state of another job, of none
+            are its server's, while unpaired too; a state of another job, of a
+            later claim of the same job (handed out again at a later attempt,
+            under a pairing made since too, while this claim's release was on
+            its way), of none
             recorded, or a job of another server is left to the sweep) removes
             the staging folder, the author folder it made when empty, and the
             state (removeStaging reports whether the folder went: one that
@@ -4014,12 +4090,24 @@ internal/
             store.ErrSettled; a cancel that fails is tried stopTries (3) times, a
             poll apart, then the book is kept local, no_share_job, so a book that
             runs on alone never files),
-            and retention 0 purges its transcripts now; a later attempt of the same
-            job running here (Attempt higher) is left alone: the cancel and the end
-            are guarded writes (store.StopGuard: SetBookStatusUnlessFollowed through
-            the engine's CancelUnlessFollowed or scheduler.CancelStoredUnlessFollowed,
-            EndGenerateBook taking the attempt), so a claim landing between the check
-            and the write is never stopped nor its mapping ended. Abandon (jobs.Abandoner)
+            and retention 0 purges its transcripts now; another claim of the job's
+            id holding its row (claimMoved: a later attempt running here, or,
+            BR-LINK-RULE-2, another server's or pairing's claim of the same id and
+            attempt, of a kind that follows an engine book: a podcast.fetch under
+            the id follows none, so the book is still this claim's to stop; only
+            a live one, still running here, or a later attempt of the claim's own
+            server and pairing: a finished row of another server, left under the
+            id when this claim's RecordClaim failed, never keeps it from stopping
+            its own book) is
+            left alone: the cancel and the end are
+            guarded writes (store.StopGuard, the claim's id, attempt, server and
+            pairing: SetBookStatusUnlessFollowed through the engine's
+            CancelUnlessFollowed or scheduler.CancelStoredUnlessFollowed,
+            EndGenerateBook taking the guard), so a claim landing between the check
+            and the write is never stopped nor its mapping ended. Abandon reads the
+            mapping only while the row is its claim's (ownMapping: the mapping is
+            keyed by the job's id alone, and a new pairing's claim may have mapped
+            its own book there). Abandon (jobs.Abandoner)
             does the same for a job the runner ended without running it, before it
             returns even when the engine hasn't started (stopBook then cancels the book
             in the store alone, scheduler.CancelStoredUnlessFollowed: nothing runs it yet; and once
@@ -4027,8 +4115,9 @@ internal/
             book before that write, or a status such a stage wrote over it, through
             the engine's guarded cancel, and only then purges a retention 0 book's
             transcripts (no engine, no hold on the book), unless
-            another open job follows the book or a later claim of the same job does:
-            an Attempt higher, or the job's mapping reopened by its attach (checked
+            another open job follows the book or another claim of the job's id does:
+            an Attempt higher, another server's or pairing's claim, or the job's
+            mapping reopened by its attach (checked
             in the cancel's own write, StopGuard.Ended), as in release, bridge#65; that wait runs through Options.Background, the app's
             Bridge.bg tasks, so it ends with the Bridge), and waitEngine for a
             run cancelled (or taken back) while it waits for the engine, which never
@@ -4062,9 +4151,9 @@ internal/
             Under the hold the book is looked at again (purgeHeld): one no longer
             finished, or that an open job follows again (a later claim of its job
             re-opened and re-admitted it while the purge waited), keeps its
-            transcripts and stays unswept; a job end's purge also leaves a book to a
-            later claim of the job recorded before its attach reopened the mapping
-            (store.LaterClaim).
+            transcripts and stays unswept; a job end's purge also leaves a book to
+            another claim of the job's id recorded before its attach reopened the
+            mapping (store.OtherClaim).
             Phase 1c, DESCRIPTIONS (describejob.go): Options.Describer is the
             engine's description step (pipeline.Executor.Describe). A generate job's
             write() saves the characters and recaps first, then runs it
@@ -5033,8 +5122,16 @@ internal/
             pairing's re-pair that read the id it keeps. An
             unpair on the page forgets the token and the id, then stops the
             pairing's jobs (Conn.onUnpair -> jobs.Runner.Unpaired, which doesn't
-            wait: the claim loop releases their work), a failed forget
-            included. Refusal, unpairing and
+            wait: the runner releases their work, releaseDropped), a failed forget
+            included. A forget that failed (the token's or the id's: the data
+            couldn't be written just then) is tried again at every heartbeat's
+            time and as the Bridge stops (Conn.unforgotten, finishUnpair; never
+            once a pairing was made since, whose token and id are the stored
+            ones): left in the stores, the next start would read the pairing
+            back under the same id, and a job of it a stop left running (its
+            release cut short, jobs' rule) would be resumed and reported to a
+            server the page showed as unpaired. With the id gone such a row is
+            another pairing's at any start, paired or not, and dropped. Refusal, unpairing and
             replacing a pairing withdraw claim_min_priority from the old link;
             each new link negotiates on its own heartbeat. A 401 does NOT drop the token:
             Conn.Refuse keeps it and the heartbeat retries it every RefusedRetry (5

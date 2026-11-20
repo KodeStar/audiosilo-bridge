@@ -61,7 +61,7 @@ func TestSupervisorApplyOnlyFollowedBooks(t *testing.T) {
 	if err := sched.Cancel(ctx, book.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.EndGenerateBook(ctx, 7, 1, time.Now()); err != nil {
+	if err := db.EndGenerateBook(ctx, store.StopGuard{JobID: 7, Attempt: 1}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	for _, a := range []supervisor.Action{supervisor.ActionParkEscalate, supervisor.ActionRetry, supervisor.ActionReadmit} {
@@ -215,7 +215,7 @@ func TestTranscriptSweepStartsWithTheEngine(t *testing.T) {
 		if err := b.db.PutGenerateBook(ctx, store.GenerateBook{ServerJobID: job, BookID: &bk.ID, LibraryID: 1, RelPath: slug}); err != nil {
 			t.Fatal(err)
 		}
-		if err := b.db.EndGenerateBook(ctx, job, 1, ended); err != nil {
+		if err := b.db.EndGenerateBook(ctx, store.StopGuard{JobID: job, Attempt: 1}, ended); err != nil {
 			t.Fatal(err)
 		}
 		return bk, raw

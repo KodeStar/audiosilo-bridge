@@ -390,6 +390,79 @@ func TestRestartDropsAnEarlierPairingsJob(t *testing.T) {
 	}
 }
 
+// stuckVault is a vault whose deletes fail while stuck is set (the Bridge's
+// data can't be written just then).
+type stuckVault struct {
+	secrets.Store
+	stuck atomic.Bool
+}
+
+func (v *stuckVault) Delete(name string) error {
+	if v.stuck.Load() {
+		return errors.New("the vault can't be written")
+	}
+	return v.Store.Delete(name)
+}
+
+// An unpair that could forget neither the token nor the pairing's identity
+// (the Bridge's data couldn't be written just then) shows the Bridge unpaired
+// while its stores still hold the pairing. The forget is tried again, at the
+// latest as the Bridge stops: the next start comes back unpaired, and a job
+// of that pairing a stop left running (its work not released yet) is dropped
+// there, lost and never reported (denied: the pairing read back under the
+// same identity, and the job resumed and reported to a server the page showed
+// as unpaired).
+func TestRestartAfterAnUnpairThatCouldNotForget(t *testing.T) {
+	fs := &jobServer{root: bookRoot(t), hold: -1}
+	srv := httptest.NewServer(fs)
+	defer srv.Close()
+	data := t.TempDir()
+	seedPairing(t, data, fs, srv.URL, "p1")
+	bg := context.Background()
+	b, _, err := New(bg, Options{DataDir: data, Version: "0.1.0", Listen: "127.0.0.1:0", Logger: quiet()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	vault := &stuckVault{Store: b.conn.vault}
+	b.conn.vault = vault
+	ctx, cancel := context.WithCancel(bg)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- b.Run(ctx) }()
+	waitFor(t, "a heartbeat", func() bool { return fs.beatCount() > 0 })
+	vault.stuck.Store(true)
+	if err := b.Unpair(bg); err == nil {
+		t.Fatal("an unpair that couldn't forget the token said nothing")
+	}
+	if b.conn.Client() != nil {
+		t.Fatal("the unpair left the link in place")
+	}
+	// The identity's forget failed with the token's: it is still stored.
+	if err := b.db.SetSetting(bg, keyPairingID, "p1"); err != nil {
+		t.Fatal(err)
+	}
+	vault.stuck.Store(false) // the data can be written again
+	cancel()
+	<-done
+	// The job a stop left running, its work not released yet (jobs.Runner
+	// leaves it to the next start's look).
+	seedPairing(t, data, fs, "", "", verifyRow("s", "p1"))
+	next := start(t, data)
+	waitFor(t, "the job dropped", func() bool {
+		sj, err := next.db.GetServerJob(bg, 9)
+		return err == nil && sj.State == store.JobLost && sj.Error == "the Bridge was unpaired on its page"
+	})
+	if next.conn.Client() != nil || next.conn.jobsPairing().ID != "" {
+		t.Fatal("the restart read the unpaired pairing back")
+	}
+	fs.mu.Lock()
+	n := len(fs.updates)
+	fs.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("the unpaired pairing's job was reported %d times", n)
+	}
+}
+
 // An upgrade from a Bridge that didn't keep a job's pairing gives the jobs
 // recorded then to the pairing in place: the job running at the upgrade
 // resumes and reports (allowed), and the pairing now has an identity, its row

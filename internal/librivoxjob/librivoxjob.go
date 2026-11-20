@@ -226,11 +226,15 @@ const mappingPoll = time.Second
 // running it (cancelled before it resumed, or dropped: its pairing ended). A
 // lost claim keeps it: the server hands the job out again and the next claim
 // resumes it. A placed book stays. It removes only what the state proves is
-// this job's: recorded by the job itself (its server's id and its job id),
-// in its server's library as the Bridge lists it (the pairing's server is the
+// this claim's: recorded by the job itself (its server's id, its job id, its
+// attempt and its pairing: state.claimedBy), in its server's library as the
+// Bridge lists it (the pairing's server is the
 // job's, while unpaired too: the libraries listed are still that server's).
 // So a fetch of the same project into another library, another job's fetch
-// of it (a new claim since), a state from before the job was recorded, and
+// of it, a later claim of the same job that took the state up since (the job
+// handed out again at a later attempt, under a new pairing too, while this
+// claim's release was on its way), a state from before the claim was
+// recorded, and
 // another server's state (followed into no same-numbered library of the
 // server the Bridge pairs with now) are never touched; the sweep, reading for
 // the pairing, removes what is abandoned of them. A fetch of the same project
@@ -259,7 +263,7 @@ func (h *Handler) Abandon(ctx context.Context, job jobs.Job) {
 		return
 	}
 	st := h.loadState(p.LibraryID, p.LibrivoxID, serverID)
-	if st == nil || st.Placed || st.ServerID != serverID || st.JobID != job.ID {
+	if st == nil || st.Placed || !st.claimedBy(job, serverID) {
 		return
 	}
 	// The state goes with the folder it names: while the folder can't be
@@ -359,10 +363,10 @@ type fetch struct {
 	st    *state
 	rep   *jobs.Reporter
 	// serverID is the job's server (jobs.Job.KeyServer): its state is
-	// recorded under it, never under the pairing's now. jobID is the job's id,
-	// recorded with it too (state.JobID).
+	// recorded under it, never under the pairing's now. job is the claim,
+	// recorded with it too (state.claim).
 	serverID string
-	jobID    int64
+	job      jobs.Job
 	// renamed: this run renamed the staging folder into place (the result's
 	// adopted is false only then).
 	renamed bool
@@ -393,14 +397,16 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, p Params, rep *jobs.Rep
 		return nil, err
 	}
 	serverID := job.KeyServer(h.o.ServerID())
-	f := &fetch{p: p, lib: lib, mount: mount, rep: rep, serverID: serverID, jobID: job.ID, st: h.loadState(lib.ID, p.LibrivoxID, serverID)}
+	f := &fetch{p: p, lib: lib, mount: mount, rep: rep, serverID: serverID, job: job, st: h.loadState(lib.ID, p.LibrivoxID, serverID)}
 	if f.st != nil {
-		if !f.st.Unmapped.IsZero() || f.st.JobID != job.ID || f.st.ServerID != serverID {
+		if !f.st.Unmapped.IsZero() || !f.st.claimedBy(job, serverID) {
 			// Mapped again: forgotten now, not at a next save a run may never
 			// make, so a later unmapping counts from its own start (endUnmapped).
-			// A state an earlier job of the fetch left is this job's from now
-			// (Abandon removes only its own job's staging).
-			f.st.Unmapped, f.st.JobID, f.st.ServerID = time.Time{}, job.ID, serverID
+			// A state an earlier job of the fetch left, or an earlier claim of
+			// this job, is this claim's from now (Abandon removes only its
+			// own claim's staging).
+			f.st.Unmapped = time.Time{}
+			f.st.claim(job, serverID)
 			if err := h.saveState(p.LibrivoxID, f.st); err != nil {
 				h.o.Log.Warn("librivox: recording a fetch's state failed", "library", lib.ID, "librivox_id", p.LibrivoxID, "err", err)
 			}
@@ -603,7 +609,8 @@ func (h *Handler) plan(ctx context.Context, f *fetch, srv Server, book metaops.L
 			return err
 		}
 	}
-	st := &state{LibraryID: f.lib.ID, ServerID: f.serverID, JobID: f.jobID, Parent: parent}
+	st := &state{LibraryID: f.lib.ID, Parent: parent}
+	st.claim(f.job, f.serverID)
 	dest = path.Join(parent, path.Base(dest)) // under the author folder as spelled on disk
 	fallback := fallbackName(dest, f.p.LibrivoxID)
 	for _, at := range []string{dest, fallback} {

@@ -400,6 +400,14 @@ type unproven struct{ error }
 
 func (e unproven) Unwrap() error { return e.error }
 
+// MarkerNames reports whether root holds a valid library marker naming
+// libraryID: a missing, unreadable or invalid marker, or one of another
+// library, does not. The read is untimed.
+func MarkerNames(root *os.Root, libraryID int64) bool {
+	m, err := readMarker(root, nil)
+	return err == nil && m.LibraryID == libraryID
+}
+
 // readMarker reads the folder's marker, each of its steps timed by pace (nil:
 // untimed).
 func readMarker(root *os.Root, pace *lookPace) (libraryMarker, error) {

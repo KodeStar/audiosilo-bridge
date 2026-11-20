@@ -52,8 +52,8 @@ type Engine interface {
 	// when its status or error changed since (a Cancel landing between).
 	RetryAsRead(ctx context.Context, b store.Book) error
 	// CancelUnlessFollowed stops book id while g holds (store.StopGuard, checked
-	// in the store's cancel write): store.ErrFollowed, and nothing stopped, when a
-	// later claim of g's job or another open job follows the book; store.ErrSettled
+	// in the store's cancel write): store.ErrFollowed, and nothing stopped, when
+	// another claim of g's job's id or another open job follows the book; store.ErrSettled
 	// when the book finished or failed since the cancel read it.
 	CancelUnlessFollowed(ctx context.Context, id int64, g store.StopGuard) error
 	Delete(ctx context.Context, id int64) error
@@ -731,15 +731,25 @@ func (h *Handler) cantContribute(ctx context.Context, r *run) error {
 // ends here anyway (the reads kept failing, or it was cancelled meanwhile)
 // releases that book as Abandon does (when Abandon's own read of the mapping
 // works by then), unless it resumes later; a book nothing can stop is kept
-// local by its contributing stage all the same (ShareOff: no_share_job).
+// local by its contributing stage all the same (ShareOff: no_share_job). A
+// mapped book in another library is that earlier job's, whose own end leaves
+// it to this claim (store.StopGuard: the row is this claim's now), so it is
+// stopped here, as runEngineBook stops one in this library that isn't the
+// job's book: this job's own book replaces it in the mapping, and it would run
+// on with nothing to follow or stop it.
 func (h *Handler) resumeMapping(ctx context.Context, job jobs.Job) (store.GenerateBook, bool, error) {
 	for i := 1; ; i++ {
 		mapped, err := h.mappingOf(ctx, job.ID)
 		switch {
 		case errors.Is(err, store.ErrNotFound):
 			return store.GenerateBook{}, false, nil
+		case err == nil && mapped.BookID != nil && mapped.LibraryID != *job.LibraryID:
+			h.o.Log.Warn("generate: the job's id maps to another library's run; this job starts its own",
+				"job", job.ID, "mapped_library", mapped.LibraryID, "library", *job.LibraryID)
+			h.stopBook(context.WithoutCancel(ctx), stopGuard(job, false), *mapped.BookID, false)
+			return mapped, false, nil
 		case err == nil:
-			return mapped, mapped.BookID != nil && mapped.LibraryID == *job.LibraryID, nil
+			return mapped, mapped.BookID != nil, nil
 		}
 		if i < stopTries {
 			h.o.Log.Warn("generate: reading the job's earlier run failed; trying again", "job", job.ID, "err", err)
@@ -876,7 +886,7 @@ func (h *Handler) end(ctx context.Context, r *run, res any, err error) (any, err
 // job created is released as end() would, or it would go on with nothing to
 // follow it.
 func (h *Handler) Abandon(ctx context.Context, job jobs.Job) {
-	m, err := h.mappingOf(ctx, job.ID)
+	m, err := h.ownMapping(ctx, job)
 	if err != nil || m.BookID == nil || m.EndedAt != "" {
 		return
 	}
@@ -904,23 +914,21 @@ func (h *Handler) Abandon(ctx context.Context, job jobs.Job) {
 // cancelled books included): the engine's guarded cancel, which also keeps a dispatch
 // pass that read the book before the store's cancel from starting a stage on it
 // afterwards. The transcripts of a book whose retention is 0 days go only now
-// (purgeAtEnd): with no engine nothing held the book against such a stage. A
-// later claim of the same job that follows the book now (one already running
-// here, which release left the book to, or one handed out since, whose attach
-// reopened the job's mapping) keeps it, as in release: the checks below skip the
-// common case, and the cancel is written only while the job's mapping is still
-// ended and no later attempt is recorded, in the one statement (store.StopGuard),
-// so a claim landing between the checks and the cancel is never stopped.
+// (purgeAtEnd): with no engine nothing held the book against such a stage. Another
+// claim of the job's id that follows the book now (a later attempt already running
+// here, which release left the book to, one handed out since, whose attach
+// reopened the job's mapping, or another server's claim of the same id) keeps it,
+// as in release: the checks below (ownMapping) skip the common case, and the
+// cancel is written only while the job's mapping is still ended and no other claim
+// is recorded, in the one statement (store.StopGuard), so a claim landing between
+// the checks and the cancel is never stopped.
 func (h *Handler) stopStartedStage(ctx context.Context, job jobs.Job, bookID int64) {
 	for h.o.Engine() == nil {
 		if agent.SleepCtx(ctx, h.o.Poll) != nil {
 			return
 		}
 	}
-	if sj, err := h.o.DB.GetServerJob(ctx, job.ID); err == nil && sj.Attempt > job.Attempt {
-		return
-	}
-	if m, err := h.o.DB.GetGenerateBook(ctx, job.ID); err != nil || m.EndedAt == "" {
+	if m, err := h.ownMapping(ctx, job); err != nil || m.EndedAt == "" {
 		return
 	}
 	if h.stopBook(ctx, stopGuard(job, true), bookID, true) {
@@ -937,15 +945,16 @@ func (h *Handler) stopStartedStage(ctx context.Context, job jobs.Job, bookID int
 // comes first so a job waiting for this one's end (awaitOpenJobEnd) starts only
 // once the engine's cancel has returned. A stop left to another open job is
 // tried again once this end is recorded: two jobs on the book ending at once
-// would each leave it to the other, and the later end then stops it. A later
-// claim of the same job may run here already (the server re-queued it after a
-// lease ran out and handed it out again before this attempt heard it was lost):
-// that attempt follows the book now, so it is left alone, and ended is false. The
-// stop and the end are written only while no later attempt is recorded, each in
-// its one statement (store.StopGuard): a claim landing after the check is never
-// stopped, nor its mapping ended.
+// would each leave it to the other, and the later end then stops it. Another
+// claim of the job's id may run here already (the server re-queued it after a
+// lease ran out and handed it out again before this attempt heard it was lost,
+// or, the Bridge paired since, another server handed out its own job of the
+// same id): that claim follows the book now, so it is left alone, and ended is
+// false. The stop and the end are written only while no other claim is
+// recorded, each in its one statement (store.StopGuard): a claim landing after
+// the check is never stopped, nor its mapping ended.
 func (h *Handler) release(ctx context.Context, job jobs.Job, bookID int64, stop bool) (ended bool) {
-	if sj, err := h.o.DB.GetServerJob(ctx, job.ID); err == nil && sj.Attempt > job.Attempt {
+	if h.claimMoved(ctx, job) {
 		return false
 	}
 	g := stopGuard(job, false)
@@ -953,7 +962,7 @@ func (h *Handler) release(ctx context.Context, job jobs.Job, bookID int64, stop 
 	if h.beforeEnd != nil {
 		h.beforeEnd(job.ID)
 	}
-	switch err := h.o.DB.EndGenerateBook(ctx, job.ID, job.Attempt, h.now()); {
+	switch err := h.o.DB.EndGenerateBook(ctx, g, h.now()); {
 	case errors.Is(err, store.ErrFollowed):
 		return false
 	case err != nil:
@@ -987,13 +996,13 @@ func (h *Handler) purgeAtEnd(ctx context.Context, job jobs.Job, bookID int64) {
 // (scheduler.CancelStoredUnlessFollowed): nothing runs the book to interrupt.
 // recancel stops a book already cancelled too (stopStartedStage: a stage the
 // engine began before the cancel landed). The cancel is written only while g
-// holds (store.StopGuard: no later attempt of the job, no other open job on the
-// book, the job's mapping still ended when g.Ended), in the store's one
+// holds (store.StopGuard: no other claim of the job's id, no other open job on
+// the book, the job's mapping still ended when g.Ended), in the store's one
 // statement. A cancel that fails is tried again (stopTries, a poll apart); one
 // that still fails turns the book local (store.DB.KeepBookLocal, why
 // ShareSkippedNoShareJob), so a book that runs on with nothing following it
-// never files. It reports whether it left the book to another open job or a
-// later claim.
+// never files. It reports whether it left the book to another open job or
+// another claim.
 func (h *Handler) stopBook(ctx context.Context, g store.StopGuard, bookID int64, recancel bool) (followed bool) {
 	b, err := h.o.DB.GetBook(ctx, bookID)
 	if err != nil || (finished(b.State, b.Status) && (!recancel || !scheduler.IsCancelled(b))) {
@@ -1040,10 +1049,36 @@ func (h *Handler) mappingOf(ctx context.Context, id int64) (store.GenerateBook, 
 	return h.o.DB.GetGenerateBook(ctx, id)
 }
 
-// stopGuard is the StopGuard of job's end: its id and attempt, and whether the
-// end read the job's mapping ended already.
+// ownMapping is the mapping of job's claim (mappingOf): store.ErrNotFound while
+// another claim holds the row under its id (claimMoved). The mapping is keyed by
+// the job's id alone, and job ids are each server's own, so by the time a
+// dropped job's work is released (its pairing ended) a claim of the new
+// pairing may have mapped its own book under the id: that book is never the
+// dropped job's to stop. The guarded writes (store.StopGuard) cover a claim
+// landing after this read.
+func (h *Handler) ownMapping(ctx context.Context, job jobs.Job) (store.GenerateBook, error) {
+	if h.claimMoved(ctx, job) {
+		return store.GenerateBook{}, store.ErrNotFound
+	}
+	return h.mappingOf(ctx, job.ID)
+}
+
+// claimMoved reports whether the row under job's id is another claim's now
+// (store.OtherClaim, the guarded writes' own rule): that claim follows the
+// job's engine book and mapping. An earlier attempt's row (this claim's own
+// write failed) is still the job's, as is another server's claim of a kind
+// that follows no engine book (its podcast.fetch under the same id: the book
+// would run on with nothing to stop it), and a row that is gone, or that
+// can't be read, is left to the guarded writes.
+func (h *Handler) claimMoved(ctx context.Context, job jobs.Job) bool {
+	other, err := h.o.DB.OtherClaim(ctx, stopGuard(job, false))
+	return err == nil && other
+}
+
+// stopGuard is the StopGuard of job's end: its claim (id, attempt, server and
+// pairing), and whether the end read the job's mapping ended already.
 func stopGuard(job jobs.Job, ended bool) store.StopGuard {
-	return store.StopGuard{JobID: job.ID, Attempt: job.Attempt, Ended: ended}
+	return store.StopGuard{JobID: job.ID, Attempt: job.Attempt, Ended: ended, ServerID: job.ServerID(), Pairing: job.Pairing()}
 }
 
 // hold takes the engine's hold on an engine book for work outside its stages (the

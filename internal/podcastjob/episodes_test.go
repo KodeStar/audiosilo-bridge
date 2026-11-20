@@ -873,12 +873,16 @@ func truncatePartials(t *testing.T, show string) {
 // finds it so and waits, with no GET from zero, and the job fails
 // write_failed with the partial and its record kept, Abandon included. The
 // next attempt, the share back, resumes it with a ranged GET. A share that
-// comes back within the job's attempts resumes it there.
+// comes back within the job's attempts resumes it there. A job a runner
+// claimed keeps it the same through its own server's view (forJob).
 func TestFetchKeepsAPartialItCannotReadToResume(t *testing.T) {
 	requireProbe(t)
-	for _, scenario := range []string{"next attempt", "same job"} {
+	for _, scenario := range []string{"next attempt", "same job", "claimed next attempt"} {
 		t.Run(scenario, func(t *testing.T) {
 			h, job := audioHarness(t)
+			if scenario == "claimed next attempt" {
+				job = jobs.ClaimedFrom(job, "server-1") // the harness's pairing's server
+			}
 			s := h.handler.s
 			audio, calls, ranged := cutThenWhole(t, h, false, func() {})
 			show := filepath.Join(h.mount, filepath.Dir(*job.Path))
@@ -1569,113 +1573,125 @@ func TestCheckpointResumes(t *testing.T) {
 // query alone changed (a signed or tracked enclosure) still resumes while the
 // feed gives the same known length, unless its path names no audio file
 // (podcast.EnclosureBase), where the query tells episodes apart. A record from before the source was kept
-// resumes on its ETag alone, as it did.
+// resumes on its ETag alone, as it did. A job a runner claimed keeps the same
+// rules through its own server's view of the service (forJob).
 func TestAKeptPartialIsDownloadedAgainWhenItsEnclosureChanged(t *testing.T) {
 	requireProbe(t)
 	for _, scenario := range []string{"same", "path", "query with no length", "length", "query", "query and length", "query on no file", "no base", "legacy", "stuck"} {
-		t.Run(scenario, func(t *testing.T) {
-			if scenario == "stuck" {
-				requireNonRoot(t)
-			}
-			h, job := audioHarness(t)
-			s := h.handler.s
-			root, err := os.OpenRoot(h.mount)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer root.Close()
-			audio := data(t, "chap-v24-reverse.mp3")
-			f := h.read("Fixture Show")
-			enc := f.Episodes[0].Enclosure
-			enc.Length = int64(len(audio))
-			if scenario != "query on no file" {
-				enc.URL = h.http.URL + "/audio.mp3" // a path naming an audio file: its query may change
-			}
-			if scenario == "query with no length" {
-				enc.Length = 0 // no length to tell a query change by
-			}
-			c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: fixtureShowID, EpisodeID: f.Episodes[0].ID, Path: *job.Path, Temp: ".audiosilo-tmp-kept", Offset: 1000, Total: int64(len(audio))}
-			c.setSource(enc)
-			if scenario == "legacy" {
-				c.Source, c.SourceLength, c.SourceBase = "", 0, ""
-			}
-			if scenario == "no base" {
-				c.SourceBase = ""
-			}
-			partial := "Fixture Show/" + c.Temp
-			if err := root.WriteFile(partial, audio[:1000], 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if err := s.saveCheckpoint(job, root, &c, `"one"`); err != nil {
-				t.Fatal(err)
-			}
-			f.Episodes[0].Enclosure = enc
-			switch scenario {
-			case "path":
-				f.Episodes[0].Enclosure.URL = h.http.URL + "/audio" // another file at the same host, the same length
-			case "query with no length", "query", "query on no file", "no base", "legacy":
-				f.Episodes[0].Enclosure.URL += "?sig=2"
-			case "length", "stuck":
-				f.Episodes[0].Enclosure.Length = int64(len(audio)) + 1
-			case "query and length":
-				f.Episodes[0].Enclosure.URL += "?sig=2"
-				f.Episodes[0].Enclosure.Length = int64(len(audio)) + 1
-			}
-			if _, err := podcast.Write(root, "Fixture Show", f, s.o.Now()); err != nil {
-				t.Fatal(err)
-			}
-			resumes := scenario == "same" || scenario == "query" || scenario == "legacy"
-			var calls atomic.Int32
-			setAudio(h, func(w http.ResponseWriter, r *http.Request) {
-				calls.Add(1)
-				w.Header().Set("ETag", `"one"`)
-				if ranged := r.Header.Get("Range") != ""; ranged != resumes {
-					t.Errorf("ranged %v, want %v: %v", ranged, resumes, r.Header)
-				}
-				if r.Header.Get("Range") == "" {
-					w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
-					w.WriteHeader(200)
-					w.Write(audio)
-					return
-				}
-				if r.Header.Get("Range") != "bytes=1000-" || r.Header.Get("If-Range") != `"one"` {
-					t.Error("unproven range", r.Header)
-				}
-				w.Header().Set("Content-Range", fmt.Sprintf("bytes 1000-%d/%d", len(audio)-1, len(audio)))
-				w.Header().Set("Content-Length", strconv.Itoa(len(audio)-1000))
-				w.WriteHeader(206)
-				w.Write(audio[1000:])
-			})
-			if scenario == "stuck" {
-				show := barShowAtLoad(t, h)
-				_, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
-				if code(t, err) != "write_failed" || !strings.Contains(err.Error(), "could not be removed") || calls.Load() != 0 {
-					t.Fatal(err, calls.Load())
-				}
-				if saved, ok := s.readCheckpoint(job, fixtureShowID); !ok || saved.Temp != c.Temp {
-					t.Fatalf("the record of the partial still on disk was dropped: %+v", saved)
-				}
-				if left := partials(show); len(left) != 1 {
-					t.Fatal("a download was started beside the partial:", left)
-				}
-				return
-			}
-			res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
-			if _, isResult := res.(fetchResult); err != nil || !isResult {
-				t.Fatal(res, err)
-			}
-			if calls.Load() != 1 {
-				t.Fatalf("%d requests, want 1", calls.Load())
-			}
-			if b, err := os.ReadFile(filepath.Join(h.mount, *job.Path)); err != nil || !bytes.Equal(b, audio) {
-				t.Fatal("the published episode is not the host's audio", err)
-			}
-			if left := partials(filepath.Join(h.mount, "Fixture Show")); len(left) != 0 {
-				t.Fatal("a partial was left behind", left)
-			}
-			noRecords(t, s)
-		})
+		t.Run(scenario, func(t *testing.T) { keptPartialScenario(t, scenario, false) })
 	}
+	for _, scenario := range []string{"same", "path", "stuck"} {
+		t.Run("claimed "+scenario, func(t *testing.T) { keptPartialScenario(t, scenario, true) })
+	}
+}
+
+// keptPartialScenario is one scenario of
+// TestAKeptPartialIsDownloadedAgainWhenItsEnclosureChanged, for a job a runner
+// claimed when claimed.
+func keptPartialScenario(t *testing.T, scenario string, claimed bool) {
+	if scenario == "stuck" {
+		requireNonRoot(t)
+	}
+	h, job := audioHarness(t)
+	if claimed {
+		job = jobs.ClaimedFrom(job, "server-1") // the harness's pairing's server
+	}
+	s := h.handler.s
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	audio := data(t, "chap-v24-reverse.mp3")
+	f := h.read("Fixture Show")
+	enc := f.Episodes[0].Enclosure
+	enc.Length = int64(len(audio))
+	if scenario != "query on no file" {
+		enc.URL = h.http.URL + "/audio.mp3" // a path naming an audio file: its query may change
+	}
+	if scenario == "query with no length" {
+		enc.Length = 0 // no length to tell a query change by
+	}
+	c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: fixtureShowID, EpisodeID: f.Episodes[0].ID, Path: *job.Path, Temp: ".audiosilo-tmp-kept", Offset: 1000, Total: int64(len(audio))}
+	c.setSource(enc)
+	if scenario == "legacy" {
+		c.Source, c.SourceLength, c.SourceBase = "", 0, ""
+	}
+	if scenario == "no base" {
+		c.SourceBase = ""
+	}
+	partial := "Fixture Show/" + c.Temp
+	if err := root.WriteFile(partial, audio[:1000], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.saveCheckpoint(job, root, &c, `"one"`); err != nil {
+		t.Fatal(err)
+	}
+	f.Episodes[0].Enclosure = enc
+	switch scenario {
+	case "path":
+		f.Episodes[0].Enclosure.URL = h.http.URL + "/audio" // another file at the same host, the same length
+	case "query with no length", "query", "query on no file", "no base", "legacy":
+		f.Episodes[0].Enclosure.URL += "?sig=2"
+	case "length", "stuck":
+		f.Episodes[0].Enclosure.Length = int64(len(audio)) + 1
+	case "query and length":
+		f.Episodes[0].Enclosure.URL += "?sig=2"
+		f.Episodes[0].Enclosure.Length = int64(len(audio)) + 1
+	}
+	if _, err := podcast.Write(root, "Fixture Show", f, s.o.Now()); err != nil {
+		t.Fatal(err)
+	}
+	resumes := scenario == "same" || scenario == "query" || scenario == "legacy"
+	var calls atomic.Int32
+	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("ETag", `"one"`)
+		if ranged := r.Header.Get("Range") != ""; ranged != resumes {
+			t.Errorf("ranged %v, want %v: %v", ranged, resumes, r.Header)
+		}
+		if r.Header.Get("Range") == "" {
+			w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
+			w.WriteHeader(200)
+			w.Write(audio)
+			return
+		}
+		if r.Header.Get("Range") != "bytes=1000-" || r.Header.Get("If-Range") != `"one"` {
+			t.Error("unproven range", r.Header)
+		}
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes 1000-%d/%d", len(audio)-1, len(audio)))
+		w.Header().Set("Content-Length", strconv.Itoa(len(audio)-1000))
+		w.WriteHeader(206)
+		w.Write(audio[1000:])
+	})
+	if scenario == "stuck" {
+		show := barShowAtLoad(t, h)
+		_, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+		if code(t, err) != "write_failed" || !strings.Contains(err.Error(), "could not be removed") || calls.Load() != 0 {
+			t.Fatal(err, calls.Load())
+		}
+		if saved, ok := s.readCheckpoint(job, fixtureShowID); !ok || saved.Temp != c.Temp {
+			t.Fatalf("the record of the partial still on disk was dropped: %+v", saved)
+		}
+		if left := partials(show); len(left) != 1 {
+			t.Fatal("a download was started beside the partial:", left)
+		}
+		return
+	}
+	res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+	if _, isResult := res.(fetchResult); err != nil || !isResult {
+		t.Fatal(res, err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("%d requests, want 1", calls.Load())
+	}
+	if b, err := os.ReadFile(filepath.Join(h.mount, *job.Path)); err != nil || !bytes.Equal(b, audio) {
+		t.Fatal("the published episode is not the host's audio", err)
+	}
+	if left := partials(filepath.Join(h.mount, "Fixture Show")); len(left) != 0 {
+		t.Fatal("a partial was left behind", left)
+	}
+	noRecords(t, s)
 }
 
 // A partial proven changed on disk while it downloaded (a copy made over the

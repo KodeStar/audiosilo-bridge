@@ -45,7 +45,7 @@ func TestGenerateBooksMapAJobToItsBook(t *testing.T) {
 
 	// Ended jobs are the retention sweep's work list, from the moment they ended.
 	end := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
-	if err := db.EndGenerateBook(ctx, 12, 1, end); err != nil {
+	if err := db.EndGenerateBook(ctx, StopGuard{JobID: 12, Attempt: 1}, end); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := db.UnsweptGenerateBooks(ctx, end.Add(-time.Second)); len(got) != 0 {
@@ -75,7 +75,7 @@ func TestGenerateBooksMapAJobToItsBook(t *testing.T) {
 		t.Fatalf("a reopened job is still listed as ended: %+v", got)
 	}
 	// Once it ends again it is swept again (the mapping cleared swept_at).
-	if err := db.EndGenerateBook(ctx, 12, 1, end); err != nil {
+	if err := db.EndGenerateBook(ctx, StopGuard{JobID: 12, Attempt: 1}, end); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := db.UnsweptGenerateBooks(ctx, end.Add(time.Hour)); len(got) != 1 {
@@ -331,7 +331,7 @@ func TestResumeShare(t *testing.T) {
 			}
 		}, 2, false},
 		{"mapping ended", func(t *testing.T, db *DB, _ int64) {
-			if err := db.EndGenerateBook(ctx, 1, 2, time.Now()); err != nil {
+			if err := db.EndGenerateBook(ctx, StopGuard{JobID: 1, Attempt: 2}, time.Now()); err != nil {
 				t.Fatal(err)
 			}
 		}, 2, false},
@@ -562,7 +562,7 @@ func TestSetBookStatusUnlessFollowed(t *testing.T) {
 	}
 	claim(1, 1)
 	stopped("the job's own attempt", stop(StopGuard{JobID: 1, Attempt: 1}), true)
-	if err := db.EndGenerateBook(ctx, 1, 1, time.Now()); err != nil {
+	if err := db.EndGenerateBook(ctx, StopGuard{JobID: 1, Attempt: 1}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	stopped("its mapping still ended", stop(StopGuard{JobID: 1, Attempt: 1, Ended: true}), true)
@@ -650,7 +650,7 @@ func TestEndGenerateBookLeavesALaterClaimOpen(t *testing.T) {
 	db := open(t)
 	ctx := context.Background()
 	b, _ := db.CreateBook(ctx, NewBook{SourcePath: "/s", WorkDir: "/w", Title: "S"})
-	if err := db.EndGenerateBook(ctx, 1, 1, time.Now()); err != nil {
+	if err := db.EndGenerateBook(ctx, StopGuard{JobID: 1, Attempt: 1}, time.Now()); err != nil {
 		t.Fatalf("no mapping = %v, want nil", err)
 	}
 	if err := db.PutGenerateBook(ctx, GenerateBook{ServerJobID: 1, BookID: &b.ID, LibraryID: 1, RelPath: "S"}); err != nil {
@@ -659,16 +659,181 @@ func TestEndGenerateBookLeavesALaterClaimOpen(t *testing.T) {
 	if err := db.RecordClaim(ctx, ServerJob{ID: 1, Kind: "sidecars.generate", Attempt: 2}); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.EndGenerateBook(ctx, 1, 1, time.Now()); !errors.Is(err, ErrFollowed) {
+	if err := db.EndGenerateBook(ctx, StopGuard{JobID: 1, Attempt: 1}, time.Now()); !errors.Is(err, ErrFollowed) {
 		t.Fatalf("attempt 1's end with attempt 2 recorded = %v, want ErrFollowed", err)
 	}
 	if g, _ := db.GetGenerateBook(ctx, 1); g.EndedAt != "" {
 		t.Fatalf("attempt 1 ended the mapping attempt 2 follows: %q", g.EndedAt)
 	}
-	if err := db.EndGenerateBook(ctx, 1, 2, time.Now()); err != nil {
+	if err := db.EndGenerateBook(ctx, StopGuard{JobID: 1, Attempt: 2}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if g, _ := db.GetGenerateBook(ctx, 1); g.EndedAt == "" {
 		t.Fatal("attempt 2's own end wasn't recorded")
+	}
+}
+
+// Job ids are each server's own, so another server's claim (the Bridge paired
+// since) may hold a job's row under the same id and attempt: a guard of the
+// earlier claim refuses then (denied: its book stopped, its mapping ended, by
+// an end that is no longer that claim's), as it does for another pairing's
+// claim of the same server; the claim holding the row passes (allowed), and a
+// guard with no server (a claim no runner made) still reads the attempt only.
+func TestStopGuardTellsClaimsOfTheSameIDApart(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	b, _ := db.CreateBook(ctx, NewBook{SourcePath: "/s", WorkDir: "/w", Title: "S"})
+	if err := db.PutGenerateBook(ctx, GenerateBook{ServerJobID: 1, BookID: &b.ID, LibraryID: 1, RelPath: "S"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecordClaim(ctx, ServerJob{ID: 1, Kind: "sidecars.generate", Attempt: 1, ServerID: "b", Pairing: "p2"}); err != nil {
+		t.Fatal(err)
+	}
+	cancel := func(g StopGuard) error {
+		_ = db.SetBookStatus(ctx, b.ID, "", "", "")
+		return db.SetBookStatusUnlessFollowed(ctx, b.ID, "", "", "failed", "cancelled by user", g)
+	}
+	for name, g := range map[string]StopGuard{
+		"another server's claim": {JobID: 1, Attempt: 1, ServerID: "a", Pairing: "p1"},
+		"another pairing's":      {JobID: 1, Attempt: 1, ServerID: "b", Pairing: "p1"},
+	} {
+		if other, err := db.OtherClaim(ctx, g); err != nil || !other {
+			t.Fatalf("%s: OtherClaim = %v %v, want true", name, other, err)
+		}
+		if err := cancel(g); !errors.Is(err, ErrFollowed) {
+			t.Fatalf("%s: cancel = %v, want ErrFollowed", name, err)
+		}
+		if got, _ := db.GetBook(ctx, b.ID); got.Status != "" {
+			t.Fatalf("%s: the book was stopped: status %q", name, got.Status)
+		}
+		if err := db.EndGenerateBook(ctx, g, time.Now()); !errors.Is(err, ErrFollowed) {
+			t.Fatalf("%s: end = %v, want ErrFollowed", name, err)
+		}
+		if m, _ := db.GetGenerateBook(ctx, 1); m.EndedAt != "" {
+			t.Fatalf("%s: the claim's mapping was ended: %q", name, m.EndedAt)
+		}
+	}
+	for name, g := range map[string]StopGuard{
+		"the claim's own": {JobID: 1, Attempt: 1, ServerID: "b", Pairing: "p2"},
+		"no runner's":     {JobID: 1, Attempt: 1},
+	} {
+		if other, err := db.OtherClaim(ctx, g); err != nil || other {
+			t.Fatalf("%s: OtherClaim = %v %v, want false", name, other, err)
+		}
+		if err := cancel(g); err != nil {
+			t.Fatalf("%s: cancel = %v", name, err)
+		}
+	}
+	if err := db.EndGenerateBook(ctx, StopGuard{JobID: 1, Attempt: 1, ServerID: "b", Pairing: "p2"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := db.GetGenerateBook(ctx, 1); m.EndedAt == "" {
+		t.Fatal("the claim's own end wasn't recorded")
+	}
+}
+
+// Another server's claim of the same id and attempt of a kind that follows no
+// engine book (its podcast.fetch) never takes the mapping's book over: the
+// earlier claim's guarded cancel and end still pass (allowed), where refused
+// the book would run on with its mapping open and nothing left to stop it; a
+// claim of an engine kind still refuses them (denied).
+func TestStopGuardIgnoresAClaimThatFollowsNoEngineBook(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	b, _ := db.CreateBook(ctx, NewBook{SourcePath: "/s", WorkDir: "/w", Title: "S"})
+	if err := db.PutGenerateBook(ctx, GenerateBook{ServerJobID: 1, BookID: &b.ID, LibraryID: 1, RelPath: "S"}); err != nil {
+		t.Fatal(err)
+	}
+	dropped := StopGuard{JobID: 1, Attempt: 1, ServerID: "a", Pairing: "p1"}
+	record := func(kind string) {
+		t.Helper()
+		if err := db.RecordClaim(ctx, ServerJob{ID: 1, Kind: kind, Attempt: 1, ServerID: "b", Pairing: "p2"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, kind := range []string{"sidecars.generate", "chapters.detect", "readalong.align"} {
+		record(kind)
+		if other, err := db.OtherClaim(ctx, dropped); err != nil || !other {
+			t.Fatalf("%s: OtherClaim = %v %v, want true", kind, other, err)
+		}
+	}
+	record("podcast.fetch")
+	if other, err := db.OtherClaim(ctx, dropped); err != nil || other {
+		t.Fatalf("OtherClaim = %v %v, want false", other, err)
+	}
+	if err := db.SetBookStatusUnlessFollowed(ctx, b.ID, "", "", "failed", "cancelled by user", dropped); err != nil {
+		t.Fatalf("cancel = %v", err)
+	}
+	if err := db.EndGenerateBook(ctx, dropped, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := db.GetGenerateBook(ctx, 1); m.EndedAt == "" {
+		t.Fatal("the earlier claim's end wasn't recorded")
+	}
+}
+
+// Only a live claim of another server or pairing follows the book: a finished
+// row of one, left under the job's id when the guard's own claim could not be
+// recorded (RecordClaim failed), never keeps that claim from stopping and
+// ending its own book (allowed: a guard of a server's claim, and one no runner
+// made, whatever the old row's attempt). The same row still running refuses
+// them (denied), and a later attempt of the guard's own server and pairing
+// counts finished or not (denied).
+func TestStopGuardIgnoresAFinishedClaimOfAnotherServer(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	b, _ := db.CreateBook(ctx, NewBook{SourcePath: "/s", WorkDir: "/w", Title: "S"})
+	if err := db.PutGenerateBook(ctx, GenerateBook{ServerJobID: 1, BookID: &b.ID, LibraryID: 1, RelPath: "S"}); err != nil {
+		t.Fatal(err)
+	}
+	row := func(j ServerJob, finished bool) {
+		t.Helper()
+		j.ID, j.Kind = 1, "sidecars.generate"
+		if err := db.RecordClaim(ctx, j); err != nil {
+			t.Fatal(err)
+		}
+		if finished {
+			if err := db.FinishServerJob(ctx, 1, j.Attempt, JobDone, nil, ""); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	guards := map[string]StopGuard{
+		"a server's claim": {JobID: 1, Attempt: 1, ServerID: "a", Pairing: "p1"},
+		"no runner's":      {JobID: 1, Attempt: 1},
+	}
+	other := func(g StopGuard) bool {
+		t.Helper()
+		got, err := db.OtherClaim(ctx, g)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	for _, attempt := range []int{1, 3} {
+		row(ServerJob{Attempt: attempt, ServerID: "b", Pairing: "p2"}, true)
+		for name, g := range guards {
+			if other(g) {
+				t.Fatalf("%s: another server's finished row (attempt %d) is taken for a claim that follows the book", name, attempt)
+			}
+		}
+	}
+	g := guards["a server's claim"]
+	_ = db.SetBookStatus(ctx, b.ID, "", "", "")
+	if err := db.SetBookStatusUnlessFollowed(ctx, b.ID, "", "", "failed", "cancelled by user", g); err != nil {
+		t.Fatalf("the claim's own cancel = %v", err)
+	}
+	if err := db.EndGenerateBook(ctx, g, time.Now()); err != nil {
+		t.Fatalf("the claim's own end = %v", err)
+	}
+	row(ServerJob{Attempt: 3, ServerID: "b", Pairing: "p2"}, false)
+	for name, g := range guards {
+		if !other(g) {
+			t.Fatalf("%s: another server's running claim is not taken for one that follows the book", name)
+		}
+	}
+	row(ServerJob{Attempt: 2, ServerID: "a", Pairing: "p1"}, true)
+	if !other(g) {
+		t.Fatal("a later attempt of the claim's own server and pairing, finished, is not taken for another claim")
 	}
 }

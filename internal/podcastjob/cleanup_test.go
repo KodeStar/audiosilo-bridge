@@ -71,7 +71,7 @@ func TestOwnedCleanupHonorsAgeLiveJobAndForeignFiles(t *testing.T) {
 			if err := h.db.RecordClaim(context.Background(), store.ServerJob{ID: 82, Kind: RetainKind, LibraryID: job.LibraryID, Path: &show, Attempt: 1, ServerID: "server-1"}); err != nil {
 				t.Fatal(err)
 			}
-			s.cleanOwned(context.Background(), root, link.Library{ID: 3, Kind: "podcasts", Root: h.mount}, h.mount, show, 82)
+			s.cleanOwned(context.Background(), root, link.Library{ID: 3, Kind: "podcasts", Root: h.mount}, h.mount, show, jobs.Job{ID: 82})
 			_, err := root.Lstat("Fixture Show/" + c.Temp)
 			if scenario == "old" {
 				if !errors.Is(err, os.ErrNotExist) {
@@ -211,7 +211,7 @@ func TestOldCommittedTrashCleanupPreservesTombstone(t *testing.T) {
 	if err := h.db.RecordClaim(context.Background(), store.ServerJob{ID: 82, Kind: RetainKind, LibraryID: &lib, Path: &show, Attempt: 1, ServerID: "server-1"}); err != nil {
 		t.Fatal(err)
 	}
-	s.cleanOwned(context.Background(), root, link.Library{ID: 3, Kind: "podcasts", Root: h.mount}, h.mount, show, 82)
+	s.cleanOwned(context.Background(), root, link.Library{ID: 3, Kind: "podcasts", Root: h.mount}, h.mount, show, jobs.Job{ID: 82})
 	if _, err := root.Lstat("Fixture Show/" + j.TrashDir); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("committed trash retained", err)
 	}
@@ -726,7 +726,7 @@ func TestOwnedCleanupDropsADayOldRecordWhosePartialItCannotRemove(t *testing.T) 
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.Chmod(show, 0o755) })
-	s.cleanOwned(context.Background(), root, link.Library{ID: 3, Kind: "podcasts", Root: h.mount}, h.mount, "Fixture Show", 82)
+	s.cleanOwned(context.Background(), root, link.Library{ID: 3, Kind: "podcasts", Root: h.mount}, h.mount, "Fixture Show", jobs.Job{ID: 82})
 	if _, ok := s.readCheckpoint(job, fixtureShowID); ok {
 		t.Fatal("the day-old record of a partial that cannot be removed was kept")
 	}

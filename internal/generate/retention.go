@@ -37,9 +37,10 @@ func (h *Handler) purge(ctx context.Context, b store.SweepBook) (swept bool, err
 // again under the hold: one a job follows again since it was found finished (a
 // later claim of its job re-opening and re-admitting it while the purge waited
 // for the hold) runs on its transcripts, so it is left alone, and swept reports
-// false. ending, when set, is the job whose end purges: a later claim of it
-// recorded since (store.LaterClaim) follows the book before its attach reopens
-// the mapping, so it keeps the transcripts too.
+// false. ending, when set, is the job whose end purges: another claim of its id
+// recorded since (store.OtherClaim: a later attempt, or another server's claim)
+// follows the book before its attach reopens the mapping, so it keeps the
+// transcripts too.
 func (h *Handler) purgeHeld(ctx context.Context, bookID int64, ending *jobs.Job) (swept bool, err error) {
 	b, err := h.o.DB.GetBook(ctx, bookID)
 	if errors.Is(err, store.ErrNotFound) {
@@ -52,7 +53,7 @@ func (h *Handler) purgeHeld(ctx context.Context, bookID int64, ending *jobs.Job)
 		return false, err
 	}
 	if ending != nil {
-		if later, err := h.o.DB.LaterClaim(ctx, ending.ID, ending.Attempt); err != nil || later {
+		if other, err := h.o.DB.OtherClaim(ctx, stopGuard(*ending, false)); err != nil || other {
 			return false, err
 		}
 	}
@@ -67,7 +68,7 @@ func (h *Handler) purgeHeld(ctx context.Context, bookID int64, ending *jobs.Job)
 }
 
 // purgeEnded deletes the transcripts of job's own engine book as job ends
-// (transcripts.retention_days 0), unless a later claim of job follows it
+// (transcripts.retention_days 0), unless another claim of job's id follows it
 // (purgeHeld). It waits a few polls for the engine to let go of the book (a stage
 // the job's end just stopped is still finishing); one it keeps is left for the
 // sweep.

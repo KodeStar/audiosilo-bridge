@@ -401,7 +401,7 @@ func TestSweepTranscripts(t *testing.T) {
 		_ = db.SetBookState(ctx, b.ID, st, status, "", "")
 		_ = db.PutGenerateBook(ctx, store.GenerateBook{ServerJobID: job, BookID: &b.ID, LibraryID: 1, RelPath: name})
 		if !ended.IsZero() {
-			_ = db.EndGenerateBook(ctx, job, 1, ended)
+			_ = db.EndGenerateBook(ctx, store.StopGuard{JobID: job, Attempt: 1}, ended)
 		}
 		return b
 	}
@@ -455,7 +455,7 @@ func TestPurgeEndedIsTheJobsBookOnly(t *testing.T) {
 		}
 		_ = db.SetBookState(ctx, b.ID, st, "", "", "")
 		_ = db.PutGenerateBook(ctx, store.GenerateBook{ServerJobID: job, BookID: &b.ID, LibraryID: 1, RelPath: name})
-		_ = db.EndGenerateBook(ctx, job, 1, time.Now().Add(-time.Hour))
+		_ = db.EndGenerateBook(ctx, store.StopGuard{JobID: job, Attempt: 1}, time.Now().Add(-time.Hour))
 		return b
 	}
 	own := mk(1, "own", "done")
@@ -505,7 +505,7 @@ func TestSweepSkipsAHeldBook(t *testing.T) {
 	}
 	_ = db.SetBookState(ctx, b.ID, "done", "", "", "")
 	_ = db.PutGenerateBook(ctx, store.GenerateBook{ServerJobID: 1, BookID: &b.ID, LibraryID: 1, RelPath: "held"})
-	_ = db.EndGenerateBook(ctx, 1, 1, time.Now().Add(-time.Hour))
+	_ = db.EndGenerateBook(ctx, store.StopGuard{JobID: 1, Attempt: 1}, time.Now().Add(-time.Hour))
 
 	eng.held[b.ID] = true
 	if n, err := h.SweepTranscripts(ctx, 0); err != nil || n != 0 || !present(wd) {
@@ -560,7 +560,7 @@ func TestPurgeRechecksTheBookUnderTheHold(t *testing.T) {
 	// Cancelled by its job's end: failed, so finished when the purge looks.
 	_ = db.SetBookState(ctx, b.ID, "fact_pass", "failed", "cancelled", "")
 	_ = db.PutGenerateBook(ctx, store.GenerateBook{ServerJobID: 1, BookID: &b.ID, LibraryID: 1, RelPath: "readmitted"})
-	_ = db.EndGenerateBook(ctx, 1, 1, time.Now().Add(-time.Hour))
+	_ = db.EndGenerateBook(ctx, store.StopGuard{JobID: 1, Attempt: 1}, time.Now().Add(-time.Hour))
 
 	readmitted = true
 	if err := h.purgeEnded(ctx, jobs.Job{ID: 1, Attempt: 1}, b.ID); err != nil || !present(wd) {
@@ -578,7 +578,7 @@ func TestPurgeRechecksTheBookUnderTheHold(t *testing.T) {
 	if err := h.purgeEnded(ctx, jobs.Job{ID: 1, Attempt: 1}, b.ID); err != nil || !present(wd) {
 		t.Fatalf("a book its job follows again lost its transcripts: %v", err)
 	}
-	_ = db.EndGenerateBook(ctx, 1, 1, time.Now().Add(-time.Hour))
+	_ = db.EndGenerateBook(ctx, store.StopGuard{JobID: 1, Attempt: 1}, time.Now().Add(-time.Hour))
 	if n, err := h.SweepTranscripts(ctx, 0); err != nil || n != 1 || present(wd) {
 		t.Fatalf("a finished book: swept %d, %v, present %v", n, err, present(wd))
 	}
@@ -609,7 +609,7 @@ func TestPurgeAtEndKeepsALaterClaimsTranscripts(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = db.PutGenerateBook(ctx, store.GenerateBook{ServerJobID: 1, BookID: &b.ID, LibraryID: 1, RelPath: "reclaimed"})
-	if err := db.EndGenerateBook(ctx, 1, 1, time.Now()); err != nil {
+	if err := db.EndGenerateBook(ctx, store.StopGuard{JobID: 1, Attempt: 1}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.RecordClaim(ctx, store.ServerJob{ID: 1, Kind: Kind, Attempt: 2}); err != nil {
@@ -812,7 +812,7 @@ func TestAbandonBeforeTheEngineStartsStopsTheBookAtOnce(t *testing.T) {
 	// Each case below is a job whose end Abandon's release recorded.
 	abandoned := func(job int64, slug string) store.Book {
 		b := newBook(job, slug)
-		if err := db.EndGenerateBook(ctx, job, 1, time.Now()); err != nil {
+		if err := db.EndGenerateBook(ctx, store.StopGuard{JobID: job, Attempt: 1}, time.Now()); err != nil {
 			t.Fatal(err)
 		}
 		return b
@@ -982,7 +982,7 @@ func TestJobEndNeverStopsALaterClaimLandingBeforeItsCancel(t *testing.T) {
 		if err := scheduler.CancelStored(ctx, db, abandoned.ID); err != nil {
 			t.Fatal(err)
 		}
-		if err := db.EndGenerateBook(ctx, 1, 1, time.Now()); err != nil {
+		if err := db.EndGenerateBook(ctx, store.StopGuard{JobID: 1, Attempt: 1}, time.Now()); err != nil {
 			t.Fatal(err)
 		}
 		h.stopStartedStage(ctx, jobs.Job{ID: 1, Kind: Kind, Attempt: 1}, abandoned.ID)
@@ -994,6 +994,145 @@ func TestJobEndNeverStopsALaterClaimLandingBeforeItsCancel(t *testing.T) {
 			t.Error("release reported the end of a job a later claim follows")
 		}
 		kept(t, 2, running)
+	})
+}
+
+// otherServerFirstEngine is the engine with another server's claim of the
+// job's id and attempt (the Bridge paired since) recorded just before each
+// guarded cancel.
+type otherServerFirstEngine struct {
+	*scheduler.Scheduler
+	db *store.DB
+}
+
+func (e otherServerFirstEngine) CancelUnlessFollowed(ctx context.Context, id int64, g store.StopGuard) error {
+	if err := e.db.RecordClaim(ctx, store.ServerJob{ID: g.JobID, Kind: Kind, Attempt: g.Attempt, ServerID: "b", Pairing: "p2"}); err != nil {
+		return err
+	}
+	return e.Scheduler.CancelUnlessFollowed(ctx, id, g)
+}
+
+// Job ids are each server's own: once the Bridge is paired with another
+// server, that server's claim may hold the row under a dropped job's id and
+// attempt, its own book mapped there. The dropped claim's release never stops
+// that claim's book nor ends its mapping (denied: the mapping read by the id
+// alone, and a guard of id and attempt only, which another server's claim of
+// the same attempt passes), even when the claim lands between release's check
+// and its writes (denied); the claim's own release stops its book (allowed).
+func TestReleaseLeavesAnotherServersClaimOfTheSameJob(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	open := func(t *testing.T) *store.DB {
+		db, err := store.Open(ctx, ":memory:")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		return db
+	}
+	claim := func(t *testing.T, db *store.DB, server, pairing, slug string) store.Book {
+		t.Helper()
+		if err := db.RecordClaim(ctx, store.ServerJob{ID: 5, Kind: Kind, Attempt: 1, ServerID: server, Pairing: pairing}); err != nil {
+			t.Fatal(err)
+		}
+		b, err := db.CreateMappedBook(ctx, store.NewBook{SourcePath: "/lib/" + slug, WorkDir: t.TempDir(), Title: slug},
+			store.GenerateBook{ServerJobID: 5, LibraryID: 1, RelPath: slug})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := db.SetBookState(ctx, b.ID, "asr", "", "", ""); err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	running := func(t *testing.T, db *store.DB, b store.Book) {
+		t.Helper()
+		got, _ := db.GetBook(ctx, b.ID)
+		g, _ := db.GetGenerateBook(ctx, 5)
+		if got.Status != "" || g.EndedAt != "" {
+			t.Fatalf("status %q error %q, ended %q; want the other server's claim's book running and its mapping open",
+				got.Status, got.Error, g.EndedAt)
+		}
+	}
+	dropped := jobs.ClaimedUnder(jobs.Job{ID: 5, Kind: Kind, Attempt: 1}, "a", "p1")
+	t.Run("abandoned after the claim mapped its book", func(t *testing.T) {
+		t.Parallel()
+		db := open(t)
+		sched := scheduler.New(db, events.NewHub(8), scheduler.NewStubExecutor(0, 0), 1, "", false)
+		h := New(Options{DB: db, RetentionDays: 30, Poll: time.Millisecond, Engine: func() Engine { return sched }})
+		b := claim(t, db, "b", "p2", "theirs")
+		h.Abandon(ctx, dropped)
+		running(t, db, b)
+		h.Abandon(ctx, jobs.ClaimedUnder(jobs.Job{ID: 5, Kind: Kind, Attempt: 1}, "b", "p2"))
+		if got, _ := db.GetBook(ctx, b.ID); !scheduler.IsCancelled(got) {
+			t.Fatalf("the claim's own release didn't stop its book: status %q", got.Status)
+		}
+	})
+	t.Run("the claim landing before release's writes", func(t *testing.T) {
+		t.Parallel()
+		db := open(t)
+		sched := scheduler.New(db, events.NewHub(8), scheduler.NewStubExecutor(0, 0), 1, "", false)
+		h := New(Options{DB: db, RetentionDays: 30, Poll: time.Millisecond,
+			Engine: func() Engine { return otherServerFirstEngine{sched, db} }})
+		b := claim(t, db, "a", "p1", "ours")
+		if h.release(ctx, dropped, b.ID, true) {
+			t.Error("release reported the end of a job another server's claim holds the row of")
+		}
+		running(t, db, b)
+	})
+	// Allowed: another server's claim of a kind that follows no engine book
+	// (its podcast.fetch) leaves the mapping's book the dropped claim's, which
+	// would otherwise run on with its mapping open and nothing to stop it.
+	t.Run("another server's claim of a kind with no engine book", func(t *testing.T) {
+		t.Parallel()
+		db := open(t)
+		sched := scheduler.New(db, events.NewHub(8), scheduler.NewStubExecutor(0, 0), 1, "", false)
+		h := New(Options{DB: db, RetentionDays: 30, Poll: time.Millisecond, Engine: func() Engine { return sched }})
+		b := claim(t, db, "a", "p1", "ours")
+		if err := db.RecordClaim(ctx, store.ServerJob{ID: 5, Kind: "podcast.fetch", Attempt: 1, ServerID: "b", Pairing: "p2"}); err != nil {
+			t.Fatal(err)
+		}
+		h.Abandon(ctx, dropped)
+		if got, _ := db.GetBook(ctx, b.ID); !scheduler.IsCancelled(got) {
+			t.Fatalf("the dropped claim's book wasn't stopped: status %q", got.Status)
+		}
+		if g, _ := db.GetGenerateBook(ctx, 5); g.EndedAt == "" {
+			t.Fatal("the dropped claim's mapping wasn't ended")
+		}
+	})
+	// Allowed: another server's claim of an engine kind in another library
+	// stops the dropped claim's book its id maps to, which that claim's own
+	// book replaces in the mapping (denied: left to run on unmapped, as the
+	// dropped claim's release leaves it to that claim). Its own library's book
+	// is resumed, not stopped.
+	t.Run("another server's claim in another library", func(t *testing.T) {
+		t.Parallel()
+		db := open(t)
+		sched := scheduler.New(db, events.NewHub(8), scheduler.NewStubExecutor(0, 0), 1, "", false)
+		h := New(Options{DB: db, RetentionDays: 30, Poll: time.Millisecond, Engine: func() Engine { return sched }})
+		b := claim(t, db, "a", "p1", "ours")
+		for _, kind := range []string{Kind, ChaptersKind, ReadalongKind} {
+			theirs := store.ServerJob{ID: 5, Kind: kind, Attempt: 1, ServerID: "b", Pairing: "p2"}
+			if err := db.RecordClaim(ctx, theirs); err != nil {
+				t.Fatal(err)
+			}
+			if other, err := db.OtherClaim(ctx, stopGuard(dropped, false)); err != nil || !other {
+				t.Fatalf("%s: OtherClaim = %v %v; want the engine kind's claim to follow the book", kind, other, err)
+			}
+		}
+		same, other := int64(1), int64(2)
+		job := jobs.ClaimedUnder(jobs.Job{ID: 5, Kind: ReadalongKind, Attempt: 1, LibraryID: &same}, "b", "p2")
+		if _, resumed, err := h.resumeMapping(ctx, job); err != nil || !resumed {
+			t.Fatalf("its own library: resumed %v, %v", resumed, err)
+		}
+		running(t, db, b)
+		job.LibraryID = &other
+		if _, resumed, err := h.resumeMapping(ctx, job); err != nil || resumed {
+			t.Fatalf("another library: resumed %v, %v", resumed, err)
+		}
+		if got, _ := db.GetBook(ctx, b.ID); !scheduler.IsCancelled(got) {
+			t.Fatalf("another library's book its id maps to wasn't stopped: status %q", got.Status)
+		}
 	})
 }
 

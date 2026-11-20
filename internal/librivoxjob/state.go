@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
+	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/transfer"
 )
 
@@ -29,9 +30,15 @@ type state struct {
 	// server's library. A state of another server is never acted on.
 	ServerID string `json:"server_id,omitempty"`
 	// JobID is the id of the server's job whose run last planned or resumed
-	// the fetch (0 on a state from before it was kept): Abandon removes the
-	// staging of its own job only.
-	JobID int64 `json:"job_id,omitempty"`
+	// the fetch (0 on a state from before it was kept), Attempt that claim's
+	// attempt and Pairing the Bridge's pairing it was claimed under (0 and ""
+	// on a state from before they were kept): Abandon removes the staging of
+	// its own claim only (claimedBy). The id alone doesn't name it: the
+	// server hands a job out again at a later attempt, to a pairing made
+	// since too, while the earlier claim's release may still be on its way.
+	JobID   int64  `json:"job_id,omitempty"`
+	Attempt int    `json:"attempt,omitempty"`
+	Pairing string `json:"pairing,omitempty"`
 	// Parent is the folder the book goes in ("" for the library's root), and
 	// MadeParent whether this fetch created it (removed again, when empty, with
 	// the staging folder).
@@ -51,6 +58,17 @@ type state struct {
 	// unplaced: StagingMaxAge after it the state ends (sweepOne). A run that
 	// finds the library mapped again clears it at once.
 	Unmapped time.Time `json:"unmapped,omitzero"`
+}
+
+// claimedBy reports whether the state was last planned or resumed by this
+// claim of job, whose server is serverID: its job, attempt and pairing.
+func (st *state) claimedBy(job jobs.Job, serverID string) bool {
+	return st.ServerID == serverID && st.JobID == job.ID && st.Attempt == job.Attempt && st.Pairing == job.Pairing()
+}
+
+// claim records job's claim, whose server is serverID, as the state's.
+func (st *state) claim(job jobs.Job, serverID string) {
+	st.ServerID, st.JobID, st.Attempt, st.Pairing = serverID, job.ID, job.Attempt, job.Pairing()
 }
 
 // partState is one section's partial download.

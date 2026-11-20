@@ -52,6 +52,11 @@ type checkpoint struct {
 	SourceLength int64  `json:"source_length,omitempty"`
 	SourceBase   string `json:"source_base,omitempty"`
 	UpdatedAt    string `json:"updated_at"`
+	// Mount is the library mount the partial was written under (the root's
+	// name at its save): a job whose pairing has ended has no mapping of its
+	// library to read any more, and is released here (abandonEnded). A record
+	// from before it has none.
+	Mount string `json:"mount,omitempty"`
 }
 
 // complete reports whether c records a whole download, its partial holding
@@ -117,9 +122,59 @@ func nonce() string {
 	}
 	return hex.EncodeToString(b[:])
 }
+
+// pairHash is the pairing hash the view's download records are kept under:
+// its fetch claim's (claimHash), else the Bridge's pairing now (livePairHash).
 func (s *service) pairHash() string {
-	token, _ := s.o.Vault.Get(secrets.ServerToken)
-	return podcast.FeedURLHash(s.o.ServerID() + "|" + token)
+	if s.claimHash != "" {
+		return s.claimHash
+	}
+	return s.livePairHash()
+}
+
+// livePairHash is the hash of the Bridge's pairing now, with the view's
+// server: its server token is new at each pairing and gone once unpaired. A
+// token that cannot be read counts as none.
+func (s *service) livePairHash() string {
+	hash, _ := s.livePair()
+	return hash
+}
+
+// livePair is livePairHash, and whether the server token could be read to
+// tell it (absent counts as read).
+func (s *service) livePair() (hash string, known bool) {
+	token, err := s.o.Vault.Get(secrets.ServerToken)
+	return podcast.FeedURLHash(s.o.ServerID() + "|" + token), err == nil
+}
+
+// linked reports whether the view's link still reaches the pairing its job
+// was claimed under (always, for a view with no link to tell): the server
+// token read just before it is that pairing's.
+func (s *service) linked() bool { return s.o.Server == nil || s.o.Server() != nil }
+
+// pairingEnded reports whether the pairing the view's records are kept under
+// (pairHash) is no longer the Bridge's: unpaired, or paired again (with the
+// same server or another) since the claim. Nothing more is written for it.
+func (s *service) pairingEnded() bool { return s.pairHash() != s.livePairHash() }
+
+// pairingEndedForSure is pairingEnded only when the server token could be
+// read to tell (absent counts as read): a vault that fails a read says
+// nothing of the pairing, and a job's live records are never released as an
+// ended pairing's for it.
+func (s *service) pairingEndedForSure() bool {
+	hash, known := s.livePair()
+	return known && s.pairHash() != hash
+}
+
+// claimHashOf is the pairing hash a fetch's claim recorded in job's params
+// (SealParams), "" when it has none.
+func claimHashOf(job jobs.Job) string {
+	var fields map[string]json.RawMessage
+	var hash string
+	if job.Kind != FetchKind || json.Unmarshal(job.Params, &fields) != nil || json.Unmarshal(fields[podcast.ClaimHashParam], &hash) != nil {
+		return ""
+	}
+	return hash
 }
 func (s *service) checkpointName(job jobs.Job, show string) string {
 	return recordName(*job.LibraryID, show, *job.Path)
@@ -237,6 +292,11 @@ func (s *service) dropValidator(v string) {
 	}
 }
 func (s *service) saveCheckpoint(job jobs.Job, root *os.Root, c *checkpoint, etag string) error {
+	if s.pairingEnded() {
+		// Dropped (unpaired, or paired again) since the claim: nothing is
+		// recorded for a pairing no job resumes under, nor under the one now.
+		return fail("identity_changed", "The Bridge pairing changed.")
+	}
 	dir, err := s.checkpointRoot()
 	if err != nil {
 		return err
@@ -265,6 +325,7 @@ func (s *service) saveCheckpoint(job jobs.Job, root *os.Root, c *checkpoint, eta
 		}
 	}
 	c.UpdatedAt = s.o.Now().UTC().Format(time.RFC3339)
+	c.Mount = root.Name()
 	return writeRecord(dir, s.checkpointName(job, c.ShowID), *c)
 }
 
@@ -348,7 +409,7 @@ func (s *service) recordsOf(job jobs.Job, p fetchParams) []string {
 		records, _ := s.records(dir, *job.LibraryID)
 		_ = dir.Close()
 		for _, c := range records {
-			if c.ShowID == p.ShowID && c.EpisodeID == p.EpisodeID && c.Path != *job.Path && path.Base(c.Path) == path.Base(*job.Path) {
+			if c.Path != *job.Path && p.recordOf(c, *job.Path) {
 				out = append(out, c.Path)
 			}
 		}
@@ -357,6 +418,12 @@ func (s *service) recordsOf(job jobs.Job, p fetchParams) []string {
 		out = []string{*job.Path}
 	}
 	return out
+}
+
+// recordOf reports whether c records p's episode for a job at jobPath: at
+// that path, or moved with its show folder (the same file name).
+func (p fetchParams) recordOf(c checkpoint, jobPath string) bool {
+	return c.ShowID == p.ShowID && c.EpisodeID == p.EpisodeID && path.Base(c.Path) == path.Base(jobPath)
 }
 
 // dropStaleCheckpoint removes this path's owned partial when it was made for
@@ -495,7 +562,7 @@ func (s *service) clearCheckpoint(job jobs.Job, root *os.Root, c *checkpoint) bo
 // other's way. An error means the records
 // could not be listed (or the open jobs read); one that could not be read or
 // moved is left as it was.
-func (s *service) adoptCheckpoints(ctx context.Context, root *os.Root, lib link.Library, show, from, id string, self int64) error {
+func (s *service) adoptCheckpoints(ctx context.Context, root *os.Root, lib link.Library, show, from, id string, self jobs.Job) error {
 	if s.o.DB == nil || s.o.DataDir == "" {
 		return nil
 	}
@@ -614,11 +681,15 @@ func (s *service) adoptOwn(job jobs.Job, root *os.Root, from string, p fetchPara
 // library lib is a running download's (self, the calling job, aside): a job
 // of this Bridge claimed at its path, or a fetch of its episode (one that
 // found the show elsewhere since its claim, Fetch's relocation, works at a
-// path its row does not name).
-func (s *service) runningRecords(rows []store.ServerJob, lib, self int64) func(checkpoint) bool {
+// path its row does not name). Only the row of self's own claim is set aside
+// (jobs.Job.OwnRow; the zero Job for no calling job): the row under its id
+// may be a later claim of the job by now (handed out again, at a later
+// attempt, to a pairing made since, while the earlier one's work is still
+// being released), and that claim's download is a running one like any other.
+func (s *service) runningRecords(rows []store.ServerJob, lib int64, self jobs.Job) func(checkpoint) bool {
 	paths, episodes := map[string]bool{}, map[fetchParams]bool{}
 	for _, r := range rows {
-		if r.ID == self || r.State != store.JobRunning || r.ServerID != s.o.ServerID() || r.LibraryID == nil || *r.LibraryID != lib {
+		if self.OwnRow(r) || r.State != store.JobRunning || r.ServerID != s.o.ServerID() || r.LibraryID == nil || *r.LibraryID != lib {
 			continue
 		}
 		if r.Path != nil {

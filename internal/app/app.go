@@ -398,6 +398,10 @@ func (b *Bridge) Run(ctx context.Context) error {
 	defer cancel()
 	_ = srv.Shutdown(shut)
 	wg.Wait()
+	// Before the store closes: an unpair whose forget failed leaves the jobs
+	// the stop cut short to the next start, which must not read the pairing
+	// back (Conn.finishUnpair).
+	b.conn.finishUnpair(shut)
 	b.bg.stop()
 	b.log.Info("bridge: stopped")
 	return err
@@ -453,6 +457,7 @@ func (b *Bridge) heartbeatLoop(ctx context.Context) {
 func (b *Bridge) beat(ctx context.Context) {
 	cl := b.conn.Client()
 	if cl == nil {
+		b.conn.finishUnpair(ctx) // an unpair that couldn't forget the pairing
 		b.retryRefused(ctx)
 		return
 	}

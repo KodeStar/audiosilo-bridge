@@ -49,10 +49,16 @@ type Conn struct {
 	// pairMu orders a pairing's save (Pair, once the server accepted the code)
 	// and an unpair: a pairing that read the identity it keeps (a refused one's)
 	// never writes it back after an unpair deleted it meanwhile.
-	pairMu  sync.Mutex
-	mu      sync.Mutex
-	client  *link.Client
-	pairing Pairing
+	pairMu sync.Mutex
+	// unforgotten: an unpair could not forget the token or the pairing's
+	// identity (Unpair), and no pairing was made since. The stores still hold
+	// a pairing the page shows as ended: a restart would come back paired
+	// under the same identity and resume its jobs, so finishUnpair forgets
+	// them again. Under pairMu.
+	unforgotten bool
+	mu          sync.Mutex
+	client      *link.Client
+	pairing     Pairing
 	// id is the pairing's identity (keyPairingID), "" while unpaired; the
 	// link carries it too (link.Client.WithPairing).
 	id string
@@ -301,6 +307,7 @@ func (c *Conn) Pair(ctx context.Context, serverURL, code string) error {
 	}
 	c.client, c.refusedAt, c.id = cl, time.Time{}, id
 	c.pairing = Pairing{Paired: true, ServerURL: cl.BaseURL(), ServerID: p.ServerID, ServerName: p.ServerName, PairedAt: pairedAt}
+	c.unforgotten = false // the new pairing's token and identity are the stored ones
 	onChange := c.onChange
 	c.mu.Unlock()
 	c.log.Info("bridge: paired", "server", cl.BaseURL(), "server_name", p.ServerName)
@@ -329,7 +336,9 @@ func (c *Conn) savePairing(ctx context.Context, serverURL string, p *link.Paired
 // pairing's once the identity is gone, so none resumes after a restart, a new
 // pairing with the same server included; onUnpair runs after that and doesn't
 // wait for them (their work is released in the background), so the page's
-// request is answered at once.
+// request is answered at once. A forget that failed is tried again
+// (finishUnpair): until it goes through, a restart would read the pairing
+// back, identity and all.
 func (c *Conn) Unpair(ctx context.Context, reason string) error {
 	c.pairMu.Lock()
 	defer c.pairMu.Unlock()
@@ -345,10 +354,8 @@ func (c *Conn) Unpair(ctx context.Context, reason string) error {
 	onChange, onUnpair := c.onChange, c.onUnpair
 	c.mu.Unlock()
 	ctx = context.WithoutCancel(ctx)
-	err := c.vault.Delete(secrets.ServerToken)
-	if derr := c.db.DeleteSetting(ctx, keyPairingID); derr != nil {
-		err = errors.Join(err, derr)
-	}
+	err := c.forget(ctx)
+	c.unforgotten = err != nil
 	if serr := c.db.SetSetting(ctx, keyUnpaired, reason); serr != nil {
 		err = errors.Join(err, serr)
 	}
@@ -358,4 +365,37 @@ func (c *Conn) Unpair(ctx context.Context, reason string) error {
 		onChange()
 	}
 	return err
+}
+
+// forget deletes the stored token and the pairing's identity (both, even
+// when the first fails). Under pairMu.
+func (c *Conn) forget(ctx context.Context) error {
+	err := c.vault.Delete(secrets.ServerToken)
+	if derr := c.db.DeleteSetting(ctx, keyPairingID); derr != nil {
+		err = errors.Join(err, derr)
+	}
+	return err
+}
+
+// finishUnpair forgets again what an unpair on the page could not (the token,
+// the pairing's identity), unless a pairing was made since. The Bridge calls
+// it at every heartbeat's time and as it stops. Left as it was, the next
+// start would read the pairing back under the same identity: the jobs the
+// unpair stopped that are still running rows then (a stop came before their
+// work was released, and leaves them for the next start's look to drop)
+// would be that pairing's own again, resumed and reported to a server the
+// page showed as unpaired. With the identity gone they are another pairing's
+// at any start, paired or not, and dropped.
+func (c *Conn) finishUnpair(ctx context.Context) {
+	c.pairMu.Lock()
+	defer c.pairMu.Unlock()
+	if !c.unforgotten {
+		return
+	}
+	if err := c.forget(context.WithoutCancel(ctx)); err != nil {
+		c.log.Warn("bridge: forgetting the unpaired pairing failed again; a restart now would come back paired", "err", err)
+		return
+	}
+	c.unforgotten = false
+	c.log.Info("bridge: the unpaired pairing is forgotten")
 }

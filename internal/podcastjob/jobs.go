@@ -73,6 +73,12 @@ type Options struct {
 type service struct {
 	o Options
 	*shared
+	// claimHash is the pairing hash a fetch's claim was made under
+	// (recorded at its claim by SealParams; a run started
+	// without one pins the hash it starts under): its download records are
+	// that pairing's (pairHash), so a job whose pairing has ended since is
+	// still released where its records are. "" for every other view.
+	claimHash string
 }
 type shared struct {
 	mu    sync.Mutex
@@ -101,8 +107,19 @@ type shared struct {
 // anything (BR-LINK-RULE). The service itself for a job no runner claimed.
 func (s *service) forJob(job jobs.Job) *service {
 	id := job.ServerID()
+	// A view's own (a run's, which may have pinned the pairing it started
+	// under over its claim's) wins over the one sealed in the params.
+	hash := s.claimHash
+	if hash == "" {
+		hash = claimHashOf(job)
+	}
 	if id == "" {
-		return s
+		if hash == s.claimHash {
+			return s
+		}
+		v := *s
+		v.claimHash = hash
+		return &v
 	}
 	o := s.o
 	o.ServerID = func() string { return id }
@@ -116,7 +133,7 @@ func (s *service) forJob(job jobs.Job) *service {
 	if s.o.Libraries != nil {
 		o.Libraries = jobLibraries{s.o.Libraries, reaches}
 	}
-	return &service{o: o, shared: s.shared}
+	return &service{o: o, shared: s.shared, claimHash: hash}
 }
 
 // jobLibraries are a job's view of the server's libraries: none while the
@@ -1335,7 +1352,7 @@ func (s *service) adopt(ctx context.Context, root *os.Root, lib link.Library, mo
 	if err := s.writeNow(lib, mount, show); err != nil {
 		return false, err
 	}
-	if err := s.adoptCheckpoints(ctx, root, lib, show, from, f.ShowID, 0); err != nil {
+	if err := s.adoptCheckpoints(ctx, root, lib, show, from, f.ShowID, jobs.Job{}); err != nil {
 		slog.Warn("podcasts: the download records of a show folder renamed by hand could not be read; it is taken in later", "library", lib.ID, "show", show, "err", err)
 		return false, nil
 	}
