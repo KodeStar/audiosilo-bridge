@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"regexp"
 	"slices"
 	"strings"
@@ -591,6 +592,44 @@ func TestSyncErrorBacksOffWithoutRefusing(t *testing.T) {
 	if a := e.account(t); a.RefusedAt != "" || a.SyncError == "" {
 		t.Fatalf("after user_unavailable: %+v", a)
 	}
+}
+
+func TestServerRateLimitPreservesSyncHealth(t *testing.T) {
+	e := newEnv(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	t.Cleanup(srv.Close)
+	client, err := link.New(srv.URL, "", "dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.o.Server = func() Server { return client }
+	e.accts.places["B000000001"] = audible.Position{PositionMs: 60_000, LastUpdated: e.now}
+	raw := params(t, title("B000000001", "A/One", 3600))
+
+	checkServerLimit := func() {
+		t.Helper()
+		before, changes := e.account(t), e.changed
+		_, err := New(e.o).Run(link.WithLastError(t.Context()), jobs.Job{Kind: Kind, Params: raw}, jobs.LocalReporter())
+		if _, limited := link.RateLimited(err); !limited || err.Error() != "sending the places to the server: server answered 429: Too Many Requests" {
+			t.Fatalf("sync error = %v, want the final server 429", err)
+		}
+		if after := e.account(t); after.SyncError != before.SyncError || after.SyncRetryAt != before.SyncRetryAt || after.SyncAt != before.SyncAt || e.changed != changes {
+			t.Fatalf("after server 429: sync error %q, retry at %q, last sync %q, notifications %d", after.SyncError, after.SyncRetryAt, after.SyncAt, e.changed)
+		}
+	}
+	checkServerLimit()
+
+	// A later server limit also preserves a failure Audible already reported.
+	e.accts.placesErr = retryErr(t, http.StatusTooManyRequests, "600")
+	if _, err := e.runSync(t, raw); err == nil || e.account(t).SyncError == "" {
+		t.Fatalf("Audible 429 did not record a sync failure: %v", err)
+	}
+	e.accts.placesErr = nil
+	e.now = e.now.Add(11 * time.Minute)
+	checkServerLimit()
 }
 
 // A read Audible stops partway (a rate limit after some batches) still syncs
