@@ -2379,7 +2379,9 @@ internal/
             Each dispatcher holds one long poll. When a lane the poll omitted
             frees, claimFreedLanes checks the available uncovered lanes with
             wait=0, one request at a time. It drains matching jobs and remembers
-            an empty answer until eligibility changes or the long poll returns.
+            an empty answer until eligibility changes, the long poll returns or
+            its recheck (recheckEvery, 4 s, at most maxRechecks, 3, per long
+            poll), so work queued there since waits seconds, not the whole poll.
             Heartbeats with the same eligibility keep the idle poll open.
             The pending poll retains its slots and receives its answer even
             through a proxy that hides client hang-ups (BR-CLAIM-HOLD).

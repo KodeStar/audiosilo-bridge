@@ -2444,6 +2444,71 @@ func TestEmptyQueueKeepsOneLongPoll(t *testing.T) {
 	})
 }
 
+// A freed lane that answered empty is asked again recheckEvery later (denied:
+// a job queued there since waited for the long poll to return, up to 25 s), at
+// most maxRechecks times beside one long poll (denied: a free lane with
+// nothing queued asked every few seconds for the whole poll).
+func TestEmptyFreedLaneIsRecheckedBoundedly(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		srv := newControlledServer(false)
+		started := make(chan Job, 2)
+		gates := map[int64]chan struct{}{1: make(chan struct{}), 2: make(chan struct{})}
+		opts := testOpts()
+		opts.Wait = link.MaxWait
+		opts.Lanes = map[string]int{LaneLight: 1, LaneDownload: 1}
+		r := New(openStore(t), func() Server { return srv }, nil, opts,
+			blockingHandler("download", LaneDownload, started, gates), handler{kind: "light", lane: LaneLight})
+		startControlled(t, r)
+		srv.next(t, false).answer <- claimed(1, "download", 0)
+		await(t, started)
+		pending := srv.next(t, false)
+		// check is the next check of the download lane, made after (none
+		// before it).
+		check := func(after time.Duration) *controlledClaim {
+			t.Helper()
+			if after > 0 {
+				time.Sleep(after - time.Millisecond)
+				synctest.Wait()
+				select {
+				case c := <-srv.calls:
+					t.Fatalf("checked %v before its recheck", c.kinds)
+				default:
+				}
+				time.Sleep(time.Millisecond)
+			}
+			c := srv.next(t, false)
+			if !slices.Equal(c.kinds, []string{"download"}) || c.wait != 0 {
+				t.Fatalf("check asks for %v with wait %v", c.kinds, c.wait)
+			}
+			return c
+		}
+		close(gates[1])
+		check(0).answer <- nil
+		check(recheckEvery).answer <- claimed(2, "download", 0) // queued since the empty answer
+		if j := await(t, started); j.ID != 2 {
+			t.Fatal("the recheck's job didn't run", j)
+		}
+		close(gates[2])
+		check(0).answer <- nil
+		for range maxRechecks - 1 {
+			check(recheckEvery).answer <- nil
+		}
+		time.Sleep(3 * recheckEvery)
+		synctest.Wait()
+		select {
+		case c := <-srv.calls:
+			t.Fatalf("checked %v past %d rechecks", c.kinds, maxRechecks)
+		case <-pending.cancelled:
+			t.Fatal("the long poll was cancelled")
+		default:
+		}
+		pending.answer <- nil
+		if all := srv.next(t, false); !slices.Equal(all.kinds, []string{"download", "light"}) || all.wait != opts.Wait {
+			t.Fatalf("next long poll asks for %v with wait %v", all.kinds, all.wait)
+		}
+	})
+}
+
 // backlogServer honours the kind filter and wait. Completing a poll queues
 // two episode fetches and wakes any claim that can take one.
 type backlogServer struct {

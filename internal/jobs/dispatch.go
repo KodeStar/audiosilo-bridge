@@ -77,17 +77,62 @@ func (r *Runner) roomLocked(caps map[string]int, lane string, own *claimRequest)
 	return true
 }
 
+// An uncovered lane that answered empty is asked again recheckEvery later, at
+// most maxRechecks times beside one long poll: work queued there since (an
+// OPML import's next follows, an admin's check) would otherwise wait for the
+// poll to return, up to its whole wait (link.MaxWait, 25 s). A free lane with
+// nothing queued costs at most maxRechecks more requests per long poll.
+const (
+	recheckEvery = 4 * time.Second
+	maxRechecks  = 3
+)
+
 // A narrow long poll keeps its reservations until the server answers. Beside
 // it, probe only the lanes it missed. Remember an empty answer so unrelated
-// wakes (including heartbeats and our own unreserve) issue no more requests.
+// wakes (including heartbeats and our own unreserve) issue no more requests
+// until its bounded recheck.
 type laneProbe struct {
 	pending    *claimRequest
 	emptyLanes []string
+	recheck    *time.Timer // armed by an empty answer while rechecks remain
+	rechecks   int
 }
 
 func (p *laneProbe) needed(q *claimRequest) bool {
 	return sameTarget(q, p.pending) &&
 		slices.ContainsFunc(q.lanes, func(lane string) bool { return !slices.Contains(p.emptyLanes, lane) })
+}
+
+// empty remembers lanes that answered empty and arms their recheck.
+func (p *laneProbe) empty(lanes []string) {
+	p.emptyLanes = lanes
+	if p.rechecks < maxRechecks {
+		p.rechecks++
+		p.stop()
+		p.recheck = time.NewTimer(recheckEvery)
+	}
+}
+
+// keep forgets the empty lanes not in lanes: one that lost its room is asked
+// again once it frees, and a snapshot that wasn't asked (another target)
+// marks no lane empty.
+func (p *laneProbe) keep(lanes []string) {
+	p.emptyLanes = slices.DeleteFunc(slices.Clone(p.emptyLanes), func(lane string) bool { return !slices.Contains(lanes, lane) })
+}
+
+// due is the armed recheck while an empty lane waits for it, else nil.
+func (p *laneProbe) due() <-chan time.Time {
+	if p.recheck == nil || len(p.emptyLanes) == 0 {
+		return nil
+	}
+	return p.recheck.C
+}
+
+func (p *laneProbe) stop() {
+	if p.recheck != nil {
+		p.recheck.Stop()
+		p.recheck = nil
+	}
 }
 
 // request snapshots eligibility and optionally reserves it under the same lock.
@@ -261,6 +306,7 @@ func (r *Runner) finishClaim(ctx context.Context, q *claimRequest, job *link.Job
 // probe can still bring a lease, so let it finish under its original target.
 func (r *Runner) claimFreedLanes(ctx context.Context, pending *claimRequest, finished <-chan struct{}, wg *sync.WaitGroup) {
 	probe := laneProbe{pending: pending}
+	defer probe.stop()
 	for ctx.Err() == nil {
 		q, changed := r.requestLanes(pending.interactive, true, nil, &probe)
 		select {
@@ -270,13 +316,15 @@ func (r *Runner) claimFreedLanes(ctx context.Context, pending *claimRequest, fin
 		default:
 		}
 		if !q.held {
-			probe.emptyLanes = q.lanes
+			probe.keep(q.lanes)
 			select {
 			case <-finished:
 				return
 			case <-ctx.Done():
 				return
 			case <-changed:
+			case <-probe.due():
+				probe.recheck, probe.emptyLanes = nil, nil
 			}
 			continue
 		}
@@ -292,7 +340,7 @@ func (r *Runner) claimFreedLanes(ctx context.Context, pending *claimRequest, fin
 		if result.job != nil {
 			probe.emptyLanes = nil // the lanes may hold more
 		} else {
-			probe.emptyLanes = q.lanes
+			probe.empty(q.lanes)
 		}
 	}
 }
