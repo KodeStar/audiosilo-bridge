@@ -51,6 +51,9 @@ type Job struct {
 	// (store.ServerJob.ShareOff, or the stopped run's Reporter): Reporter.ShareOff.
 	// Its Reporter writes it to the store at its first report (keepShareOff).
 	shareOff bool
+	// leaseUntil is the expiry returned with a fresh claim. A resumed job
+	// learns its lease from the first successful running report.
+	leaseUntil time.Time
 	// serverID is the id of the server that handed the job out (the claim's
 	// link's, or the recorded row's): the one rule for which link the job
 	// reports on (Runner.linkFor), and what a handler keys its durable state
@@ -1215,7 +1218,15 @@ func (r *Runner) dropOtherServers(id string) {
 // jobOf is a claimed job as a Handler sees it.
 func jobOf(j *link.Job) Job {
 	return Job{ID: j.ID, Kind: j.Kind, LibraryID: j.LibraryID, Path: j.Path, Params: j.Params, Attempt: j.Attempts, Priority: j.Priority,
-		shareOff: j.ShareOff}
+		shareOff: j.ShareOff, leaseUntil: leaseExpiry(j)}
+}
+
+func leaseExpiry(j *link.Job) time.Time {
+	if j.LeaseUntil == nil {
+		return time.Time{}
+	}
+	until, _ := time.Parse(time.RFC3339, *j.LeaseUntil)
+	return until
 }
 
 // storedJob is a job the store recorded, as a Handler sees it.
@@ -1444,7 +1455,7 @@ func (r *Runner) execute(ctx, base context.Context, srv Server, h Handler, ru *r
 	// all the same (keepShareOff, the one write after the claim), so one whose
 	// write failed, or that a refused token stopped, has it stored again.
 	rep := &Reporter{r: r, ru: ru, srv: srv, job: ru.job, cancel: ru.cancel, ctx: ctx, nudge: make(chan struct{}, 1),
-		shareOff: ru.job.shareOff}
+		shareOff: ru.job.shareOff, leaseUntil: ru.job.leaseUntil}
 	if ru.parked != "" {
 		rep.parked, rep.parkMsg = true, ru.parked
 		// The server hears a park whose code changes as a new park (a bell
@@ -1472,6 +1483,7 @@ func (r *Runner) execute(ctx, base context.Context, srv Server, h Handler, ru *r
 	var err error
 	if r.awaitAdmission(ctx, ru) {
 		rep.started.Store(true)
+		ctx = link.WithRetryDeadline(ctx, rep.retryDeadline)
 		if r.serverQueued(ru.job.Kind) {
 			ctx = link.WithLastError(ctx)
 		}
@@ -2001,8 +2013,9 @@ type Reporter struct {
 	srv      Server
 	progress Progress
 	// dirty: progress changed since it was last sent (and stored).
-	dirty  bool
-	sentAt time.Time
+	dirty      bool
+	sentAt     time.Time
+	leaseUntil time.Time // claim or latest successful report, under mu
 	// failing records a transient failure. Any successful report, including a
 	// ConfirmLease or a Refresh, clears it. warned keeps subsequent failures
 	// quiet until a report gets through (bridge#31).
@@ -2558,9 +2571,14 @@ func unreachable(err error) bool {
 // share_off is heard's. parked: the update reported the job parked (or, sending
 // no error of its own, went out while it was).
 func (p *Reporter) answer(got *link.Job, err error, parked bool) (stop error) {
-	if err == nil && got.Path != nil && *got.Path != "" {
+	if err == nil {
 		p.mu.Lock()
-		p.path = *got.Path
+		if got.Path != nil && *got.Path != "" {
+			p.path = *got.Path
+		}
+		if until := leaseExpiry(got); until.After(p.leaseUntil) || got.State == link.StateNeedsAttention {
+			p.leaseUntil = until
+		}
 		p.mu.Unlock()
 	}
 	switch {
@@ -2583,6 +2601,17 @@ func (p *Reporter) answer(got *link.Job, err error, parked bool) (stop error) {
 		return errUnpaired
 	}
 	return nil
+}
+
+// retryDeadline leaves time for the final cancel check and report before the
+// server can hand the job to another Bridge attempt.
+func (p *Reporter) retryDeadline() time.Time {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.leaseUntil.IsZero() {
+		return time.Time{}
+	}
+	return p.leaseUntil.Add(-DefaultReportRetry)
 }
 
 // acted acts on an answer srv gave once answer has read it, outside sendMu:

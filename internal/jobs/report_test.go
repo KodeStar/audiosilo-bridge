@@ -296,12 +296,32 @@ func storedAs(db *store.DB, id int64, state string) bool {
 	return err == nil && sj.State == state && sj.Reported
 }
 
+func TestJobRetryDeadlineFollowsLease(t *testing.T) {
+	now := time.Now().UTC()
+	claim := now.Add(time.Minute).Format(time.RFC3339Nano)
+	job := jobOf(&link.Job{LeaseUntil: &claim})
+	rep := &Reporter{leaseUntil: job.leaseUntil}
+	if got := rep.retryDeadline(); !got.Equal(now.Add(time.Minute - DefaultReportRetry)) {
+		t.Fatalf("claim retry deadline = %v", got)
+	}
+	renewal := now.Add(2 * time.Minute).Format(time.RFC3339Nano)
+	rep.answer(&link.Job{LeaseUntil: &renewal}, nil, false)
+	rep.answer(nil, &link.APIError{Status: http.StatusTooManyRequests}, false)
+	if got := rep.retryDeadline(); !got.Equal(now.Add(2*time.Minute - DefaultReportRetry)) {
+		t.Fatalf("renewed retry deadline = %v", got)
+	}
+	rep.answer(&link.Job{State: link.StateNeedsAttention}, nil, true)
+	if got := rep.retryDeadline(); !got.IsZero() {
+		t.Fatalf("parked retry deadline = %v", got)
+	}
+}
+
 // The server schedules another run of its own jobs after a failure. Only an
 // admin-started job can wait for someone to cancel and queue it again.
 func TestRateLimitedJob(t *testing.T) {
 	t.Parallel()
 	const refused = "server answered 429: Too Many Requests"
-	const attention = "the server is still rate limiting the Bridge (attempt 3): " + refused +
+	const attention = "the server is still rate limiting the Bridge (attempt 5): " + refused +
 		". Cancel and queue the job again when the server is ready."
 	for _, tc := range []struct {
 		name           string
@@ -309,16 +329,20 @@ func TestRateLimitedJob(t *testing.T) {
 		refusals       int32
 		state, message string
 	}{
-		{"recovers", true, 2, store.JobDone, ""},
-		{"server queued", true, 3, store.JobFailed, refused},
-		{"admin", false, 3, store.JobNeedsAttention, attention},
+		{"recovers", true, 4, store.JobDone, ""},
+		{"server queued", true, 5, store.JobFailed, refused},
+		{"admin", false, 5, store.JobNeedsAttention, attention},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var requests, runs atomic.Int32
 			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				if requests.Add(1) <= tc.refusals {
-					w.Header().Set("Retry-After", "0")
+				if n := requests.Add(1); n <= tc.refusals {
+					after := "0"
+					if n == 5 {
+						after = "60" // past the remaining lease
+					}
+					w.Header().Set("Retry-After", after)
 					w.WriteHeader(http.StatusTooManyRequests)
 					return
 				}
@@ -327,7 +351,8 @@ func TestRateLimitedJob(t *testing.T) {
 			defer api.Close()
 			cl, _ := link.New(api.URL, "", "dev")
 			db, srv := openStore(t), newFakeServer()
-			srv.add(&link.Job{ID: 31, Kind: "k.scan", Attempts: 1})
+			until := time.Now().Add(DefaultReportRetry + time.Second).Format(time.RFC3339Nano)
+			srv.add(&link.Job{ID: 31, Kind: "k.scan", Attempts: 1, LeaseUntil: &until})
 			r := New(db, func() Server { return srv }, nil, testOpts(), handler{kind: "k.scan", lane: LaneLight, queued: tc.queued,
 				fn: func(ctx context.Context, _ Job, _ *Reporter) (any, error) {
 					runs.Add(1)
@@ -336,7 +361,7 @@ func TestRateLimitedJob(t *testing.T) {
 				}})
 			runFor(t, r, func() bool { return storedAs(db, 31, tc.state) })
 			state, final := srv.finalState(31)
-			if state != tc.state || runs.Load() != 1 || requests.Load() != 3 {
+			if state != tc.state || runs.Load() != 1 || requests.Load() != 5 {
 				t.Fatalf("state %s, runs %d, requests %d", state, runs.Load(), requests.Load())
 			}
 			if final.Error == nil || *final.Error != tc.message {

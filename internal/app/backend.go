@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -79,6 +80,8 @@ func pairError(serverURL string, err error) error {
 			"Fix that (see the Bridge's log), make a new code in the server's console and pair again.", ns.cause)
 	case errors.As(err, &apiErr) && (apiErr.Status == http.StatusNotFound || apiErr.Status == http.StatusMethodNotAllowed):
 		return api.Errorf(api.ErrRefused, "that server doesn't know about a Bridge (update it to a version with the Bridge)")
+	case errors.As(err, &apiErr) && apiErr.Status == http.StatusTooManyRequests && apiErr.RetryAfterSet:
+		return api.Errorf(api.ErrRefused, "The server is limiting pairing requests. Try again %s.", pairRetryTime(apiErr.RetryAfter))
 	case errors.As(err, &apiErr) && apiErr.Status < http.StatusInternalServerError:
 		return api.Errorf(api.ErrRefused, "the server refused the pairing: %s", apiErr.Message)
 	case errors.As(err, &apiErr):
@@ -103,6 +106,21 @@ func pairError(serverURL string, err error) error {
 	}
 	// Anything else went wrong on the way (an answer cut off part way).
 	return api.Errorf(api.ErrUnreachable, "Pairing with the server at %s failed (%v). Try again.", addr, err)
+}
+
+func pairRetryTime(wait time.Duration) string {
+	if wait <= 0 {
+		return "now"
+	}
+	unit, name := time.Second, "second"
+	if wait >= time.Minute {
+		unit, name = time.Minute, "minute"
+	}
+	n := (wait + unit - 1) / unit
+	if n != 1 {
+		name += "s"
+	}
+	return fmt.Sprintf("in %d %s", n, name)
 }
 
 // prefixed is s after sep, or "" for an empty s.

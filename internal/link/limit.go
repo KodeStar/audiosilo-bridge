@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"math/rand/v2"
 	"net/http"
 	"time"
@@ -17,6 +18,7 @@ type Backoff struct {
 	Tries      int
 	First, Max time.Duration
 	clamp      bool // wait Max for a longer Retry-After instead of giving up
+	useLease   bool // use the handler's remaining lease when known
 }
 
 // Wait is the wait before asking again after the limited-th 429 (e) in a row.
@@ -33,6 +35,9 @@ func (b Backoff) Wait(e *APIError, limited int) (time.Duration, bool) {
 		wait = b.First
 		for n := 1; n < limited && wait > 0; n++ {
 			if wait > b.Max/2 {
+				if b.clamp {
+					return b.Max, true
+				}
 				return 0, false // the next doubling is over Max
 			}
 			wait *= 2
@@ -47,9 +52,9 @@ func (b Backoff) Wait(e *APIError, limited int) (time.Duration, bool) {
 	return wait, true
 }
 
-// The default bounds one call to three attempts and two minutes of waiting.
-// Jobs with an earlier point at which to defer work supply their own Backoff.
-var requestBackoff = Backoff{Tries: 3, First: time.Second, Max: time.Minute, clamp: true}
+// Outside a known job lease the default allows three attempts. A handler
+// that can defer work earlier supplies its own Backoff.
+var requestBackoff = Backoff{Tries: 3, First: time.Second, Max: time.Minute, clamp: true, useLease: true}
 
 // promptBackoff bounds a call a person waits for on the Bridge's page (Pair,
 // Client.Prompt), whose answer must come inside the page's 60 s write timeout:
@@ -59,6 +64,16 @@ var promptBackoff = Backoff{Tries: 3, First: time.Second, Max: 10 * time.Second}
 
 type retryingKey struct{}
 type lastErrorKey struct{}
+type retryDeadlineKey struct{}
+
+// WithRetryDeadline supplies the end of a running job's 429 budget. Each
+// refused request reads it once, so renewals benefit later requests without
+// keeping one permanently limited request alive. A zero time means no known
+// lease. A nil deadline selects the ordinary request budget for work that can
+// be deferred. Calls with their own Backoff keep their own policy.
+func WithRetryDeadline(ctx context.Context, deadline func() time.Time) context.Context {
+	return context.WithValue(ctx, retryDeadlineKey{}, deadline)
+}
 
 // WithLastError keeps the last refusal's original message after retries.
 // Server-queued handlers use it to report their usual failure to the server.
@@ -87,32 +102,64 @@ func (b Backoff) Do(ctx context.Context, wait func(context.Context, time.Duratio
 		return call(ctx)
 	}
 	ctx = SingleAttempt(ctx)
-	for attempt := 1; ; attempt++ {
-		if err := ctx.Err(); err != nil {
-			return err
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	err := call(ctx)
+	busy, limited := RateLimited(err)
+	if !limited {
+		return err
+	}
+
+	retryCtx := ctx
+	var until time.Time
+	if deadline, _ := ctx.Value(retryDeadlineKey{}).(func() time.Time); b.useLease && deadline != nil {
+		until = deadline()
+		if !until.IsZero() {
+			var cancel context.CancelFunc
+			retryCtx, cancel = context.WithDeadline(ctx, until)
+			defer cancel()
+			b.Tries = math.MaxInt
 		}
-		err := call(ctx)
-		busy, limited := RateLimited(err)
-		if !limited {
-			return err
-		}
+	}
+	attempt := 1
+	for ; ; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		delay, retry := b.Wait(busy, attempt)
 		if !retry {
-			if ctx.Value(lastErrorKey{}) != nil {
-				return err
-			}
-			return fmt.Errorf("the server is still rate limiting the Bridge (attempt %d): %w", attempt, err)
+			break
+		}
+		if !until.IsZero() && busy.RetryAfterSet {
+			delay = busy.RetryAfter // the lease bounds the wait, even for a Retry-After over Max
 		}
 		if !busy.RetryAfterSet && delay > 0 {
 			delay = delay/2 + rand.N(delay-delay/2) //nolint:gosec // jitter only spreads retries
 		}
-		if err := wait(ctx, delay); err != nil {
+		waitErr := wait(retryCtx, delay)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !until.IsZero() && !time.Now().Before(until) {
+			break
+		}
+		if waitErr != nil {
+			return waitErr
+		}
+		next := call(retryCtx)
+		if errors.Is(next, context.DeadlineExceeded) && retryCtx.Err() != nil && ctx.Err() == nil {
+			break // the lease budget ended, return the last refusal
+		}
+		err = next
+		if busy, limited = RateLimited(err); !limited {
 			return err
 		}
 	}
+	if ctx.Value(lastErrorKey{}) != nil {
+		return err
+	}
+	return fmt.Errorf("the server is still rate limiting the Bridge (attempt %d): %w", attempt, err)
 }
 
 // Wait waits d, or until ctx ends. An ended ctx always wins, so a zero wait

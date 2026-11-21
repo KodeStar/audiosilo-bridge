@@ -2127,10 +2127,12 @@ internal/
             Transient is the status rule a retry goes by: a 5xx, a 408 or a 429
             may be answered differently if asked again, any other status not
             (jobs' report retry, mapping.BookReadSettled).
-            Backoff.Do handles a 429 before it reaches a job. By default it
-            makes up to 3 attempts. It waits the Retry-After, capped at 60 s.
-            A missing or invalid header waits 0.5 to 1 s, then 1 to 2 s, with
-            jitter. Cancellation interrupts the wait. Each attempt rebuilds the
+            Backoff.Do handles a 429 before it reaches a job. A required job
+            request retries until 10 s before the lease expiry known at its
+            first refusal. It honors Retry-After within that budget, including
+            waits over a minute. Outside a known lease the default is 3 attempts
+            with waits capped at 60 s. A missing or invalid header starts at
+            0.5 to 1 s and doubles with jitter. Cancellation interrupts the wait. Each attempt rebuilds the
             JSON body and gets its own HTTP timeout (a claim's wait plus 15 s).
             The limiter refuses the request before the route acts, including
             pairing, claiming a job and posting listening events. An exhausted
@@ -2141,7 +2143,8 @@ internal/
             waits for on the page (Pair, Client.Prompt: the Accounts tab's
             people read) waits at most 10 s per 429 and answers a longer
             Retry-After (a pairing lockout's) at once, inside the page's 60 s
-            write timeout.
+            write timeout. The pairing page shows when to try again if the
+            server sent a valid Retry-After.
             Backoff.Wait also supplies the mapping check's hold duration.
             A 2xx it can't use (not the JSON expected, a pairing with no token)
             is ErrUnusableAnswer (bridge#28), worded as its cause, which the
@@ -2364,7 +2367,10 @@ internal/
             pair, an unpair, a refused token) drops the libraries, checks, hold
             and queued checks; a run of the old link still going records nothing
             more and holds nothing.
-  jobs/     the generic runner. After a required request exhausts its 429
+  jobs/     the generic runner. The claim and successful job reports supply
+            lease_until for the handler's link requests, including ConfirmLease
+            before publishing an episode or deleting one for retention.
+            After a required request exhausts its 429
             retries, a server-queued job (its handler a ServerQueuedHandler:
             podcast, Audible and LibriVox kinds) reports failed with the
             handler's usual error. This closes the job so the

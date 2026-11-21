@@ -542,6 +542,17 @@ func TestPairErrors(t *testing.T) {
 			t.Errorf("an older server's %d = %v", status, err)
 		}
 	}
+	limited := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "900")
+		http.Error(w, `{"error":"too many attempts, try again later"}`, http.StatusTooManyRequests)
+	}))
+	defer limited.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	if err := b.Pair(ctx, limited.URL, "code"); !errors.Is(err, api.ErrRefused) ||
+		err.Error() != "The server is limiting pairing requests. Try again in 15 minutes." {
+		t.Errorf("a 15-minute pairing lockout = %v", err)
+	}
 	tlsSrv := httptest.NewTLSServer(http.NotFoundHandler()) // a certificate no system root signed
 	defer tlsSrv.Close()
 	err = b.Pair(context.Background(), tlsSrv.URL, "code")
@@ -620,6 +631,31 @@ func TestPairErrorWording(t *testing.T) {
 	}
 	if pairError(addr, nil) != nil {
 		t.Error("pairError(nil) != nil")
+	}
+}
+
+func TestPairRateLimitWait(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		wait time.Duration
+		set  bool
+		want string
+	}{
+		{"HTTP date", 2*time.Minute - time.Millisecond, true, "The server is limiting pairing requests. Try again in 2 minutes."},
+		{"one minute", time.Minute, true, "The server is limiting pairing requests. Try again in 1 minute."},
+		{"short wait", 1400 * time.Millisecond, true, "The server is limiting pairing requests. Try again in 2 seconds."},
+		{"one second", time.Second, true, "The server is limiting pairing requests. Try again in 1 second."},
+		{"explicit zero", 0, true, "The server is limiting pairing requests. Try again now."},
+		{"no header", 0, false, "the server refused the pairing: too many attempts, try again later"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			refusal := &link.APIError{Status: http.StatusTooManyRequests, Message: "too many attempts, try again later",
+				RetryAfter: tc.wait, RetryAfterSet: tc.set}
+			err := pairError("http://audiosilo:8080", fmt.Errorf("pair: %w", refusal))
+			if !errors.Is(err, api.ErrRefused) || err.Error() != tc.want {
+				t.Fatalf("pairError = %v, want a refusal with %q", err, tc.want)
+			}
+		})
 	}
 }
 

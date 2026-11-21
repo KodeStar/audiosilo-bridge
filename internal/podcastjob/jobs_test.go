@@ -648,7 +648,8 @@ func TestPollRescanWaitsOutTheServersLimit(t *testing.T) {
 			show := "Example Show"
 			poll := jobs.Job{ID: 10, Kind: PollKind, LibraryID: job.LibraryID, Path: &show, Params: json.RawMessage(`{"etag":"\"abc\""}`)}
 			h.newEpisode.Store(true)
-			if _, err := h.handler.PollJob().Run(t.Context(), poll, jobs.LocalReporter()); err != nil {
+			ctx := link.WithRetryDeadline(t.Context(), func() time.Time { return time.Now().Add(time.Minute) })
+			if _, err := h.handler.PollJob().Run(ctx, poll, jobs.LocalReporter()); err != nil {
 				t.Fatal(err)
 			}
 			if got, indexed := scans.Load(), s.isIndexed(3, show); got != min(3, limited+1) || indexed != (limited < 3) {

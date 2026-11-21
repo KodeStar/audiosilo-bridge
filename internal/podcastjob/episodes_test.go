@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -110,6 +111,89 @@ func TestFetchProbePublishPinAndIndexRepair(t *testing.T) {
 	}
 	if _, err := root.Lstat(podcast.AttachmentPath(*job.Path, ".publish.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal(err)
+	}
+}
+
+// Drive the claimed fetch through its real pre-publication PATCH and final
+// report. Progress can renew the claim even while the confirmation is limited.
+func TestFetchConfirmRetriesWithinLease(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		budget   time.Duration
+		want     string
+		attempts int32
+	}{
+		{"four refusals then saved", time.Minute, link.StateDone, 5},
+		{"next retry past the lease budget", 500 * time.Millisecond, link.StateFailed, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h, job := audioHarness(t)
+			audio := data(t, "chap-v24-reverse.mp3")
+			setAudio(h, func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(audio) })
+			var claimed atomic.Bool
+			var confirms atomic.Int32
+			final := make(chan link.Update, 1)
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				switch req.URL.Path {
+				case "/api/v1/bridge/jobs/next":
+					if claimed.Swap(true) {
+						w.WriteHeader(http.StatusNoContent)
+						return
+					}
+					_ = json.NewEncoder(w).Encode(link.Job{ID: job.ID, Kind: job.Kind, Attempts: job.Attempt,
+						Path: job.Path, LibraryID: job.LibraryID, Params: job.Params})
+				case "/api/v1/bridge/jobs/81":
+					var u link.Update
+					if err := json.NewDecoder(req.Body).Decode(&u); err != nil || u.State == nil {
+						t.Errorf("invalid job update: %+v, %v", u, err)
+						w.WriteHeader(http.StatusBadRequest)
+						return
+					}
+					if *u.State == link.StateRunning && u.Error == nil && confirms.Add(1) <= 4 {
+						w.Header().Set("Retry-After", "1")
+						w.WriteHeader(http.StatusTooManyRequests)
+						return
+					}
+					until := time.Now().Add(jobs.DefaultReportRetry + tc.budget).Format(time.RFC3339Nano)
+					_ = json.NewEncoder(w).Encode(link.Job{State: *u.State, LeaseUntil: &until})
+					if *u.State != link.StateRunning {
+						final <- u
+					}
+				default:
+					http.NotFound(w, req)
+				}
+			}))
+			defer api.Close()
+			client, err := link.New(api.URL, "", "dev")
+			if err != nil {
+				t.Fatal(err)
+			}
+			client = client.WithServerID(h.scan.ServerID())
+			r := jobs.New(h.db, func() jobs.Server { return client }, nil, jobs.Options{}, h.handler.FetchJob())
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			done := make(chan struct{})
+			go func() { defer close(done); r.Run(ctx) }()
+			defer func() { cancel(); <-done }()
+			select {
+			case u := <-final:
+				if *u.State != tc.want || confirms.Load() != tc.attempts {
+					t.Fatalf("final report %+v after %d confirms, want %s after %d", u, confirms.Load(), tc.want, tc.attempts)
+				}
+				pin := h.read("Fixture Show").Episodes[0].Fetch
+				saved, err := os.ReadFile(filepath.Join(h.mount, *job.Path))
+				if tc.want == link.StateDone {
+					if err != nil || !bytes.Equal(saved, audio) || pin == nil {
+						t.Fatalf("saved episode: %d bytes, pin %+v, error %v", len(saved), pin, err)
+					}
+				} else if !errors.Is(err, os.ErrNotExist) || pin != nil || u.Error == nil ||
+					*u.Error != "The server could not confirm the job before saving." {
+					t.Fatalf("refused publication: pin %+v, file error %v, report %+v", pin, err, u)
+				}
+			case <-ctx.Done():
+				t.Fatalf("no final report after %d confirms: %v", confirms.Load(), ctx.Err())
+			}
+		})
 	}
 }
 
