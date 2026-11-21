@@ -2383,6 +2383,9 @@ internal/
             its recheck (recheckEvery, 4 s, at most maxRechecks, 3, per long
             poll), so work queued there since waits seconds, not the whole poll.
             Heartbeats with the same eligibility keep the idle poll open.
+            A check stops at its first error (a 401 goes to the app at once),
+            fallback answer or target change, and claims nothing while one
+            stray waits (the long poll stops at two).
             The pending poll retains its slots and receives its answer even
             through a proxy that hides client hang-ups (BR-CLAIM-HOLD).
             A change of link or capacities, including reserve negotiation, or
