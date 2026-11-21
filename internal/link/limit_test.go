@@ -30,6 +30,42 @@ func TestJobRetryDeadline(t *testing.T) {
 	})
 }
 
+// A Retry-After past the lease budget gives up at once rather than holding
+// the job until the budget ends.
+func TestJobRetryPastBudgetGivesUpAtOnce(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		start := time.Now()
+		ctx := WithRetryDeadline(t.Context(), func() time.Time { return start.Add(5 * time.Second) })
+		calls := 0
+		busy := &APIError{Status: http.StatusTooManyRequests, RetryAfter: 10 * time.Second, RetryAfterSet: true}
+		err := Retry(WithLastError(ctx), func(context.Context) error {
+			calls++
+			return busy
+		})
+		if err != busy || calls != 1 || time.Since(start) != 0 {
+			t.Fatalf("returned %v after %d calls in %v", err, calls, time.Since(start))
+		}
+	})
+}
+
+// A lease deadline already past at the first refusal (a lapsed lease, or the
+// Bridge's clock ahead of the server's) leaves the ordinary three asks.
+func TestJobRetryPastDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		start := time.Now()
+		ctx := WithRetryDeadline(t.Context(), func() time.Time { return start.Add(-time.Minute) })
+		calls := 0
+		busy := &APIError{Status: http.StatusTooManyRequests, RetryAfter: 30 * time.Second, RetryAfterSet: true}
+		err := Retry(WithLastError(ctx), func(context.Context) error {
+			calls++
+			return busy
+		})
+		if err != busy || calls != 3 || time.Since(start) != time.Minute {
+			t.Fatalf("past deadline: returned %v after %d calls in %v", err, calls, time.Since(start))
+		}
+	})
+}
+
 func TestJobRetryWithoutHeaderAfterBurst(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		start := time.Now()

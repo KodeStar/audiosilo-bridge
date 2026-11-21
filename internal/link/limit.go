@@ -104,7 +104,9 @@ func (b Backoff) Do(ctx context.Context, wait func(context.Context, time.Duratio
 	// After the first refusal, a known lease turns the budget into time:
 	// callCtx ends at its deadline and the call is asked until then.
 	callCtx, until := ctx, time.Time{}
-	budgetOver := func() bool { return !until.IsZero() && ctx.Err() == nil && !time.Now().Before(until) }
+	budgetOver := func() bool {
+		return !until.IsZero() && ctx.Err() == nil && (callCtx.Err() != nil || !time.Now().Before(until))
+	}
 	var err error
 	attempt := 0
 	for {
@@ -123,11 +125,15 @@ func (b Backoff) Do(ctx context.Context, wait func(context.Context, time.Duratio
 		}
 		if attempt == 1 && b.useLease {
 			if deadline, _ := ctx.Value(retryDeadlineKey{}).(func() time.Time); deadline != nil {
-				if until = deadline(); !until.IsZero() {
+				// A deadline already past (a lapsed lease, or the Bridge's clock
+				// ahead of the server's) leaves the ordinary budget.
+				if until = deadline(); until.After(time.Now()) {
 					var cancel context.CancelFunc
 					callCtx, cancel = context.WithDeadline(ctx, until)
 					defer cancel()
 					b.Tries = math.MaxInt
+				} else {
+					until = time.Time{}
 				}
 			}
 		}
@@ -140,6 +146,9 @@ func (b Backoff) Do(ctx context.Context, wait func(context.Context, time.Duratio
 		}
 		if !busy.RetryAfterSet && delay > 0 {
 			delay = delay/2 + rand.N(delay-delay/2) //nolint:gosec // jitter only spreads retries
+		}
+		if !until.IsZero() && time.Now().Add(delay).After(until) {
+			break // the next ask would come after the lease budget: give up now
 		}
 		waitErr := wait(callCtx, delay)
 		if err := ctx.Err(); err != nil {

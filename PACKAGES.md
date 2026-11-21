@@ -2130,7 +2130,11 @@ internal/
             Backoff.Do handles a 429 before it reaches a job. A required job
             request retries until 10 s before the lease expiry known at its
             first refusal. It honors Retry-After within that budget, including
-            waits over a minute. Outside a known lease the default is 3 attempts
+            waits over a minute, and gives up at once when the next ask would
+            fall past it. A lease expiry
+            already past at the first refusal (a lapsed lease, or the Bridge's
+            clock ahead of the server's) leaves the default. Outside a known
+            lease the default is 3 attempts
             with waits capped at 60 s. A missing or invalid header starts at
             0.5 to 1 s and doubles with jitter. Cancellation interrupts the
             wait. Each attempt rebuilds the JSON body and gets its own HTTP
@@ -2140,9 +2144,10 @@ internal/
             limit wraps the last APIError, which RateLimited recognizes.
             Server-queued handlers get the last error with its original wording.
             Episode rescans, a poll's show rescan and Audible enrichment use
-            Backoff.Do with their own budgets. Only the outer call waits or retries. A call a person
-            waits for on the page (Pair, Client.Prompt: the Accounts tab's
-            people read) waits at most 10 s per 429 and answers a longer
+            Backoff.Do with their own budgets. Only the outer call waits or
+            retries. A call a person waits for on the page (Pair,
+            Client.Prompt: the Accounts tab's people read) waits at most 10 s
+            per 429 and answers a longer
             Retry-After (a pairing lockout's) at once, inside the page's 60 s
             write timeout. The pairing page shows when to try again if the
             server sent a valid Retry-After.
