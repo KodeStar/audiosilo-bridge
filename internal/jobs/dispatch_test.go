@@ -24,7 +24,8 @@ type controlledClaim struct {
 	wait      time.Duration
 	min       *int32
 	answer    chan *link.Job
-	err       error // set before sending the answer
+	err       error      // set before sending the answer
+	fail      chan error // answers the claim with an error instead
 	cancelled chan struct{}
 	cancelJob atomic.Pointer[link.Job]
 	hold      atomic.Bool
@@ -54,7 +55,8 @@ func (s *controlledServer) ClaimMinPriority(ctx context.Context, kinds []string,
 	return s.claim(ctx, kinds, wait, &priority)
 }
 func (s *controlledServer) claim(ctx context.Context, kinds []string, wait time.Duration, priority *int32) (*link.Job, error) {
-	c := &controlledClaim{kinds: slices.Clone(kinds), wait: wait, min: priority, answer: make(chan *link.Job, 1), cancelled: make(chan struct{}), join: make(chan struct{})}
+	c := &controlledClaim{kinds: slices.Clone(kinds), wait: wait, min: priority, answer: make(chan *link.Job, 1), fail: make(chan error, 1),
+		cancelled: make(chan struct{}), join: make(chan struct{})}
 	select {
 	case s.calls <- c:
 	case <-ctx.Done():
@@ -63,6 +65,8 @@ func (s *controlledServer) claim(ctx context.Context, kinds []string, wait time.
 	select {
 	case job := <-c.answer:
 		return job, c.err
+	case err := <-c.fail:
+		return nil, err
 	case <-ctx.Done():
 		close(c.cancelled)
 		if c.hold.Load() {
@@ -196,9 +200,6 @@ func TestReservedSaturationAndRelease(t *testing.T) {
 	await(t, started)
 	assertPools(t, r, map[int64]string{1: LaneDownload, 2: LaneInteractive})
 	close(gates[1])
-	// The freed slot leaves the narrow claim in flight (BR-CLAIM-HOLD); the
-	// next claim asks for the download again.
-	narrow.answer <- nil
 	expanded := srv.next(t, false)
 	if !slices.Contains(expanded.kinds, h.Kind()) {
 		t.Fatal(expanded.kinds)
@@ -1791,7 +1792,6 @@ func TestLiveParkKeepsSlotAndTerminalParkWakesDispatcher(t *testing.T) {
 	}
 	assertPools(t, r, map[int64]string{1: LaneDownload})
 	close(end)
-	narrow.answer <- nil // the freed slot leaves it in flight (BR-CLAIM-HOLD)
 	expanded := srv.next(t, false)
 	if !slices.Contains(expanded.kinds, h.Kind()) {
 		t.Fatal(expanded.kinds)
@@ -2216,9 +2216,6 @@ func TestYieldFreesSlotAndReclaimWaits(t *testing.T) {
 			// The lane takes another download job meanwhile.
 			var c *controlledClaim
 			for c == nil || !slices.Contains(c.kinds, "lane.other") {
-				if c != nil {
-					c.answer <- nil // the yield leaves a narrow claim in flight (BR-CLAIM-HOLD)
-				}
 				c = srv.next(t, false)
 			}
 			c.answer <- claimed(2, other.Kind(), 0)
@@ -2280,7 +2277,7 @@ func TestYieldedStrayFreesItsDispatcher(t *testing.T) {
 	r.mu.Lock()
 	r.running[1] = ru
 	r.waiting[LaneDownload]++
-	if !r.strayWaitingLocked(true) {
+	if !r.strayWaitingLocked(true, false) {
 		t.Error("a waiting stray doesn't hold its dispatcher")
 	}
 	r.mu.Unlock()
@@ -2290,7 +2287,7 @@ func TestYieldedStrayFreesItsDispatcher(t *testing.T) {
 	rep := &Reporter{r: r, ru: ru}
 	rep.Yield()
 	r.mu.Lock()
-	held := r.strayWaitingLocked(true)
+	held := r.strayWaitingLocked(true, false)
 	r.use[LaneDownload]++ // another download took the slot
 	r.mu.Unlock()
 	if held {
@@ -2303,7 +2300,7 @@ func TestYieldedStrayFreesItsDispatcher(t *testing.T) {
 		return waiting == 1
 	})
 	r.mu.Lock()
-	held = r.strayWaitingLocked(true)
+	held = r.strayWaitingLocked(true, false)
 	r.mu.Unlock()
 	if held {
 		t.Fatal("a reclaiming stray holds its dispatcher")
@@ -2333,127 +2330,505 @@ func TestLocalReporterYield(t *testing.T) {
 	}
 }
 
-// BR-CLAIM-HOLD: a lane slot freeing or filling leaves the claim in flight
-// alone (cancelled, a reverse proxy that hides the hang-up lets the server
-// hand the job out anyway, its answer lost until the 2-minute lease lapses);
-// the job it brings runs in the slot the claim reserved, and the runner's stop
-// still cancels a claim at once. A claim that leaves a full lane out waits only
-// leftOutWait (denied: the whole long poll, so a queue in that lane drained a
-// slot's worth per 25 s), one that leaves none out the whole wait (allowed).
-func TestLaneChangesLeaveAnInFlightClaim(t *testing.T) {
+// A proxy can keep a long poll alive after a client hangs up. Serve the
+// freed lane while that poll is still open, and own both replies.
+func TestFreedLaneGetsJobDuringLongPoll(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		srv, db := newControlledServer(false), openStore(t)
+		srv := newControlledServer(false)
 		started := make(chan Job, 4)
-		gates := map[int64]chan struct{}{1: make(chan struct{}), 2: make(chan struct{}), 5: make(chan struct{})}
+		gates := map[int64]chan struct{}{1: make(chan struct{}), 2: make(chan struct{}), 3: make(chan struct{})}
 		opts := testOpts()
-		opts.Wait = link.MaxWait
+		opts.Wait = 800 * time.Millisecond
 		opts.Lanes = map[string]int{LaneLight: 1, LaneDownload: 1}
-		r := New(db, func() Server { return srv }, nil, opts,
+		r := New(openStore(t), func() Server { return srv }, nil, opts,
 			blockingHandler("download", LaneDownload, started, gates), blockingHandler("light", LaneLight, started, gates))
-		ctx, cancel := context.WithCancel(context.Background())
-		var wg sync.WaitGroup
-		done := make(chan struct{})
-		go func() { r.dispatch(ctx, false, &wg); close(done) }()
-		first := srv.next(t, false)
-		if first.wait != link.MaxWait {
-			t.Fatalf("a claim with every lane free waits %v, want %v", first.wait, link.MaxWait)
-		}
-		first.answer <- claimed(1, "light", 0)
+		startControlled(t, r)
+		srv.next(t, false).answer <- claimed(1, "light", 0)
 		await(t, started)
-		inFlight := srv.next(t, false)
-		if !slices.Equal(inFlight.kinds, []string{"download"}) {
-			t.Fatal(inFlight.kinds)
+		pending := srv.next(t, false)
+		if !slices.Equal(pending.kinds, []string{"download"}) || pending.wait != opts.Wait {
+			t.Fatalf("pending claim asks for %v with wait %v", pending.kinds, pending.wait)
 		}
-		if inFlight.wait != leftOutWait {
-			t.Fatalf("a claim leaving the full light lane out waits %v, want %v", inFlight.wait, leftOutWait)
-		}
-		close(gates[1]) // the light slot frees
-		synctest.Wait()
-		// The download slot fills: a resumed job waits behind the claim's reservation.
+
+		// A resumed download must wait behind the slot the long poll holds.
+		var wg sync.WaitGroup
+		ctx, cancel := context.WithCancel(t.Context())
+		defer func() { cancel(); wg.Wait() }()
 		r.launch(ctx, srv, Job{serverID: testServer, ID: 5, Kind: "download", Attempt: 1, Resumed: true}, &wg, "", nil, nil)
 		synctest.Wait()
+		before := time.Now()
+		close(gates[1])
+		probe := srv.next(t, false)
+		if !slices.Equal(probe.kinds, []string{"light"}) || probe.wait != 0 {
+			t.Fatalf("claim for the freed lane asks for %v with wait %v", probe.kinds, probe.wait)
+		}
+		probe.answer <- claimed(2, "light", 0)
+		if j := await(t, started); j.ID != 2 || time.Since(before) != 0 {
+			t.Fatalf("job %d started %v after release", j.ID, time.Since(before))
+		}
 		select {
-		case <-inFlight.cancelled:
-			t.Fatal("a lane change cancelled the claim in flight")
+		case <-pending.cancelled:
+			t.Fatal("opening the light lane abandoned the pending download claim")
 		default:
 		}
-		inFlight.answer <- claimed(2, "download", 0)
-		if j := await(t, started); j.ID != 2 {
-			t.Fatal("the held claim's job didn't run in its reserved slot", j)
+		pending.answer <- claimed(3, "download", 0)
+		if j := await(t, started); j.ID != 3 {
+			t.Fatal("the long poll's job lost its reserved slot", j)
 		}
 		if use, waiting := laneCounts(r, LaneDownload); use != 1 || waiting != 1 {
-			t.Fatalf("download use %d waiting %d, want the claimed job running and the resumed one waiting", use, waiting)
+			t.Fatalf("download use %d waiting %d, want 1 running and 1 waiting", use, waiting)
 		}
-		stopped := srv.next(t, false)
-		cancel()
-		await(t, stopped.cancelled)
-		await(t, done)
-		wg.Wait()
 	})
 }
 
-// The short wait is the light lane's alone, and bounded: a claim leaving the
-// full download lane out waits the whole long poll (denied: a long download
-// kept the server answering a claim every 4 s for its whole run), and
-// maxShortPolls short waits in a row that claim nothing go back to the whole
-// wait (denied: a light lane held by slow jobs did the same) until the light
-// lane's room changes, which short waits again after its next job (allowed).
-func TestShortClaimWaitsAreTheLightLanesAndCapped(t *testing.T) {
+func TestRepairJoinsFreedLaneClaimAndDropsItsOldAnswer(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		srv, db := newControlledServer(false), openStore(t)
-		started := make(chan Job, 4)
+		old, next := newControlledServer(false), newControlledServer(false)
+		old.pairing, next.pairing = "first", "second" // same server
+		var current atomic.Pointer[controlledServer]
+		current.Store(old)
+		opts := testOpts()
+		opts.Pairing = linkPairing(&current)
+		opts.Lanes = map[string]int{LaneLight: 1, LaneDownload: 1}
+		started := make(chan Job, 2)
+		gates := map[int64]chan struct{}{1: make(chan struct{})}
+		db := openStore(t)
+		r := New(db, linkOf(&current), nil, opts,
+			blockingHandler("download", LaneDownload, started, gates), handler{kind: "light", lane: LaneLight})
+		startControlled(t, r)
+		old.next(t, false).answer <- claimed(1, "download", 0)
+		await(t, started)
+		pending := old.next(t, false)
+		close(gates[1])
+		probe := old.next(t, false)
+		probe.hold.Store(true)
+		probe.cancelJob.Store(claimed(2, "download", 0))
+		var release sync.Once
+		join := func() { release.Do(func() { close(probe.join) }) }
+		defer join()
+		current.Store(next)
+		r.Wake()
+		await(t, pending.cancelled)
+		await(t, probe.cancelled)
+		synctest.Wait()
+		select {
+		case <-next.calls:
+			t.Fatal("claimed on the new pairing before the old probe joined")
+		default:
+		}
+		join()
+		next.next(t, false)
+		if sj, err := db.GetServerJob(t.Context(), 2); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("old pairing's answer was recorded: %+v, %v", sj, err)
+		}
+		if old.triesOf(2) != 0 || next.triesOf(2) != 0 {
+			t.Fatal("old pairing's answer was reported")
+		}
+	})
+}
+
+func TestEmptyQueueKeepsOneLongPoll(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		srv := newControlledServer(false)
+		started := make(chan Job, 1)
+		gates := map[int64]chan struct{}{1: make(chan struct{})}
+		opts := testOpts()
+		opts.Wait = 800 * time.Millisecond
+		opts.Lanes = map[string]int{LaneLight: 1, LaneDownload: 1}
+		r := New(openStore(t), func() Server { return srv }, nil, opts,
+			blockingHandler("download", LaneDownload, started, gates), handler{kind: "light", lane: LaneLight})
+		startControlled(t, r)
+		assertIdle := func(pending *controlledClaim) {
+			t.Helper()
+			if pending.wait != opts.Wait {
+				t.Fatalf("idle claim wait %v, want %v", pending.wait, opts.Wait)
+			}
+			for range 3 {
+				r.Wake()
+				time.Sleep(100 * time.Millisecond)
+				synctest.Wait()
+				select {
+				case c := <-srv.calls:
+					t.Fatalf("extra idle request for %v (wait %v)", c.kinds, c.wait)
+				case <-pending.cancelled:
+					t.Fatal("idle long poll was cancelled")
+				default:
+				}
+			}
+		}
+		first := srv.next(t, false)
+		assertIdle(first)
+		first.answer <- claimed(1, "download", 0)
+		await(t, started)
+		pending := srv.next(t, false)
+		assertIdle(pending)
+		close(gates[1])
+		probe := srv.next(t, false)
+		if probe.wait != 0 || !slices.Equal(probe.kinds, []string{"download"}) {
+			t.Fatalf("expected one check for downloads, got %v (wait %v)", probe.kinds, probe.wait)
+		}
+		probe.answer <- nil
+		assertIdle(pending)
+		pending.answer <- nil
+		all := srv.next(t, false)
+		if !slices.Equal(all.kinds, []string{"download", "light"}) {
+			t.Fatal("next long poll omitted an idle lane", all.kinds)
+		}
+		assertIdle(all)
+	})
+}
+
+// A freed lane that answered empty is asked again recheckEvery later (denied:
+// a job queued there since waited for the long poll to return, up to 25 s), at
+// most maxRechecks times beside one long poll (denied: a free lane with
+// nothing queued asked every few seconds for the whole poll).
+func TestEmptyFreedLaneIsRecheckedBoundedly(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		srv := newControlledServer(false)
+		started := make(chan Job, 2)
+		gates := map[int64]chan struct{}{1: make(chan struct{}), 2: make(chan struct{})}
+		opts := testOpts()
+		opts.Wait = link.MaxWait
+		opts.Lanes = map[string]int{LaneLight: 1, LaneDownload: 1}
+		r := New(openStore(t), func() Server { return srv }, nil, opts,
+			blockingHandler("download", LaneDownload, started, gates), handler{kind: "light", lane: LaneLight})
+		startControlled(t, r)
+		srv.next(t, false).answer <- claimed(1, "download", 0)
+		await(t, started)
+		pending := srv.next(t, false)
+		// check is the next check of the download lane, made after (none
+		// before it).
+		check := func(after time.Duration) *controlledClaim {
+			t.Helper()
+			if after > 0 {
+				time.Sleep(after - time.Millisecond)
+				synctest.Wait()
+				select {
+				case c := <-srv.calls:
+					t.Fatalf("checked %v before its recheck", c.kinds)
+				default:
+				}
+				time.Sleep(time.Millisecond)
+			}
+			c := srv.next(t, false)
+			if !slices.Equal(c.kinds, []string{"download"}) || c.wait != 0 {
+				t.Fatalf("check asks for %v with wait %v", c.kinds, c.wait)
+			}
+			return c
+		}
+		close(gates[1])
+		check(0).answer <- nil
+		check(recheckEvery).answer <- claimed(2, "download", 0) // queued since the empty answer
+		if j := await(t, started); j.ID != 2 {
+			t.Fatal("the recheck's job didn't run", j)
+		}
+		close(gates[2])
+		check(0).answer <- nil
+		for range maxRechecks - 1 {
+			check(recheckEvery).answer <- nil
+		}
+		time.Sleep(3 * recheckEvery)
+		synctest.Wait()
+		select {
+		case c := <-srv.calls:
+			t.Fatalf("checked %v past %d rechecks", c.kinds, maxRechecks)
+		case <-pending.cancelled:
+			t.Fatal("the long poll was cancelled")
+		default:
+		}
+		pending.answer <- nil
+		if all := srv.next(t, false); !slices.Equal(all.kinds, []string{"download", "light"}) || all.wait != opts.Wait {
+			t.Fatalf("next long poll asks for %v with wait %v", all.kinds, all.wait)
+		}
+	})
+}
+
+// Unpairing or stopping with the long poll and a freed lane's check both in
+// flight cancels and joins both. After an unpair neither answer is recorded or
+// run (denied: a job bound to the ended pairing) and nothing more is claimed;
+// after a stop both are recorded for the next start and neither runs.
+func TestUnpairAndStopEndBothClaimsInFlight(t *testing.T) {
+	for _, mode := range []string{"unpair", "stop"} {
+		t.Run(mode, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				srv := newControlledServer(false)
+				srv.pairing = "p1"
+				var current atomic.Pointer[controlledServer]
+				current.Store(srv)
+				opts := testOpts()
+				opts.Pairing = linkPairing(&current)
+				opts.Lanes = map[string]int{LaneLight: 1, LaneDownload: 1}
+				started := make(chan Job, 4)
+				gates := map[int64]chan struct{}{1: make(chan struct{})}
+				db := openStore(t)
+				r := New(db, linkOf(&current), nil, opts,
+					blockingHandler("download", LaneDownload, started, gates), blockingHandler("light", LaneLight, started, gates))
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				var wg sync.WaitGroup
+				done := make(chan struct{})
+				go func() { r.dispatch(ctx, false, &wg); close(done) }()
+				srv.next(t, false).answer <- claimed(1, "download", 0)
+				await(t, started)
+				pending := srv.next(t, false)
+				pending.cancelJob.Store(claimed(2, "light", 0))
+				close(gates[1])
+				probe := srv.next(t, false)
+				if probe.wait != 0 {
+					t.Fatalf("expected the freed lane's check, got %v (wait %v)", probe.kinds, probe.wait)
+				}
+				probe.cancelJob.Store(claimed(3, "download", 0))
+				if mode == "unpair" {
+					current.Store(nil) // the app forgets the pairing first
+					r.Unpaired(srv)
+				} else {
+					cancel()
+				}
+				await(t, pending.cancelled)
+				await(t, probe.cancelled)
+				synctest.Wait()
+				if mode == "unpair" {
+					select {
+					case c := <-srv.calls:
+						t.Fatalf("claimed %v after the unpair", c.kinds)
+					default:
+					}
+					cancel()
+				}
+				await(t, done)
+				wg.Wait()
+				select {
+				case j := <-started:
+					t.Fatal("a claim answered as it ended ran", j)
+				default:
+				}
+				for _, id := range []int64{2, 3} {
+					_, err := db.GetServerJob(t.Context(), id)
+					if recorded := err == nil; recorded != (mode == "stop") || (err != nil && !errors.Is(err, store.ErrNotFound)) {
+						t.Fatalf("job %d recorded = %v (%v)", id, recorded, err)
+					}
+				}
+			})
+		})
+	}
+}
+
+// A capacity change (as a reserve negotiation's) with the long poll and a
+// freed lane's check both in flight cancels both, and the jobs their answers
+// bring as they are cancelled still run under their claims (denied: dropped,
+// each lease left to lapse), before the next claim goes out.
+func TestCapacityChangeEndsBothClaimsAndKeepsTheirAnswers(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		srv := newControlledServer(false)
+		started := make(chan Job, 3)
 		gates := map[int64]chan struct{}{1: make(chan struct{}), 2: make(chan struct{}), 3: make(chan struct{})}
 		opts := testOpts()
 		opts.Wait = link.MaxWait
 		opts.Lanes = map[string]int{LaneLight: 1, LaneDownload: 1}
-		r := New(db, func() Server { return srv }, nil, opts,
+		r := New(openStore(t), func() Server { return srv }, nil, opts,
 			blockingHandler("download", LaneDownload, started, gates), blockingHandler("light", LaneLight, started, gates))
-		ctx, cancel := context.WithCancel(context.Background())
-		var wg sync.WaitGroup
-		done := make(chan struct{})
-		go func() { r.dispatch(ctx, false, &wg); close(done) }()
+		startControlled(t, r)
 		srv.next(t, false).answer <- claimed(1, "download", 0)
 		await(t, started)
-		c := srv.next(t, false)
-		if !slices.Equal(c.kinds, []string{"light"}) || c.wait != link.MaxWait {
-			t.Fatalf("a claim leaving the full download lane out asks %v for %v, want the whole wait", c.kinds, c.wait)
+		pending := srv.next(t, false)
+		close(gates[1])
+		probe := srv.next(t, false)
+		if !slices.Equal(probe.kinds, []string{"download"}) || probe.wait != 0 {
+			t.Fatalf("expected the freed lane's check, got %v (wait %v)", probe.kinds, probe.wait)
 		}
-		c.answer <- claimed(2, "light", 0)
-		await(t, started)
-		close(gates[1]) // the download slot frees; the light lane stays full
-		synctest.Wait()
-		c = srv.next(t, false)
-		if !slices.Equal(c.kinds, []string{"download"}) {
-			t.Fatal(c.kinds)
+		pending.cancelJob.Store(claimed(3, "light", 0))
+		probe.cancelJob.Store(claimed(2, "download", 0))
+		r.setCapacity(LanePipeline, 1)
+		await(t, pending.cancelled)
+		await(t, probe.cancelled)
+		ran := map[int64]bool{}
+		for range 2 {
+			ran[await(t, started).ID] = true
 		}
-		for i := range maxShortPolls {
-			if c.wait != leftOutWait {
-				t.Fatalf("short poll %d waits %v, want %v", i+1, c.wait, leftOutWait)
-			}
-			c.answer <- nil
-			c = srv.next(t, false)
+		if !ran[2] || !ran[3] {
+			t.Fatalf("ran %v, want both answers' jobs", ran)
 		}
-		if c.wait != link.MaxWait {
-			t.Fatalf("after %d empty short polls the claim waits %v, want the whole wait", maxShortPolls, c.wait)
-		}
-		close(gates[2]) // the light slot frees under the claim in flight
-		synctest.Wait()
-		c.answer <- nil
-		c = srv.next(t, false)
-		if !slices.Equal(c.kinds, []string{"download", "light"}) || c.wait != link.MaxWait {
-			t.Fatalf("a claim with every lane free asks %v for %v", c.kinds, c.wait)
-		}
-		c.answer <- claimed(3, "light", 0)
-		await(t, started)
-		c = srv.next(t, false)
-		if c.wait != leftOutWait {
-			t.Fatalf("the light lane full again: the claim waits %v, want %v", c.wait, leftOutWait)
-		}
-		cancel()
-		await(t, c.cancelled)
-		await(t, done)
-		wg.Wait()
+		assertPools(t, r, map[int64]string{2: LaneDownload, 3: LaneLight})
 	})
+}
+
+// A 401 on a freed lane's check tells the app once, with the link that got it
+// (denied: the idle long poll heard of the refusal only when its wait ended).
+// The app then hands out no link and wakes the runner, which cancels the long
+// poll and claims nothing more.
+func TestFreedLaneCheckRefusedTellsTheAppOnce(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		srv := newControlledServer(false)
+		var refused atomic.Bool
+		var calls atomic.Int32
+		started := make(chan Job, 1)
+		gates := map[int64]chan struct{}{1: make(chan struct{})}
+		opts := testOpts()
+		opts.Wait = link.MaxWait
+		opts.Lanes = map[string]int{LaneLight: 1, LaneDownload: 1}
+		var r *Runner
+		r = New(openStore(t), func() Server {
+			if refused.Load() {
+				return nil
+			}
+			return srv
+		}, func(s Server) {
+			if s != Server(srv) {
+				t.Errorf("the refused link = %v, want the one that got the 401", s)
+			}
+			calls.Add(1)
+			refused.Store(true) // the app's Conn.Refuse, then its Wake
+			r.Wake()
+		}, opts, blockingHandler("download", LaneDownload, started, gates), handler{kind: "light", lane: LaneLight})
+		startControlled(t, r)
+		srv.next(t, false).answer <- claimed(1, "download", 0)
+		await(t, started)
+		pending := srv.next(t, false)
+		close(gates[1])
+		probe := srv.next(t, false)
+		if !slices.Equal(probe.kinds, []string{"download"}) || probe.wait != 0 {
+			t.Fatalf("expected the freed lane's check, got %v (wait %v)", probe.kinds, probe.wait)
+		}
+		probe.fail <- link.ErrUnauthorized
+		await(t, pending.cancelled)
+		time.Sleep(link.MaxWait)
+		synctest.Wait()
+		select {
+		case c := <-srv.calls:
+			t.Fatalf("claimed %v after the refusal", c.kinds)
+		default:
+		}
+		if n := calls.Load(); n != 1 {
+			t.Fatalf("the app was told of the refusal %d times, want once", n)
+		}
+	})
+}
+
+// A freed lane's check claims beside a long poll that may bring a stray of its
+// own, so one waiting stray stops it where the long poll stops at two.
+func TestFreedLaneCheckStopsAtOneStray(t *testing.T) {
+	r := New(nil, func() Server { return nil }, nil, testOpts(), handler{kind: "light", lane: LaneLight})
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.running[1] = &run{job: Job{ID: 1}, lane: LaneLight, stray: true}
+	if r.strayWaitingLocked(false, false) {
+		t.Error("one waiting stray stops the ordinary long poll")
+	}
+	if !r.strayWaitingLocked(false, true) {
+		t.Error("one waiting stray leaves the freed lane's check claiming")
+	}
+}
+
+// backlogServer honours the kind filter and wait. Completing a poll queues
+// two episode fetches and wakes any claim that can take one.
+type backlogServer struct {
+	*fakeServer
+	polls int
+}
+
+const claimTime = time.Millisecond
+
+func (s *backlogServer) Claim(ctx context.Context, kinds []string, wait time.Duration) (*link.Job, error) {
+	time.Sleep(claimTime) // round trip on the test clock
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	for {
+		s.mu.Lock()
+		i := slices.IndexFunc(s.queue, func(j *link.Job) bool { return slices.Contains(kinds, j.Kind) })
+		if i >= 0 {
+			job := s.queue[i]
+			s.queue = slices.Delete(s.queue, i, i+1)
+			s.mu.Unlock()
+			return job, nil
+		}
+		changed := s.changed
+		s.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-timer.C:
+			return nil, nil
+		case <-changed:
+		}
+	}
+}
+
+func (s *backlogServer) UpdateJob(ctx context.Context, id int64, u link.Update) (*link.Job, error) {
+	if id <= int64(s.polls) && u.State != nil && *u.State == link.StateDone {
+		last := int64(s.polls) + 2*id
+		s.add(claimed(last-1, "podcast.fetch", 0))
+		s.add(claimed(last, "podcast.fetch", 0))
+	}
+	return s.fakeServer.UpdateJob(ctx, id, u) // wakes claims after queueing the fetches
+}
+
+func TestDispatchDrainsQuickJobBacklog(t *testing.T) {
+	// Each poll queues two fetches (backlogServer.UpdateJob); with no polls
+	// the fetches are queued up front.
+	for _, tc := range []struct {
+		name           string
+		polls, fetches int
+	}{
+		{"one_slot_download", 0, 12},
+		{"podcast_polls_then_fetches", 6, 12},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				fetches := tc.fetches
+				const jobTime = 20 * time.Millisecond
+				srv := &backlogServer{fakeServer: newFakeServer(), polls: tc.polls}
+				for i := range tc.polls {
+					srv.add(claimed(int64(i+1), "podcast.poll", 0))
+				}
+				switch {
+				case tc.polls == 0:
+					for i := range fetches {
+						srv.add(claimed(int64(i+1), "podcast.fetch", 0))
+					}
+				case fetches != 2*tc.polls:
+					t.Fatalf("%d polls queue %d fetches, not %d", tc.polls, 2*tc.polls, fetches)
+				}
+				opts := testOpts()
+				opts.Wait = 800 * time.Millisecond
+				opts.Lanes = map[string]int{LaneLight: 2, LaneDownload: 1, LanePipeline: 1}
+				done := make(chan Job, tc.polls+fetches)
+				quick := func(kind, lane string) handler {
+					var running atomic.Int32
+					return handler{kind: kind, lane: lane, fn: func(_ context.Context, j Job, _ *Reporter) (any, error) {
+						if n := running.Add(1); n > int32(opts.Lanes[lane]) {
+							t.Errorf("%d jobs running in %s", n, lane)
+						}
+						defer running.Add(-1)
+						time.Sleep(jobTime)
+						done <- j
+						return nil, nil
+					}}
+				}
+				r := New(openStore(t), func() Server { return srv }, nil, opts,
+					quick("podcast.poll", LaneLight), quick("podcast.fetch", LaneDownload), handler{kind: "pipeline", lane: LanePipeline})
+				start := time.Now()
+				startControlled(t, r)
+				// Even running every job serially, with two round trips per job,
+				// finishes before a single narrow long poll would time out.
+				budget := time.Duration(tc.polls+fetches) * (jobTime + 2*claimTime)
+				deadline := time.After(budget + claimTime)
+				for i := range tc.polls + fetches {
+					select {
+					case <-done:
+					case <-deadline:
+						t.Fatalf("%d of %d jobs finished in %v", i, tc.polls+fetches, time.Since(start))
+					}
+				}
+				synctest.Wait()
+				for i := range tc.polls + fetches {
+					if state, _ := srv.finalState(int64(i + 1)); state != link.StateDone {
+						t.Fatalf("job %d final state %q", i+1, state)
+					}
+				}
+				t.Logf("%d polls and %d fetches completed in %v (long poll %v)", tc.polls, fetches, time.Since(start), opts.Wait)
+			})
+		})
+	}
 }
 
 // BR-CLAIM-HOLD: a job that arrives with no room left in its lane (the claim
