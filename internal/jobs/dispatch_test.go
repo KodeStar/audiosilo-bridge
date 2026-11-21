@@ -2509,6 +2509,91 @@ func TestEmptyFreedLaneIsRecheckedBoundedly(t *testing.T) {
 	})
 }
 
+// Unpairing or stopping with the long poll and a freed lane's check both in
+// flight cancels and joins both. After an unpair neither answer is recorded or
+// run (denied: a job bound to the ended pairing) and nothing more is claimed;
+// after a stop both are recorded for the next start and neither runs.
+func TestUnpairAndStopEndBothClaimsInFlight(t *testing.T) {
+	for _, mode := range []string{"unpair", "stop"} {
+		t.Run(mode, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				srv := newControlledServer(false)
+				srv.pairing = "p1"
+				var current atomic.Pointer[controlledServer]
+				current.Store(srv)
+				opts := testOpts()
+				opts.Pairing = linkPairing(&current)
+				opts.Lanes = map[string]int{LaneLight: 1, LaneDownload: 1}
+				started := make(chan Job, 4)
+				gates := map[int64]chan struct{}{1: make(chan struct{})}
+				db := openStore(t)
+				r := New(db, linkOf(&current), nil, opts,
+					blockingHandler("download", LaneDownload, started, gates), blockingHandler("light", LaneLight, started, gates))
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				var wg sync.WaitGroup
+				done := make(chan struct{})
+				go func() { r.dispatch(ctx, false, &wg); close(done) }()
+				srv.next(t, false).answer <- claimed(1, "download", 0)
+				await(t, started)
+				pending := srv.next(t, false)
+				pending.cancelJob.Store(claimed(2, "light", 0))
+				close(gates[1])
+				probe := srv.next(t, false)
+				if probe.wait != 0 {
+					t.Fatalf("expected the freed lane's check, got %v (wait %v)", probe.kinds, probe.wait)
+				}
+				probe.cancelJob.Store(claimed(3, "download", 0))
+				if mode == "unpair" {
+					current.Store(nil) // the app forgets the pairing first
+					r.Unpaired(srv)
+				} else {
+					cancel()
+				}
+				await(t, pending.cancelled)
+				await(t, probe.cancelled)
+				synctest.Wait()
+				if mode == "unpair" {
+					select {
+					case c := <-srv.calls:
+						t.Fatalf("claimed %v after the unpair", c.kinds)
+					default:
+					}
+					cancel()
+				}
+				await(t, done)
+				wg.Wait()
+				select {
+				case j := <-started:
+					t.Fatal("a claim answered as it ended ran", j)
+				default:
+				}
+				for _, id := range []int64{2, 3} {
+					_, err := db.GetServerJob(t.Context(), id)
+					if recorded := err == nil; recorded != (mode == "stop") || (err != nil && !errors.Is(err, store.ErrNotFound)) {
+						t.Fatalf("job %d recorded = %v (%v)", id, recorded, err)
+					}
+				}
+			})
+		})
+	}
+}
+
+// A freed lane's check claims beside a long poll that may bring a stray of its
+// own, so one waiting stray stops it where the long poll stops at two.
+func TestFreedLaneCheckStopsAtOneStray(t *testing.T) {
+	r := New(nil, func() Server { return nil }, nil, testOpts(), handler{kind: "light", lane: LaneLight})
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.running[1] = &run{job: Job{ID: 1}, lane: LaneLight, stray: true}
+	if r.strayWaitingLocked(false, false) {
+		t.Error("one waiting stray stops the ordinary long poll")
+	}
+	if !r.strayWaitingLocked(false, true) {
+		t.Error("one waiting stray leaves the freed lane's check claiming")
+	}
+}
+
 // backlogServer honours the kind filter and wait. Completing a poll queues
 // two episode fetches and wakes any claim that can take one.
 type backlogServer struct {
