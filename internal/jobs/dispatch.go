@@ -86,19 +86,14 @@ type laneProbe struct {
 }
 
 func (p *laneProbe) needed(q *claimRequest) bool {
-	if !sameTarget(q, p.pending) {
-		return false
-	}
-	for _, lane := range q.lanes {
-		if !slices.Contains(p.emptyLanes, lane) {
-			return true
-		}
-	}
-	return false
+	return sameTarget(q, p.pending) &&
+		slices.ContainsFunc(q.lanes, func(lane string) bool { return !slices.Contains(p.emptyLanes, lane) })
 }
 
 // request snapshots eligibility and optionally reserves it under the same lock.
 // own is excluded when checking whether an outstanding claim is still valid.
+// requestLanes with a probe snapshots only the lanes its pending poll omitted;
+// own and probe are never both set.
 func (r *Runner) request(reserve, hold bool, own *claimRequest) (*claimRequest, <-chan struct{}) {
 	return r.requestLanes(reserve, hold, own, nil)
 }
@@ -287,14 +282,16 @@ func (r *Runner) claimFreedLanes(ctx context.Context, pending *claimRequest, fin
 		}
 		result, refreshed := r.poll(ctx, q, changed, 0)
 		r.finishClaim(ctx, q, result.job, wg)
+		// The idle long poll may not see the 401 until its wait ends.
 		if errors.Is(result.err, link.ErrUnauthorized) && !refreshed {
 			r.onUnauthorized(q.srv)
 		}
 		if refreshed || result.err != nil || q.fallback {
 			return // leave retries to the regular dispatcher
 		}
-		probe.emptyLanes = nil
-		if result.job == nil {
+		if result.job != nil {
+			probe.emptyLanes = nil // the lanes may hold more
+		} else {
 			probe.emptyLanes = q.lanes
 		}
 	}

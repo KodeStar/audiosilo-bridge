@@ -2354,12 +2354,12 @@ func TestRepairJoinsFreedLaneClaimAndDropsItsOldAnswer(t *testing.T) {
 		var current atomic.Pointer[controlledServer]
 		current.Store(old)
 		opts := testOpts()
-		opts.Pairing = func() Pairing { return Pairing{ID: current.Load().PairingID(), ServerID: testServer} }
+		opts.Pairing = linkPairing(&current)
 		opts.Lanes = map[string]int{LaneLight: 1, LaneDownload: 1}
 		started := make(chan Job, 2)
 		gates := map[int64]chan struct{}{1: make(chan struct{})}
 		db := openStore(t)
-		r := New(db, func() Server { return current.Load() }, nil, opts,
+		r := New(db, linkOf(&current), nil, opts,
 			blockingHandler("download", LaneDownload, started, gates), handler{kind: "light", lane: LaneLight})
 		startControlled(t, r)
 		old.next(t, false).answer <- claimed(1, "download", 0)
@@ -2488,25 +2488,30 @@ func (s *backlogServer) UpdateJob(ctx context.Context, id int64, u link.Update) 
 }
 
 func TestDispatchDrainsQuickJobBacklog(t *testing.T) {
+	// Each poll queues two fetches (backlogServer.UpdateJob); with no polls
+	// the fetches are queued up front.
 	for _, tc := range []struct {
-		name  string
-		polls int
+		name           string
+		polls, fetches int
 	}{
-		{"one_slot_download", 0},
-		{"podcast_polls_then_fetches", 6},
+		{"one_slot_download", 0, 12},
+		{"podcast_polls_then_fetches", 6, 12},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				const fetches = 12
+				fetches := tc.fetches
 				const jobTime = 20 * time.Millisecond
 				srv := &backlogServer{fakeServer: newFakeServer(), polls: tc.polls}
 				for i := range tc.polls {
 					srv.add(claimed(int64(i+1), "podcast.poll", 0))
 				}
-				if tc.polls == 0 {
+				switch {
+				case tc.polls == 0:
 					for i := range fetches {
 						srv.add(claimed(int64(i+1), "podcast.fetch", 0))
 					}
+				case fetches != 2*tc.polls:
+					t.Fatalf("%d polls queue %d fetches, not %d", tc.polls, 2*tc.polls, fetches)
 				}
 				opts := testOpts()
 				opts.Wait = 800 * time.Millisecond
