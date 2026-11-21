@@ -330,9 +330,15 @@ func (r *Runner) claimFreedLanes(ctx context.Context, pending *claimRequest, fin
 		}
 		result, refreshed := r.poll(ctx, q, changed, 0)
 		r.finishClaim(ctx, q, result.job, wg)
-		// The idle long poll may not see the 401 until its wait ends.
-		if errors.Is(result.err, link.ErrUnauthorized) && !refreshed {
+		switch {
+		case refreshed:
+		case errors.Is(result.err, link.ErrUnauthorized):
+			// The idle long poll may not see the 401 until its wait ends.
 			r.onUnauthorized(q.srv)
+		case result.err != nil:
+			// The long poll's own answer retries and logs a lasting failure;
+			// until then a freed lane waits for it, as before these checks.
+			r.log.Debug("bridge: checking a freed lane failed", "err", result.err)
 		}
 		if refreshed || result.err != nil || q.fallback {
 			return // leave retries to the regular dispatcher
