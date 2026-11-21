@@ -112,11 +112,10 @@ func pairRetryTime(wait time.Duration) string {
 	if wait <= 0 {
 		return "now"
 	}
-	unit, name := time.Second, "second"
-	if wait >= time.Minute {
-		unit, name = time.Minute, "minute"
+	n, name := (wait+time.Second-1)/time.Second, "second"
+	if n >= 60 {
+		n, name = (n+59)/60, "minute"
 	}
-	n := (wait + unit - 1) / unit
 	if n != 1 {
 		name += "s"
 	}
