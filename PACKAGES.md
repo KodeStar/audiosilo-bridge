@@ -2376,20 +2376,22 @@ internal/
             The reserve never borrows background work; ordinary workers accept
             every priority. Each outstanding claim reserves admission in all
             requested lanes and transfers its selected slot atomically to its run.
-            BR-CLAIM-HOLD: only a changed target (sameTarget: the link, the
-            reserve's negotiation, the capacities) or the runner's stop cancels
-            and joins a long poll before reissue; a lane slot freeing or filling
-            (the kinds with room) lets it finish, as a cancelled poll a reverse
-            proxy doesn't pass on as a hang-up still hands the job out, its answer
-            lost until the 2-minute lease lapsed (seen live as ~95 s stalls). A
-            claim that leaves the light lane out (full, or a job waiting there)
-            waits only leftOutWait (4 s), not the whole 25 s, so a slot freeing
-            there is asked for soon (an OPML import's follows); the download and
-            pipeline lanes' long jobs don't shorten it. maxShortPolls (3) short
-            waits in a row that claim nothing go back to the whole wait until
-            the request changes (a lane's room), bounding the claim rate. The
-            claim's reservation keeps a slot for what it brings; a pause between
-            claims (pauseClaims) still ends at any eligibility change. A job
+            Each dispatcher holds one long poll. When a lane the poll omitted
+            frees, claimFreedLanes checks the available uncovered lanes with
+            wait=0, one request at a time. It drains matching jobs and remembers
+            an empty answer until eligibility changes, the long poll returns or
+            its recheck (recheckEvery, 4 s, at most maxRechecks, 3, per long
+            poll), so work queued there since waits seconds, not the whole poll.
+            Heartbeats with the same eligibility keep the idle poll open.
+            A check stops at its first error (a 401 goes to the app at once),
+            fallback answer or target change, and claims nothing while one
+            stray waits (the long poll stops at two).
+            The pending poll retains its slots and receives its answer even
+            through a proxy that hides client hang-ups (BR-CLAIM-HOLD).
+            A change of link or capacities, including reserve negotiation, or
+            the runner stopping cancels the outstanding calls. Both calls join
+            before the next long poll. A pause between regular claims
+            (pauseClaims) ends early on an eligibility change. A job
             racing cancellation is started under the original claim and takes its
             reserved slot, or, with no room left (a capacity change), waits for
             one with its lease renewed, never dropped nor run over capacity;

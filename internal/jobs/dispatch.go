@@ -40,8 +40,8 @@ func (r *Runner) capacities(srv Server) map[string]int {
 }
 
 // A claim reserves one possible admission in every lane it requests. There is
-// one ordinary dispatcher and one reserved dispatcher, never unbounded waiters
-// holding newly claimed jobs. A refresh retains admission until the old call
+// one long poll per dispatcher. A probe for a lane the poll omitted reserves
+// its own admission. A refresh retains admission until the old call
 // has returned, including a job racing its cancellation.
 type claimRequest struct {
 	srv         Server
@@ -50,10 +50,7 @@ type claimRequest struct {
 	lanes       []string
 	capacities  map[string]int
 	held        bool
-	// leftOut: the light lane was left out (full, or a job waits there), so
-	// the claim may wait briefly (leftOutWait): the room a quick job frees
-	// there is asked for soon, not after a whole long poll.
-	leftOut bool
+	partial     bool // a lane with handlers was temporarily unavailable
 	// fallback keeps the original claim identity but uses ordinary admission
 	// when the server returned a job outside this request's eligibility.
 	fallback bool
@@ -80,9 +77,73 @@ func (r *Runner) roomLocked(caps map[string]int, lane string, own *claimRequest)
 	return true
 }
 
+// An uncovered lane that answered empty is asked again recheckEvery later, at
+// most maxRechecks times beside one long poll: work queued there since (an
+// OPML import's next follows, an admin's check) would otherwise wait for the
+// poll to return, up to its whole wait (link.MaxWait, 25 s). A free lane with
+// nothing queued costs at most maxRechecks more requests per long poll.
+const (
+	recheckEvery = 4 * time.Second
+	maxRechecks  = 3
+)
+
+// A narrow long poll keeps its reservations until the server answers. Beside
+// it, probe only the lanes it missed. Remember an empty answer so unrelated
+// wakes (including heartbeats and our own unreserve) issue no more requests
+// until its bounded recheck.
+type laneProbe struct {
+	pending    *claimRequest
+	emptyLanes []string
+	recheck    *time.Timer // armed by an empty answer while rechecks remain
+	rechecks   int
+}
+
+func (p *laneProbe) needed(q *claimRequest) bool {
+	return sameTarget(q, p.pending) &&
+		slices.ContainsFunc(q.lanes, func(lane string) bool { return !slices.Contains(p.emptyLanes, lane) })
+}
+
+// empty remembers lanes that answered empty and arms their recheck.
+func (p *laneProbe) empty(lanes []string) {
+	p.emptyLanes = lanes
+	if p.rechecks < maxRechecks {
+		p.rechecks++
+		p.stop()
+		p.recheck = time.NewTimer(recheckEvery)
+	}
+}
+
+// keep forgets the empty lanes not in lanes: one that lost its room is asked
+// again once it frees, and a snapshot that wasn't asked (another target)
+// marks no lane empty.
+func (p *laneProbe) keep(lanes []string) {
+	p.emptyLanes = slices.DeleteFunc(slices.Clone(p.emptyLanes), func(lane string) bool { return !slices.Contains(lanes, lane) })
+}
+
+// due is the armed recheck while an empty lane waits for it, else nil.
+func (p *laneProbe) due() <-chan time.Time {
+	if p.recheck == nil || len(p.emptyLanes) == 0 {
+		return nil
+	}
+	return p.recheck.C
+}
+
+func (p *laneProbe) stop() {
+	if p.recheck != nil {
+		p.recheck.Stop()
+		p.recheck = nil
+	}
+}
+
 // request snapshots eligibility and optionally reserves it under the same lock.
 // own is excluded when checking whether an outstanding claim is still valid.
+// requestLanes with a probe snapshots only the lanes its pending poll omitted;
+// own and probe are never both set.
 func (r *Runner) request(reserve, hold bool, own *claimRequest) (*claimRequest, <-chan struct{}) {
+	return r.requestLanes(reserve, hold, own, nil)
+}
+
+func (r *Runner) requestLanes(reserve, hold bool, own *claimRequest, probe *laneProbe) (*claimRequest, <-chan struct{}) {
 	// Read the external pairing without mu, but detect a wake during that read.
 	// Otherwise a re-pair between server() and locking could be missed for a
 	// whole long poll. The app changes its pairing before calling Wake.
@@ -98,7 +159,7 @@ func (r *Runner) request(reserve, hold bool, own *claimRequest) (*claimRequest, 
 	}
 	defer r.mu.Unlock()
 	q := &claimRequest{srv: srv, interactive: reserve, capacities: r.capacities(srv)}
-	if srv != nil && (!reserve || supportsPriority(srv)) && !r.strayWaitingLocked(reserve) {
+	if srv != nil && (!reserve || supportsPriority(srv)) && !r.strayWaitingLocked(reserve, probe != nil) {
 		for kind, h := range r.handlers {
 			lane := h.Lane()
 			if reserve {
@@ -107,18 +168,21 @@ func (r *Runner) request(reserve, hold bool, own *claimRequest) (*claimRequest, 
 				}
 				lane = LaneInteractive
 			}
+			if probe != nil && slices.Contains(probe.pending.lanes, lane) {
+				continue
+			}
 			if r.waiting[lane] == 0 && r.roomLocked(q.capacities, lane, own) {
 				q.kinds = append(q.kinds, kind)
 				if !slices.Contains(q.lanes, lane) {
 					q.lanes = append(q.lanes, lane)
 				}
-			} else if lane == LaneLight {
-				q.leftOut = true
+			} else if q.capacities[lane] > 0 {
+				q.partial = true
 			}
 		}
 	}
 	sort.Strings(q.kinds)
-	if hold && len(q.kinds) != 0 {
+	if hold && len(q.kinds) != 0 && (probe == nil || probe.needed(q)) {
 		for _, lane := range q.lanes {
 			r.reserved[lane]++
 		}
@@ -134,9 +198,10 @@ func (r *Runner) request(reserve, hold bool, own *claimRequest) (*claimRequest, 
 // in its own lane, which no claim asks for while a job waits there, and the other
 // lanes go on claiming (it backs off after the answer); a second means the server
 // keeps ignoring the kinds asked for, so it claims nothing until one has a slot.
-func (r *Runner) strayWaitingLocked(reserve bool) bool {
+// A probe can run beside an ordinary claim already in flight, so it stops at one.
+func (r *Runner) strayWaitingLocked(reserve, probing bool) bool {
 	limit := 2
-	if reserve {
+	if reserve || probing {
 		limit = 1
 	}
 	for _, ru := range r.running {
@@ -173,46 +238,20 @@ func sameRequest(a, b *claimRequest) bool {
 	return sameTarget(a, b) && slices.Equal(a.kinds, b.kinds)
 }
 
-// sameTarget reports whether an in-flight claim a still asks the right link
-// for the right pool: the same link and the same capacities (a capability
-// change: the reserve's negotiation withdrawn folds the interactive lane into
-// the download one). b is always asked for a's dispatcher (the same
-// interactive). Its kinds are left out: they change whenever a lane slot frees
-// or fills, and the claim's own reservation keeps a slot for what it may bring
-// in each lane it asks for, so it is let finish rather than cancelled
-// (BR-CLAIM-HOLD); one that left the light lane out waits only briefly
-// (leftOutWait), so a slot freeing there is asked for soon. A cancelled long
-// poll a reverse proxy doesn't pass on as a hang-up still hands the job out,
-// and the answer is lost until the job's 2-minute lease lapses.
+// sameTarget compares the link and the pool used by claims of one dispatcher.
+// A change to either refreshes the poll and any probe on the old target.
 func sameTarget(a, b *claimRequest) bool {
 	return a.srv == b.srv && maps.Equal(a.capacities, b.capacities)
 }
-
-// leftOutWait is the long poll's wait while the claim leaves the light lane
-// out (claimRequest.leftOut). A lane slot freeing doesn't end the claim in
-// flight (sameTarget), so with the whole wait (link.MaxWait, 25 s) a queue of
-// quick jobs, an OPML import's follows, would drain at a lane's worth per
-// long poll. The download and pipeline lanes hold long jobs: a claim leaving
-// them out waits the whole poll. maxShortPolls such short waits in a row that
-// claim nothing go back to the whole wait until the claim asks for something
-// else (a lane's room changed), so a light lane held by slow jobs doesn't
-// keep the server answering a claim every few seconds.
-const (
-	leftOutWait   = 4 * time.Second
-	maxShortPolls = 3
-)
 
 type claimResult struct {
 	job *link.Job
 	err error
 }
 
-// poll joins the call before returning, so a refreshed request can never leave
-// a second old claim able to take a job behind the dispatcher's back. Only a
-// changed target (sameTarget: the pairing, the negotiation, the capacities)
-// or the runner's stop cancels the call; a lane slot freeing or filling lets
-// it finish, which is soon when the claim left the light lane out (wait:
-// leftOutWait).
+// poll cancels and joins the call on a change of target or shutdown. Lane
+// changes leave it open so a proxy that hides a hang-up cannot take a job
+// whose answer the Bridge has already abandoned.
 func (r *Runner) poll(ctx context.Context, q *claimRequest, changed <-chan struct{}, wait time.Duration) (claimResult, bool) {
 	pollCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -244,13 +283,76 @@ func (r *Runner) poll(ctx context.Context, q *claimRequest, changed <-chan struc
 	}
 }
 
+// finishClaim handles every answer under the link and reservations that asked
+// for it, including a job returned as the request was being cancelled.
+func (r *Runner) finishClaim(ctx context.Context, q *claimRequest, job *link.Job, wg *sync.WaitGroup) {
+	if job != nil {
+		if !slices.Contains(q.kinds, job.Kind) || (q.interactive && job.Priority < int(InteractivePriority)) {
+			// The lease is ours even if the server ignored the filter. Drop
+			// the reserved admission and wait for the kind's ordinary lane.
+			if q.interactive {
+				q.srv.(priorityServer).WithdrawClaimMinPriority()
+			}
+			// Releasing the reservation (in launch, or below) wakes the dispatchers.
+			q.fallback = true
+		}
+		r.start(ctx, q.srv, jobOf(job), wg, q)
+	}
+	r.unreserve(q)
+}
+
+// claimFreedLanes makes at most one zero-wait request at a time alongside
+// the long poll. Stop taking new jobs when the poll returns. An outstanding
+// probe can still bring a lease, so let it finish under its original target.
+func (r *Runner) claimFreedLanes(ctx context.Context, pending *claimRequest, finished <-chan struct{}, wg *sync.WaitGroup) {
+	probe := laneProbe{pending: pending}
+	defer probe.stop()
+	for ctx.Err() == nil {
+		q, changed := r.requestLanes(pending.interactive, true, nil, &probe)
+		select {
+		case <-finished:
+			r.unreserve(q)
+			return
+		default:
+		}
+		if !q.held {
+			probe.keep(q.lanes)
+			select {
+			case <-finished:
+				return
+			case <-ctx.Done():
+				return
+			case <-changed:
+			case <-probe.due():
+				probe.recheck, probe.emptyLanes = nil, nil
+			}
+			continue
+		}
+		result, refreshed := r.poll(ctx, q, changed, 0)
+		r.finishClaim(ctx, q, result.job, wg)
+		switch {
+		case refreshed:
+		case errors.Is(result.err, link.ErrUnauthorized):
+			// The idle long poll may not see the 401 until its wait ends.
+			r.onUnauthorized(q.srv)
+		case result.err != nil:
+			// The long poll's own answer retries and logs a lasting failure;
+			// until then a freed lane waits for it, as before these checks.
+			r.log.Debug("bridge: checking a freed lane failed", "err", result.err)
+		}
+		if refreshed || result.err != nil || q.fallback {
+			return // leave retries to the regular dispatcher
+		}
+		if result.job != nil {
+			probe.emptyLanes = nil // the lanes may hold more
+		} else {
+			probe.empty(q.lanes)
+		}
+	}
+}
+
 func (r *Runner) dispatch(ctx context.Context, reserve bool, wg *sync.WaitGroup) {
 	backoff := time.Second
-	// shorts: the short waits in a row (leftOutWait) that claimed nothing for
-	// the request asked last (last); maxShortPolls of them end short waits
-	// until the request changes.
-	var last *claimRequest
-	shorts := 0
 	for ctx.Err() == nil {
 		q, changed := r.request(reserve, true, nil)
 		if len(q.kinds) == 0 {
@@ -260,31 +362,16 @@ func (r *Runner) dispatch(ctx context.Context, reserve bool, wg *sync.WaitGroup)
 			}
 			continue
 		}
-		if last == nil || !sameRequest(last, q) {
-			shorts = 0
-		}
-		last = q
-		wait := r.opts.Wait
-		if q.leftOut && shorts < maxShortPolls {
-			wait = min(wait, leftOutWait)
-			shorts++
+		var probes sync.WaitGroup
+		finished := make(chan struct{})
+		if q.partial {
+			probes.Go(func() { r.claimFreedLanes(ctx, q, finished, wg) })
 		}
 		start := time.Now()
-		result, refreshed := r.poll(ctx, q, changed, wait)
-		if result.job != nil {
-			shorts = 0
-			if !slices.Contains(q.kinds, result.job.Kind) || (q.interactive && result.job.Priority < int(InteractivePriority)) {
-				// The lease is ours even if the server ignored the filter. Drop
-				// the reserved admission and wait for the kind's ordinary lane.
-				if q.interactive {
-					q.srv.(priorityServer).WithdrawClaimMinPriority()
-				}
-				// Releasing the reservation (in launch, or below) wakes the dispatchers.
-				q.fallback = true
-			}
-			r.start(ctx, q.srv, jobOf(result.job), wg, q)
-		}
-		r.unreserve(q)
+		result, refreshed := r.poll(ctx, q, changed, r.opts.Wait)
+		close(finished)
+		r.finishClaim(ctx, q, result.job, wg)
+		probes.Wait()
 		if ctx.Err() != nil {
 			return
 		}
