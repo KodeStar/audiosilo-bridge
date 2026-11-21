@@ -2120,18 +2120,39 @@ internal/
             cancelled after this claim took it, by an admin (parked or working), by
             the server itself, by a move of its book, or its lease ran out after a
             cancel was asked), ErrNoHeartbeat,
-            ErrNoBook, ErrNotIndexable (a rescan's 404 not_indexable), else *APIError
-            (an HTML proxy page never becomes a message; RetryAfter carries a 429's
+            ErrNoBook, ErrNotIndexable (a rescan's 404 not_indexable), else *APIError. HTML proxy pages never become error messages.
+            RetryAfter carries a 429's
             Retry-After, seconds or an HTTP date, clamped at a day; RetryAfterSet
             distinguishes a valid zero wait from a missing or invalid header;
             Transient is the status rule a retry goes by: a 5xx, a 408 or a 429
             may be answered differently if asked again, any other status not
-            (jobs' report retry, mapping.BookReadSettled);
-            RateLimited picks a 429 out, Backoff.Wait is the shared wait-out rule:
-            Retry-After, else First doubling, Tries asks, each wait at most Max;
-            the doubling stops at the first wait over Max, so no count of 429s
-            overflows it, and a count below 1 is the first);
-            a 2xx it can't use (not the JSON expected, a pairing with no token)
+            (jobs' report retry, mapping.BookReadSettled).
+            Backoff.Do handles a 429 before it reaches a job. A required job
+            request retries until 10 s before the lease expiry known at its
+            first refusal. It honors Retry-After within that budget, including
+            waits over a minute, and gives up at once when the next ask would
+            fall past it. A lease expiry
+            already past at the first refusal (a lapsed lease, or the Bridge's
+            clock ahead of the server's) leaves the default. Outside a known
+            lease the default is 3 attempts
+            with waits capped at 60 s. A missing or invalid header starts at
+            0.5 to 1 s and doubles with jitter. Cancellation interrupts the
+            wait. Each attempt rebuilds the JSON body and gets its own HTTP
+            timeout (a claim's wait plus 15 s).
+            The limiter refuses the request before the route acts, including
+            pairing, claiming a job and posting listening events. An exhausted
+            limit wraps the last APIError, which RateLimited recognizes.
+            Server-queued handlers get the last error with its original wording.
+            Episode rescans, a poll's show rescan and Audible enrichment use
+            Backoff.Do with their own budgets. Only the outer call waits or
+            retries. A call a person waits for on the page (Pair,
+            Client.Prompt: the Accounts tab's people read) waits at most 10 s
+            per 429 and answers a longer
+            Retry-After (a pairing lockout's) at once, inside the page's 60 s
+            write timeout. The pairing page shows when to try again if the
+            server sent a valid Retry-After.
+            Backoff.Wait also supplies the mapping check's hold duration.
+            A 2xx it can't use (not the JSON expected, a pairing with no token)
             is ErrUnusableAnswer (bridge#28), worded as its cause, which the
             page's pairing error keys on rather than on what's left over.
             Phase 1a: Paired carries
@@ -2352,7 +2373,18 @@ internal/
             pair, an unpair, a refused token) drops the libraries, checks, hold
             and queued checks; a run of the old link still going records nothing
             more and holds nothing.
-  jobs/     the generic runner. Phase 4b: CancelContext(parent) is a context
+  jobs/     the generic runner. The claim and successful job reports supply
+            lease_until for the handler's link requests, including ConfirmLease
+            before publishing an episode or deleting one for retention.
+            After a required request exhausts its 429
+            retries, a server-queued job (its handler a ServerQueuedHandler:
+            podcast, Audible and LibriVox kinds) reports failed with the
+            handler's usual error. This closes the job so the
+            server can schedule another. Admin-started jobs report
+            needs_attention and ask the admin to cancel and queue the job
+            again once the server is ready. A claim's idle pacing counts
+            time already spent waiting.
+            Phase 4b: CancelContext(parent) is a context
             whose cancel reads as an admin's cancel (Resumes false), for handler
             tests; Lost(ctx) says a job ended because the server no longer holds
             its claim (a lease that lapsed while the Bridge was down or cut off:
@@ -2448,8 +2480,14 @@ internal/
             server the next goes after ReportRetry (DefaultReportRetry 10 s) instead,
             until one gets through, then Keepalive again: at 30 s alone one report
             through and three failed would lapse the lease. Only an answerless
-            failure, a 5xx, 408 or 429 counts (unreachable); any other 4xx would be
-            refused again however soon, so it waits the Keepalive. The first failed
+            failure, a 5xx, 408 or 429 counts (unreachable). A progress report
+            under the send lock makes one HTTP attempt. After a 429 the next
+            idle report, and changed progress of the same step, waits at least
+            ReportRetry and honors a longer Retry-After up to one minute. A new
+            step, a park and the finish go at once. An explicit Refresh waits
+            outside the lock and sends current progress on each attempt, and
+            sends nothing once settle reports the job's end. Any other 4xx
+            waits the Keepalive. The first failed
             report warns, the rest log at debug, and the first one through after
             them logs one Info (bridge#31); a ConfirmLease or Refresh that gets
             through clears failing too (under the Reporter's lock: they run on
@@ -2687,7 +2725,7 @@ internal/
             errOtherServer, errPairingEnded).
   verify/   bridge.verify: params {hold_seconds 0-600}; resolves the library from the
             registry, asks the server for the book's files (path "" = the sample
-            book; no answer, a refused token, a 408, a 429 or a 5xx asked again
+            book; link handles 429s, no answer, a refused token, a 408 or a 5xx asked again
             with backoff for up to 2 min, the last ask at its end, any other 4xx
             failing at once: mapping.BookReadSettled, generate's fetchBook rule
             too; each retry a warning in the log), CompareFiles through the mount, probes the BOOK's folder for
@@ -3023,14 +3061,20 @@ internal/
             the resumed job goes on from the partial there. An episode path the
             server answers not_indexable (its show folder renamed since the
             server read it) is indexed by rescanning the show folder. The
-            server's 429 to any rescan is waited out (askRescan, link.Backoff:
-            its Retry-After, else 2 s doubling; 3 asks, each wait at most 30 s,
+            link retries a show rescan. Episode rescans use a shorter budget
+            (askRescan, link.Backoff:
+            its Retry-After, else jittered backoff starting at 1 to 2 s and doubling;
+            3 asks, each wait at most 30 s,
             as audiblejob's enrichment). One an episode's rescan could not wait
-            out leaves the saved episode for the show's next poll's rescan
+            out (its tries spent, or a stop or the episode's ceiling while it
+            waited) leaves the saved episode for the show's next poll's rescan
             (isIndexed) and the fetch succeeds, never index_failed (a retain
             then leaves its other deletions' rescans to that poll too, rather
-            than wait again for each); a subscribe's or poll's fails
-            write_failed, the rescan still owed. A saved feed.json over
+            than wait again for each). A poll's show rescan waits on the same
+            budget and can leave it to the next poll, even if the feed then
+            answers 304. A subscribe
+            needs its first index and passes a lasting limit to the runner.
+            A saved feed.json over
             the read cap fails as too_large, not write_failed. A new show never
             takes the old name of a renamed folder not taken in yet (find
             answers those names): the server indexes that name as the renamed
@@ -3466,7 +3510,7 @@ internal/
             (not out yet: another edition) and no pack matched to a book with no
             range (importjob.SpanMismatch: the folder at its first volume's
             position may hold that volume alone), PACED: one PUT per 200 ms, a 429 waits
-            its Retry-After (else 2 s doubling) and halves the pace (to 2 s at the
+            its Retry-After (else 1 to 2 s with jitter, doubling) and halves the pace (to 2 s at the
             slowest), and a wait over 1 min, 5 429s in a row or 10 min of
             enriching leave the rest to the next poll (enrich_deferred: those books
             still have no ASIN, so the next poll picks them up); asin_set and a
@@ -3834,7 +3878,7 @@ internal/
             sections are looked for again after the removals),
             ONE fsutil.RenameNoReplace staging -> book folder (a
             folder that raced in takes the fallback once, never replaced), then
-            the rescan (3 tries). State <data>/librivox/<library_id>-<id>.json,
+            the rescan (up to 3 tries, with 429s handled by link alone). State <data>/librivox/<library_id>-<id>.json,
             one per library and project, so fetches of one project into two
             libraries never touch each other's staging (state.go: the
             library, the paired server's id (bridge#69: a state of another
@@ -4082,7 +4126,8 @@ internal/
             mapping is checked again before each write; a failed write on a done book
             parks book_not_writable and tries again every minute or on Retry (the
             sidecars stay in the work dir, never lost to a failed job). Then
-            RescanAttachments, 3 tries, a failure only logged (the server's next scan
+            RescanAttachments, up to 3 tries, with 429s handled by link alone. A
+            failure is only logged (the server's next scan
             reads them). Result {library_id, path, source, files, characters, recaps,
             cost_usd, work_id, contributed {characters|recaps: issue url}}. END: unless
             jobs.Resumes (the Bridge stopping, a refused token), the job's end is

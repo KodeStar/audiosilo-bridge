@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
 	"os"
 	"path"
 	"slices"
@@ -476,6 +477,15 @@ func TestFetchRescanFailureResumesAtRescan(t *testing.T) {
 	// The folder was placed by the earlier run, so this one adopts it.
 	if r := out.(*Result); r.Path != bookDir || r.Files != 4 || r.Bytes != 6014 || !r.Adopted {
 		t.Fatalf("%+v", r)
+	}
+}
+
+func TestFetchRescanPreservesExhaustedRateLimit(t *testing.T) {
+	x := newHarness(t)
+	busy := &link.APIError{Status: http.StatusTooManyRequests}
+	x.srv.rescanErr = []error{busy}
+	if _, err := x.run(t.Context(), false); !errors.Is(err, busy) {
+		t.Fatalf("rescan = %v", err)
 	}
 }
 

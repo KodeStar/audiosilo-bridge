@@ -93,6 +93,10 @@ func TestEnrichHonoursRetryAfter(t *testing.T) {
 	// backoff (the second in a row: 4 s), then through; the last two at the
 	// slower pace (two 429s doubled the gap twice).
 	want := []time.Duration{enrichGap, 3 * time.Second, 2 * enrichBackoff, 4 * enrichGap, 4 * enrichGap}
+	if len(c.waits) != len(want) || c.waits[2] < enrichBackoff || c.waits[2] > 2*enrichBackoff {
+		t.Fatalf("waits = %v, want a jittered second backoff", c.waits)
+	}
+	want[2] = c.waits[2]
 	if fmt.Sprint(c.waits) != fmt.Sprint(want) {
 		t.Fatalf("waits = %v, want %v", c.waits, want)
 	}
@@ -327,20 +331,5 @@ func TestPollPackOnVolumeNotEnriched(t *testing.T) {
 	}
 	if want := map[string]string{"Fell/Iron Vale/IV07-08": "B0PACK0078"}; fmt.Sprint(fs.enrichedNow()) != fmt.Sprint(want) {
 		t.Fatalf("enriched %v, want %v", fs.enrichedNow(), want)
-	}
-}
-
-// An ended ctx wins over any wait, even a zero one (Retry-After: 0), so a
-// cancelled job never sends another request; a zero wait on a live ctx is none.
-func TestSleepCtxEndedContextWins(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	if err := sleepCtx(ctx, 0); err != nil {
-		t.Fatalf("zero wait on a live ctx = %v", err)
-	}
-	cancel()
-	for _, d := range []time.Duration{0, time.Hour} {
-		if err := sleepCtx(ctx, d); err != context.Canceled {
-			t.Errorf("sleepCtx(cancelled, %v) = %v, want context.Canceled", d, err)
-		}
 	}
 }

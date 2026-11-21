@@ -1,7 +1,11 @@
 package link
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"math"
+	"math/rand/v2"
 	"net/http"
 	"time"
 )
@@ -13,6 +17,8 @@ import (
 type Backoff struct {
 	Tries      int
 	First, Max time.Duration
+	clamp      bool // wait Max for a longer Retry-After instead of giving up
+	useLease   bool // use the handler's remaining lease when known
 }
 
 // Wait is the wait before asking again after the limited-th 429 (e) in a row.
@@ -29,15 +35,152 @@ func (b Backoff) Wait(e *APIError, limited int) (time.Duration, bool) {
 		wait = b.First
 		for n := 1; n < limited && wait > 0; n++ {
 			if wait > b.Max/2 {
+				if b.clamp {
+					return b.Max, true
+				}
 				return 0, false // the next doubling is over Max
 			}
 			wait *= 2
 		}
 	}
 	if wait > b.Max {
+		if b.clamp {
+			return b.Max, true
+		}
 		return 0, false
 	}
 	return wait, true
+}
+
+// Outside a known job lease the default allows three attempts. A handler
+// that can defer work earlier supplies its own Backoff.
+var requestBackoff = Backoff{Tries: 3, First: time.Second, Max: time.Minute, clamp: true, useLease: true}
+
+// promptBackoff bounds a call a person waits for on the Bridge's page (Pair,
+// Client.Prompt), whose answer must come inside the page's 60 s write timeout:
+// a Retry-After over 10 s (a pairing lockout's runs to minutes) is answered
+// at once rather than clamped and waited.
+var promptBackoff = Backoff{Tries: 3, First: time.Second, Max: 10 * time.Second}
+
+type retryingKey struct{}
+type lastErrorKey struct{}
+type retryDeadlineKey struct{}
+
+// WithRetryDeadline supplies the end of a running job's 429 budget. Each
+// refused request reads it once, so renewals benefit later requests without
+// keeping one permanently limited request alive. A zero time means no known
+// lease. Calls with their own Backoff keep their own policy.
+func WithRetryDeadline(ctx context.Context, deadline func() time.Time) context.Context {
+	return context.WithValue(ctx, retryDeadlineKey{}, deadline)
+}
+
+// WithLastError keeps the last refusal's original message after retries.
+// Server-queued handlers use it to report their usual failure to the server.
+func WithLastError(ctx context.Context) context.Context {
+	return context.WithValue(ctx, lastErrorKey{}, true)
+}
+
+// SingleAttempt leaves retries to the caller. The job reporter uses it while
+// holding its send lock so a 429 wait cannot delay newer progress or a finish.
+func SingleAttempt(ctx context.Context) context.Context {
+	return context.WithValue(ctx, retryingKey{}, true)
+}
+
+// Retry applies the link's usual 429 budget to a call that must prepare each
+// attempt itself, such as a refresh that takes a fresh progress snapshot.
+func Retry(ctx context.Context, call func(context.Context) error) error {
+	return requestBackoff.Do(ctx, Wait, call)
+}
+
+// Do retries a rate-limited request within b. A job can own the wait (for
+// example, to slow subsequent enrichment PUTs). Its call must use the supplied
+// context so the link shares that budget. Only missing or invalid headers get
+// jitter, between half and all of the exponential delay.
+func (b Backoff) Do(ctx context.Context, wait func(context.Context, time.Duration) error, call func(context.Context) error) error {
+	if ctx.Value(retryingKey{}) != nil {
+		return call(ctx)
+	}
+	ctx = SingleAttempt(ctx)
+	// After the first refusal, a known lease turns the budget into time:
+	// callCtx ends at its deadline and the call is asked until then.
+	callCtx, until := ctx, time.Time{}
+	budgetOver := func() bool {
+		return !until.IsZero() && ctx.Err() == nil && (callCtx.Err() != nil || !time.Now().Before(until))
+	}
+	var err error
+	attempt := 0
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		next := call(callCtx)
+		if errors.Is(next, context.DeadlineExceeded) && budgetOver() {
+			break // the lease budget ended, return the last refusal
+		}
+		attempt++
+		err = next
+		busy, limited := RateLimited(err)
+		if !limited {
+			return err
+		}
+		if attempt == 1 && b.useLease {
+			if deadline, _ := ctx.Value(retryDeadlineKey{}).(func() time.Time); deadline != nil {
+				// A deadline already past (a lapsed lease, or the Bridge's clock
+				// ahead of the server's) leaves the ordinary budget.
+				if until = deadline(); until.After(time.Now()) {
+					var cancel context.CancelFunc
+					callCtx, cancel = context.WithDeadline(ctx, until)
+					defer cancel()
+					b.Tries = math.MaxInt
+				} else {
+					until = time.Time{}
+				}
+			}
+		}
+		delay, retry := b.Wait(busy, attempt)
+		if !retry {
+			break
+		}
+		if !until.IsZero() && busy.RetryAfterSet {
+			delay = busy.RetryAfter // the lease bounds the wait, even for a Retry-After over Max
+		}
+		if !busy.RetryAfterSet && delay > 0 {
+			delay = delay/2 + rand.N(delay-delay/2) //nolint:gosec // jitter only spreads retries
+		}
+		if !until.IsZero() && time.Now().Add(delay).After(until) {
+			break // the next ask would come after the lease budget: give up now
+		}
+		waitErr := wait(callCtx, delay)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if budgetOver() {
+			break
+		}
+		if waitErr != nil {
+			return waitErr
+		}
+	}
+	if ctx.Value(lastErrorKey{}) != nil {
+		return err
+	}
+	return fmt.Errorf("the server is still rate limiting the Bridge (attempt %d): %w", attempt, err)
+}
+
+// Wait waits d, or until ctx ends. An ended ctx always wins, so a zero wait
+// (an explicit Retry-After: 0) never lets a cancelled job go on.
+func Wait(ctx context.Context, d time.Duration) error {
+	if err := ctx.Err(); err != nil || d <= 0 {
+		return err
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
 }
 
 // Transient reports whether the same call may be answered differently if made

@@ -321,6 +321,9 @@ func New(o Options) *Handler {
 // Kind is audible.sync.
 func (h *Handler) Kind() string { return Kind }
 
+// ServerQueued: the server queues and schedules syncs again itself.
+func (h *Handler) ServerQueued() bool { return true }
+
 // Lane is the light lane: a sync is a few API calls.
 func (h *Handler) Lane() string { return jobs.LaneLight }
 
@@ -584,8 +587,11 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			h.o.health(ctx, store.SyncJob, acct, fmt.Errorf("sending the places to the server: %w", err), time.Time{})
-			return res, fmt.Errorf("sending the places to the server: %w", err)
+			err = fmt.Errorf("sending the places to the server: %w", err)
+			if _, limited := link.RateLimited(err); !limited {
+				h.o.health(ctx, store.SyncJob, acct, err, time.Time{})
+			}
+			return res, err
 		}
 		res.Sent += len(batch)
 		for _, r := range ans.Results {

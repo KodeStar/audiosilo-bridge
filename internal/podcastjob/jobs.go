@@ -214,6 +214,10 @@ func (h *Subscribe) Lane() string   { return jobs.LaneLight }
 func (h *Poll) Kind() string        { return PollKind }
 func (h *Poll) Lane() string        { return jobs.LaneLight }
 
+// ServerQueued: the server queues and schedules podcast jobs again itself.
+func (h *Subscribe) ServerQueued() bool { return true }
+func (h *Poll) ServerQueued() bool      { return true }
+
 type subscribeParams struct {
 	FeedURL       string `json:"feed_url"`
 	FeedURLSHA256 string `json:"feed_url_sha256"`
@@ -753,7 +757,7 @@ func (h *Subscribe) run(parent context.Context, job jobs.Job, rep *jobs.Reporter
 	}
 	done = true
 	rep.Progress(jobs.Progress{Step: "indexing", Message: "Indexing the podcast show"})
-	if err := s.rescan(ctx, lib.ID, show); err != nil {
+	if err := s.rescan(ctx, lib.ID, show, false); err != nil {
 		return nil, err
 	}
 	return map[string]any{"library_id": lib.ID, "show_path": show, "show_id": f.ShowID, "created": created, "private": f.Private, "episodes": len(f.Episodes), "skipped": parsed.Skipped, "status": resp.Status, "etag": resp.ETag, "last_modified": resp.LastModified, "next_poll_seconds": podcast.NextPoll(f, resp.CacheControl, s.o.Now())}, nil
@@ -836,7 +840,7 @@ func (h *Poll) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	}
 	if !s.isIndexed(lib.ID, show) {
 		rep.Progress(jobs.Progress{Step: "indexing", Message: "Indexing the podcast show"})
-		if err := s.rescan(ctx, lib.ID, show); err != nil {
+		if err := s.rescan(ctx, lib.ID, show, true); err != nil {
 			return nil, err
 		}
 	}
@@ -924,13 +928,24 @@ func (s *service) persist(ctx context.Context, root *os.Root, lib link.Library, 
 	return added, changed, nil
 }
 
-// rescan asks the server to index show, waiting out its 429s (askRescan).
-func (s *service) rescan(ctx context.Context, id int64, show string) error {
+// rescan marks the show indexed once the server accepts it. A poll can defer
+// indexing a saved feed until its next run, even if that poll receives a 304.
+func (s *service) rescan(ctx context.Context, id int64, show string, deferOnLimit bool) error {
 	srv := s.o.Server()
 	if srv == nil {
 		return fail("write_failed", "The server is unavailable for indexing. Check the feed again.")
 	}
-	if err := s.askRescan(ctx, srv, id, show); err != nil {
+	var err error
+	if deferOnLimit {
+		err = s.askRescan(ctx, srv, id, show) // the next poll can finish indexing a saved feed
+	} else {
+		_, err = srv.RescanPodcast(ctx, id, show)
+	}
+	if err != nil {
+		if _, limited := link.RateLimited(err); limited && deferOnLimit {
+			slog.Info("podcasts: the server asked the Bridge to slow down; the next poll will index the show", "library", id, "show", show)
+			return nil
+		}
 		return fail("write_failed", "The server could not index the podcast show. Check the feed again.")
 	}
 	s.setIndexed(id, show, true)

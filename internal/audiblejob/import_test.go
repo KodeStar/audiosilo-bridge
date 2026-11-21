@@ -1134,6 +1134,16 @@ func TestImportRescanRetries(t *testing.T) {
 	}
 }
 
+func TestImportRescanPreservesExhaustedRateLimit(t *testing.T) {
+	e := newImportEnv(t)
+	busy := tooMany(time.Second)
+	e.srv.rescanErr = []error{busy}
+	_, err := e.run(t.Context(), e.params(nil))
+	if !errors.Is(err, busy) || len(e.srv.rescanned) != 1 {
+		t.Fatalf("rescan = %v, calls %d", err, len(e.srv.rescanned))
+	}
+}
+
 // An install that succeeded before the rescan failed: the retry finds the
 // book its marker recorded and goes on from the rescan, with the same result
 // and no second license or download.

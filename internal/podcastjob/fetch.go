@@ -35,6 +35,7 @@ func (h *Subscribe) FetchJob() *Fetch { return &Fetch{s: h.s} }
 func (h *Fetch) Kind() string         { return FetchKind }
 func (h *Fetch) Lane() string         { return jobs.LaneDownload }
 func (h *Fetch) Interactive() bool    { return true }
+func (h *Fetch) ServerQueued() bool   { return true }
 
 // SealParams records, beside the server's params, the pairing hash the claim
 // is made under (podcast.ClaimHashParam): its download records are kept under it, and a
@@ -831,24 +832,22 @@ const (
 
 var rescanLimit = link.Backoff{Tries: rescanTries, First: rescanBackoff, Max: rescanMaxWait}
 
-// askRescan asks the server to index target (a show folder or an episode),
-// waiting out its 429s as audiblejob's enrichment does (rescanLimit): the
-// server's Retry-After (an explicit 0 asks again at once, none waits
-// rescanBackoff, doubling), rescanTries asks in all, each wait at most
-// rescanMaxWait. The last answer's error: still a 429 (link.RateLimited)
-// past those bounds or after a stop meanwhile.
+// askRescan uses the rescan's shorter budget so a saved episode can leave
+// its indexing to the next poll. A stop while it waits out a 429 (the job's,
+// or an episode's ceiling) answers that 429, as running out of tries does:
+// the episode is saved either way.
 func (s *service) askRescan(ctx context.Context, srv Server, id int64, target string) error {
-	for limited := 1; ; limited++ {
-		_, err := srv.RescanPodcast(ctx, id, target)
-		busy, ok := link.RateLimited(err)
-		if !ok {
-			return err
-		}
-		wait, ok := rescanLimit.Wait(busy, limited)
-		if !ok || ctx.Err() != nil || s.o.Wait(ctx, wait) != nil {
-			return err
+	var last error
+	err := rescanLimit.Do(ctx, s.o.Wait, func(ctx context.Context) error {
+		_, last = srv.RescanPodcast(ctx, id, target)
+		return last
+	})
+	if _, limited := link.RateLimited(last); limited && err != nil {
+		if _, ok := link.RateLimited(err); !ok {
+			return last
 		}
 	}
+	return err
 }
 
 // episodeRescan asks the server to index episode p. One whose show folder was

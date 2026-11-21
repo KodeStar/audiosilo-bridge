@@ -370,6 +370,7 @@ func TestLeaseFailureKeepsIdentityForLostClaimsOnly(t *testing.T) {
 		{link.ErrNotHeld, "identity_changed"},
 		{link.ErrUnauthorized, "identity_changed"},
 		{context.Canceled, "identity_changed"},
+		{&link.APIError{Status: http.StatusTooManyRequests}, "bridge_lost"},
 		{errors.New("connection refused"), "bridge_lost"}, // the server out of reach, never the episode's network
 	} {
 		var failure *netguard.Error
@@ -397,6 +398,18 @@ func TestRetainServerOutOfReachIsBridgeLost(t *testing.T) {
 	result, err := h.handler.RetainJob().Run(context.Background(), job, jobs.LocalReporter())
 	if err == nil || fields(t, result)["code"] != "bridge_lost" {
 		t.Fatal(result, err)
+	}
+}
+
+func TestRetainReportsUnverifiedPolicyAfterRateLimit(t *testing.T) {
+	h, fetch := audioHarness(t)
+	busy := &link.APIError{Status: http.StatusTooManyRequests}
+	h.handler.s.o.Server = func() Server { return &retainServer{scanServer: h.scan, policyErr: busy} }
+	show := "Fixture Show"
+	job := jobs.Job{ID: 83, Kind: RetainKind, LibraryID: fetch.LibraryID, Path: &show, Params: json.RawMessage(`{"show_id":"a1b2c3d4e5f60718"}`), Attempt: 1}
+	res, err := h.handler.RetainJob().Run(t.Context(), job, jobs.LocalReporter())
+	if err == nil || err.Error() != "The retention policy could not be verified." || fields(t, res)["code"] != "identity_changed" {
+		t.Fatalf("policy read = %v, %v", res, err)
 	}
 }
 

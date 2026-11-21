@@ -192,7 +192,6 @@ func TestVerifyRetriesATransientBookRead(t *testing.T) {
 
 	for name, transient := range map[string]error{
 		"500":       &link.APIError{Status: http.StatusInternalServerError},
-		"429":       &link.APIError{Status: http.StatusTooManyRequests},
 		"no answer": errors.New("dial tcp: connection refused"),
 		"refused":   link.ErrUnauthorized,
 		"timed out": context.DeadlineExceeded,
@@ -227,6 +226,12 @@ func TestVerifyRetriesATransientBookRead(t *testing.T) {
 	// The last ask is at the budget's end, not a backoff step short of it.
 	if took := time.Since(start); took < h.retryFor {
 		t.Fatalf("a lasting 502 gave up after %v, before the %v budget", took, h.retryFor)
+	}
+
+	limited := &flaky{src: src, err: &link.APIError{Status: http.StatusTooManyRequests}, fails: 1}
+	use(limited)
+	if _, err := h.Run(context.Background(), job, jobs.LocalReporter()); !errors.Is(err, limited.err) || limited.asks != 1 {
+		t.Fatalf("the link exhausted its 429 retries: asks = %d, err = %v", limited.asks, err)
 	}
 
 	forbidden := &flaky{src: src, err: &link.APIError{Status: http.StatusForbidden}, fails: 1}

@@ -174,8 +174,8 @@ func TestImportEnrichPacedOn429(t *testing.T) {
 		if !res.(*ImportResult).Enriched || len(e.srv.enriched) != 3 {
 			t.Fatalf("result %s, enriched %v", mustJSON(t, res), e.srv.enriched)
 		}
-		if want := []time.Duration{3 * time.Second, 2 * enrichBackoff}; !slices.Equal(e.waits, want) {
-			t.Fatalf("waits %v, want %v", e.waits, want)
+		if len(e.waits) != 2 || e.waits[0] != 3*time.Second || e.waits[1] < enrichBackoff || e.waits[1] > 2*enrichBackoff {
+			t.Fatalf("waits %v, want Retry-After then a jittered second backoff", e.waits)
 		}
 	})
 	t.Run("always 429", func(t *testing.T) {
@@ -189,8 +189,13 @@ func TestImportEnrichPacedOn429(t *testing.T) {
 			t.Fatalf("result %s, %d PUTs, want %d", mustJSON(t, res), len(e.srv.enriched), enrichMaxLimited)
 		}
 		want := []time.Duration{enrichBackoff, 2 * enrichBackoff, 4 * enrichBackoff, 8 * enrichBackoff}
-		if !slices.Equal(e.waits, want) {
-			t.Fatalf("waits %v, want %v", e.waits, want)
+		if len(e.waits) != len(want) {
+			t.Fatalf("waits %v, want %d", e.waits, len(want))
+		}
+		for i, d := range e.waits {
+			if d < want[i]/2 || d > want[i] {
+				t.Fatalf("wait %d = %v, want %v..%v", i, d, want[i]/2, want[i])
+			}
 		}
 		if res.(*ImportResult).Path != path.Dir(copperGrove) {
 			t.Fatalf("path = %s", res.(*ImportResult).Path)

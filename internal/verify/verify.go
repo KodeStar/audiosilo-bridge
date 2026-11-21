@@ -32,8 +32,9 @@ type Libraries interface {
 	Library(id int64) (link.Library, bool)
 }
 
-// The book read's retry: an answer that may change (mapping.BookReadSettled's:
-// no answer, a refused token, a 408, a 429, a 5xx) is asked again after
+// The book read's retry: an answer that may change (mapping.BookReadSettled's,
+// less the 429 the link has already waited out: no answer, a refused token, a
+// 408, a 5xx) is asked again after
 // bookRetryFirst, doubling up to bookRetryMax, until bookRetryFor has passed
 // since the first ask (the last ask at its end), so a server restarting under a
 // verify doesn't fail it, and one that stays down does in a time an admin
@@ -174,14 +175,17 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	return res, nil
 }
 
-// fetchBook asks the server for the book's files, asking again (retrying)
+// fetchBook leaves 429 retries to the link. It asks again (retrying)
 // while the answer may change (mapping.BookReadSettled, generate's fetchBook's
 // rule). A definite answer fails at once, and so does the last transient one
 // once the budget is spent.
 func (h *Handler) fetchBook(ctx context.Context, jobID int64, rep *jobs.Reporter, src mapping.BookSource, libraryID int64, path string) (*link.Book, error) {
 	var book *link.Book
 	err := h.retrying(ctx, jobID, "verify: asking the server for the book's files failed; trying again",
-		func(err error) bool { return !mapping.BookReadSettled(err) },
+		func(err error) bool {
+			_, limited := link.RateLimited(err)
+			return !limited && !mapping.BookReadSettled(err)
+		},
 		func() (err error) {
 			rep.Progress(jobs.Progress{Step: "lookup", Message: "Asking the server for the book's files"})
 			book, err = src.Book(ctx, libraryID, path)

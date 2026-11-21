@@ -51,6 +51,9 @@ type Job struct {
 	// (store.ServerJob.ShareOff, or the stopped run's Reporter): Reporter.ShareOff.
 	// Its Reporter writes it to the store at its first report (keepShareOff).
 	shareOff bool
+	// leaseUntil is the expiry returned with a fresh claim. A resumed job
+	// learns its lease from the first successful running report.
+	leaseUntil time.Time
 	// serverID is the id of the server that handed the job out (the claim's
 	// link's, or the recorded row's): the one rule for which link the job
 	// reports on (Runner.linkFor), and what a handler keys its durable state
@@ -156,6 +159,15 @@ type Handler interface {
 // still run any priority of this kind in its normal lane.
 type InteractiveHandler interface {
 	Interactive() bool
+}
+
+// ServerQueuedHandler marks a kind the server queues and schedules again
+// itself (podcasts, Audible, LibriVox). After a 429 that outlasts the link's
+// retries its job fails with the handler's own error, so the server can
+// schedule the next run; a park would leave the job open without a lease.
+// Any other kind's job needs attention, for an admin to queue it again.
+type ServerQueuedHandler interface {
+	ServerQueued() bool
 }
 
 // ParamSealer removes sensitive claim params before any execution row is
@@ -369,8 +381,8 @@ type Options struct {
 	// renewing the server's 2-minute lease and picking up a cancel (default
 	// DefaultKeepalive).
 	Keepalive time.Duration
-	// ReportRetry stands in for Keepalive while a job's last report failed
-	// (default DefaultReportRetry; never longer than Keepalive).
+	// ReportRetry is the usual delay after a transient report failure. A 429
+	// can ask for a longer delay before the next idle report.
 	ReportRetry time.Duration
 	// ProgressEvery is the shortest gap between two progress reports of a job
 	// (a new step is sent at once).
@@ -1206,7 +1218,15 @@ func (r *Runner) dropOtherServers(id string) {
 // jobOf is a claimed job as a Handler sees it.
 func jobOf(j *link.Job) Job {
 	return Job{ID: j.ID, Kind: j.Kind, LibraryID: j.LibraryID, Path: j.Path, Params: j.Params, Attempt: j.Attempts, Priority: j.Priority,
-		shareOff: j.ShareOff}
+		shareOff: j.ShareOff, leaseUntil: leaseExpiry(j)}
+}
+
+func leaseExpiry(j *link.Job) time.Time {
+	if j.LeaseUntil == nil {
+		return time.Time{}
+	}
+	until, _ := time.Parse(time.RFC3339, *j.LeaseUntil)
+	return until
 }
 
 // storedJob is a job the store recorded, as a Handler sees it.
@@ -1435,7 +1455,7 @@ func (r *Runner) execute(ctx, base context.Context, srv Server, h Handler, ru *r
 	// all the same (keepShareOff, the one write after the claim), so one whose
 	// write failed, or that a refused token stopped, has it stored again.
 	rep := &Reporter{r: r, ru: ru, srv: srv, job: ru.job, cancel: ru.cancel, ctx: ctx, nudge: make(chan struct{}, 1),
-		shareOff: ru.job.shareOff}
+		shareOff: ru.job.shareOff, leaseUntil: ru.job.leaseUntil}
 	if ru.parked != "" {
 		rep.parked, rep.parkMsg = true, ru.parked
 		// The server hears a park whose code changes as a new park (a bell
@@ -1463,6 +1483,10 @@ func (r *Runner) execute(ctx, base context.Context, srv Server, h Handler, ru *r
 	var err error
 	if r.awaitAdmission(ctx, ru) {
 		rep.started.Store(true)
+		ctx = link.WithRetryDeadline(ctx, rep.retryDeadline)
+		if r.serverQueued(ru.job.Kind) {
+			ctx = link.WithLastError(ctx)
+		}
 		result, err = h.Run(ctx, ru.job, rep)
 	}
 	// A recovered job can lose its claim (or be dropped for another server's
@@ -1482,11 +1506,22 @@ func firstErr(cause, err error) error {
 	return err
 }
 
+// serverQueued reports whether kind's handler is a ServerQueuedHandler.
+func (r *Runner) serverQueued(kind string) bool {
+	h, ok := r.handlers[kind].(ServerQueuedHandler)
+	return ok && h.ServerQueued()
+}
+
 // settle records and reports a job's end, on the link its Reporter reports on
 // now (linkFor). It reports whether a refused token stopped the job (left
 // running, for resumeStranded).
 func (r *Runner) settle(base context.Context, ru *run, rep *Reporter, result any, err error) (stranded bool) {
 	job := ru.job
+	// A Refresh another job asked for may be waiting out a 429: its next
+	// attempt must not report the job running after its end.
+	rep.sendMu.Lock()
+	rep.settled = true
+	rep.sendMu.Unlock()
 	var raw json.RawMessage
 	if result != nil {
 		b, merr := json.Marshal(result)
@@ -1527,6 +1562,7 @@ func (r *Runner) settle(base context.Context, ru *run, rep *Reporter, result any
 	// report hearing the cancel or the lost claim again.
 	owed := !rep.started.Load() && endsForGood(context.Cause(rep.ctx)) && r.holdsWork(job)
 	var park *ParkError
+	_, rateLimited := link.RateLimited(err)
 	switch {
 	case ru.ended.Load(), r.pairingGone(job):
 		// Unpaired on the Bridge's page (or paired with another server since),
@@ -1588,6 +1624,8 @@ func (r *Runner) settle(base context.Context, ru *run, rep *Reporter, result any
 		r.finish(base, srv, job, store.JobCancelled, progress, raw, "")
 	case err == nil:
 		r.finish(base, srv, job, store.JobDone, progress, raw, "")
+	case rateLimited && !r.serverQueued(job.Kind):
+		r.finish(base, srv, job, store.JobNeedsAttention, progress, raw, err.Error()+". Cancel and queue the job again when the server is ready.")
 	case errors.As(err, &park):
 		r.finish(base, srv, job, store.JobNeedsAttention, progress, raw, park.Error())
 	default:
@@ -1958,10 +1996,12 @@ type Reporter struct {
 	ctx    context.Context //nolint:containedctx // the job's own context, for its sends
 	// nudge wakes loop when the step changed (nil for a LocalReporter).
 	nudge chan struct{}
-	// sendMu orders the reports that carry the job's state (send, Refresh): each
-	// takes its snapshot and makes its request under it, so a Refresh another
-	// job asked for never lands after a newer report (a park lifted since).
+	// sendMu orders state snapshots and their HTTP attempts. A 429 releases
+	// it before any wait so newer progress or a finish can go through.
 	sendMu sync.Mutex
+	// settled (under sendMu): settle is reporting the job's end, so a Refresh
+	// still waiting out a 429 sends no running report after it.
+	settled bool
 
 	// started: the handler runs (or ran): it may hold the link it started on,
 	// so a new link to its server restarts it there (link, errRelinked).
@@ -1973,16 +2013,18 @@ type Reporter struct {
 	srv      Server
 	progress Progress
 	// dirty: progress changed since it was last sent (and stored).
-	dirty  bool
-	sentAt time.Time
-	// failing: the last report didn't reach the server (unreachable), so the
-	// next goes after ReportRetry rather than Keepalive; any report that gets
-	// through clears it (a ConfirmLease's too, on the handler's goroutine, and a
-	// Refresh's, on the goroutine that asked for it, which sets it too when it
-	// doesn't get through). warned: a failed report was logged and none has got through
-	// since, so the next failures are quiet until one does (bridge#31).
-	failing bool
-	warned  bool
+	dirty      bool
+	sentAt     time.Time
+	leaseUntil time.Time // claim or latest successful report, under mu
+	// failing records a transient failure. Any successful report, including a
+	// ConfirmLease or a Refresh, clears it. warned keeps subsequent failures
+	// quiet until a report gets through (bridge#31).
+	failing  bool
+	warned   bool
+	nextIdle time.Time // next report due if the job makes no progress
+	// limited: the last report was a 429, so changed progress of the same
+	// step waits for nextIdle too (due; a new step or a park goes at once).
+	limited bool
 	// parked: the job reports needs_attention with parkMsg as its error, until
 	// Unpark. Unparked, every report clears the error (one a park left, even
 	// across a restart that came before the clear got through).
@@ -2262,8 +2304,7 @@ func (p *Reporter) wake() {
 
 // loop sends the job's progress until done closes or the job's context ends: a
 // new step at once, other changes at most every ProgressEvery, and a keepalive
-// every Keepalive when nothing changed (renewing the lease), every ReportRetry
-// while the last report failed.
+// at nextIdle when nothing changed (renewing the lease).
 func (p *Reporter) loop(done <-chan struct{}) {
 	t := time.NewTicker(p.r.opts.ProgressEvery)
 	defer t.Stop()
@@ -2283,15 +2324,7 @@ func (p *Reporter) loop(done <-chan struct{}) {
 				continue
 			}
 		case <-t.C:
-			p.mu.Lock()
-			since, dirty, failing := time.Since(p.sentAt), p.dirty, p.failing
-			p.mu.Unlock()
-			changed := dirty && since >= p.r.opts.ProgressEvery
-			keepalive := p.r.opts.Keepalive
-			if failing {
-				keepalive = p.r.opts.ReportRetry
-			}
-			if !changed && since < keepalive {
+			if !p.due(time.Now()) {
 				continue
 			}
 		}
@@ -2302,6 +2335,18 @@ func (p *Reporter) loop(done <-chan struct{}) {
 			return
 		}
 	}
+}
+
+// due reports whether a tick at now sends: the keepalive at nextIdle, or
+// changed progress ProgressEvery after the last report, which after a 429
+// waits for nextIdle too, so a busy job does not ask a rate-limiting server
+// again every ProgressEvery (a new step or a park still goes at once).
+func (p *Reporter) due(now time.Time) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	idle := !now.Before(p.nextIdle)
+	changed := p.dirty && now.Sub(p.sentAt) >= p.r.opts.ProgressEvery && !p.limited
+	return idle || changed
 }
 
 // link is the link the job reports on now, by the one rule (Runner.linkFor):
@@ -2394,7 +2439,7 @@ func (p *Reporter) sendLocked() (goOn bool, srv Server, got *link.Job, stop, err
 			p.r.log.Warn("bridge: recording progress failed", "job", p.job.ID, "err", err)
 		}
 	}
-	got, err = srv.UpdateJob(ctx, p.job.ID, u)
+	got, err = srv.UpdateJob(link.SingleAttempt(ctx), p.job.ID, u)
 	if stop = p.answer(got, err, parked); stop != nil {
 		return false, srv, got, stop, err
 	}
@@ -2459,15 +2504,18 @@ func withParkMessage(pr Progress, msg string) Progress {
 	return pr
 }
 
-// failed notes a report that didn't get through: the job goes on, and its lease
-// (a running job's) lasts two minutes from the last report that got through, so
-// while the server is unreachable the next report goes after ReportRetry, not
-// Keepalive (a refusal would only be refused again: it waits the Keepalive). The
-// first failure is logged as a warning, the rest at debug until one gets through
-// (during an outage every running job would warn every ReportRetry).
+// failed schedules the next idle report from the time of the refusal. A 429
+// may extend ReportRetry by asking the Bridge to wait, up to one minute.
+// The first failure warns and later failures log at debug until one gets through.
 func (p *Reporter) failed(err error) {
 	p.mu.Lock()
 	p.failing = unreachable(err)
+	_, p.limited = link.RateLimited(err)
+	delay := p.r.opts.Keepalive
+	if p.failing {
+		delay = p.r.opts.ReportRetry
+	}
+	p.nextIdle = time.Now().Add(retryAfter(delay, err))
 	first := !p.warned
 	p.warned = true
 	p.mu.Unlock()
@@ -2476,6 +2524,15 @@ func (p *Reporter) failed(err error) {
 	} else {
 		p.r.log.Debug("bridge: reporting progress failed again", "job", p.job.ID, "err", err)
 	}
+}
+
+// retryAfter stretches delay to a 429's Retry-After, at most one minute (a
+// claim's pause and a report's alike), never shorter than delay itself.
+func retryAfter(delay time.Duration, err error) time.Duration {
+	if busy, ok := link.RateLimited(err); ok {
+		return max(delay, min(busy.RetryAfter, time.Minute))
+	}
+	return delay
 }
 
 // unreached reports whether the job's last report didn't reach the server
@@ -2491,7 +2548,8 @@ func (p *Reporter) unreached() bool {
 func (p *Reporter) reached() {
 	p.mu.Lock()
 	warned := p.warned
-	p.failing, p.warned = false, false
+	p.failing, p.warned, p.limited = false, false, false
+	p.nextIdle = time.Now().Add(p.r.opts.Keepalive)
 	p.mu.Unlock()
 	if warned {
 		p.r.log.Info("bridge: reporting progress again", "job", p.job.ID)
@@ -2513,9 +2571,14 @@ func unreachable(err error) bool {
 // share_off is heard's. parked: the update reported the job parked (or, sending
 // no error of its own, went out while it was).
 func (p *Reporter) answer(got *link.Job, err error, parked bool) (stop error) {
-	if err == nil && got.Path != nil && *got.Path != "" {
+	if err == nil {
 		p.mu.Lock()
-		p.path = *got.Path
+		if got.Path != nil && *got.Path != "" {
+			p.path = *got.Path
+		}
+		if until := leaseExpiry(got); until.After(p.leaseUntil) || got.State == link.StateNeedsAttention {
+			p.leaseUntil = until
+		}
 		p.mu.Unlock()
 	}
 	switch {
@@ -2538,6 +2601,22 @@ func (p *Reporter) answer(got *link.Job, err error, parked bool) (stop error) {
 		return errUnpaired
 	}
 	return nil
+}
+
+// leaseMargin is how long before the lease expires a running job stops
+// waiting out 429s (retryDeadline), so it can still check for a cancel and
+// report before the server can hand the job to another Bridge attempt.
+const leaseMargin = 10 * time.Second
+
+// retryDeadline is the end of a running job's 429 budget (link.WithRetryDeadline):
+// leaseMargin before the lease its claim or latest report answer carried.
+func (p *Reporter) retryDeadline() time.Time {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.leaseUntil.IsZero() {
+		return time.Time{}
+	}
+	return p.leaseUntil.Add(-leaseMargin)
 }
 
 // acted acts on an answer srv gave once answer has read it, outside sendMu:
@@ -2655,15 +2734,22 @@ var ErrStopped = errors.New("the server stopped the job")
 // when the server holds the job open; ErrStopped when the answer stopped it; the
 // error when the report didn't get through, which counts as any failed report
 // (failing, unless the caller's own context ended): a check that doesn't ask
-// (Runner.ShareOff) then says the job can't be reached, and the next report
-// goes after ReportRetry.
+// (Runner.ShareOff) then says the job can't be reached. A retry takes a new
+// snapshot after the wait, as another report can go through meanwhile.
 func (p *Reporter) Refresh(ctx context.Context) error {
 	if p.r == nil {
 		return nil
 	}
+	return link.Retry(ctx, p.refreshOnce)
+}
+
+func (p *Reporter) refreshOnce(ctx context.Context) error {
 	srv, got, stop, err := func() (Server, *link.Job, error, error) {
 		p.sendMu.Lock()
 		defer p.sendMu.Unlock()
+		if p.settled {
+			return nil, nil, nil, nil // its end is reported (or on its way)
+		}
 		srv, _ := p.link()
 		if srv == nil {
 			return nil, nil, nil, nil
@@ -2686,7 +2772,7 @@ func (p *Reporter) Refresh(ctx context.Context) error {
 		return srv, got, stop, err
 	}()
 	if srv == nil || p.acted(srv, got, stop, err) {
-		return ErrStopped // srv nil: link dropped the job (another server, an unpair)
+		return ErrStopped // srv nil: link dropped the job (another server, an unpair) or it settled
 	}
 	return err
 }
@@ -2701,7 +2787,7 @@ func (p *Reporter) sendNow(ctx context.Context) (got *link.Job, stop, err error)
 	pr, parked, parkMsg := p.progress, p.parked, p.parkMsg
 	p.mu.Unlock()
 	u, _ := p.updateOf(pr, parked, parkMsg)
-	got, err = p.srv.UpdateJob(ctx, p.job.ID, u)
+	got, err = p.srv.UpdateJob(link.SingleAttempt(ctx), p.job.ID, u)
 	return got, p.answer(got, err, parked), err
 }
 

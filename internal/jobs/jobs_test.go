@@ -154,11 +154,13 @@ func (f *fakeServer) finalState(id int64) (string, link.Update) {
 // handler is a test Handler: it runs fn.
 type handler struct {
 	kind, lane string
+	queued     bool // ServerQueued
 	fn         func(ctx context.Context, j Job, rep *Reporter) (any, error)
 }
 
-func (h handler) Kind() string { return h.kind }
-func (h handler) Lane() string { return h.lane }
+func (h handler) Kind() string       { return h.kind }
+func (h handler) Lane() string       { return h.lane }
+func (h handler) ServerQueued() bool { return h.queued }
 func (h handler) Run(ctx context.Context, j Job, rep *Reporter) (any, error) {
 	return h.fn(ctx, j, rep)
 }

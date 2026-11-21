@@ -124,7 +124,9 @@ func (b *Bridge) Audible(ctx context.Context) api.AudibleAccounts {
 		out.UsersError = "pair the Bridge with a server first"
 		return out
 	}
-	users, err := cl.Users(ctx)
+	// The Accounts tab's GET answers inside the page's write timeout (it takes
+	// no slowAnswer): a long 429 is said, not waited out.
+	users, err := cl.Prompt().Users(ctx)
 	if err != nil {
 		out.UsersError = "the server's people couldn't be read: " + err.Error()
 		return out

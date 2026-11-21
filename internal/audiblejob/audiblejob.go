@@ -100,11 +100,14 @@ func New(o Options) *Handler {
 	if o.ServerID == nil {
 		o.ServerID = func() string { return "" }
 	}
-	return &Handler{o: o, now: time.Now, sleep: sleepCtx}
+	return &Handler{o: o, now: time.Now, sleep: link.Wait}
 }
 
 // Kind is audible.poll.
 func (h *Handler) Kind() string { return Kind }
+
+// ServerQueued: the server queues and schedules polls again itself.
+func (h *Handler) ServerQueued() bool { return true }
 
 // Lane is the light lane: a poll is a few API calls, then the paced ASIN
 // backfill (up to enrichBudget, the rest deferred to the next poll).
@@ -231,7 +234,7 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	rep.Progress(jobs.Progress{Step: "books", Message: "Reading the library's books on the server"})
 	books, err := allBooks(ctx, srv, acct.LibraryID)
 	if err != nil {
-		return nil, h.fail(ctx, acct.ID, "could not read the library's books on the server: "+err.Error())
+		return nil, h.serverFailure(ctx, acct.ID, "could not read the library's books on the server", err)
 	}
 
 	rep.Progress(jobs.Progress{Step: "matching", Message: "Matching the titles to the library", Total: len(recs)})
@@ -353,7 +356,7 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 			if errors.Is(err, link.ErrUnknownAccount) {
 				return nil, h.fail(ctx, acct.ID, "the server has no such Audible account: sign in or map the account again on the Bridge's Accounts tab")
 			}
-			return nil, h.fail(ctx, acct.ID, "could not report the titles to the server: "+err.Error())
+			return nil, h.serverFailure(ctx, acct.ID, "could not report the titles to the server", err)
 		}
 		rep.Progress(jobs.Progress{Step: "reporting", Message: "Reporting the titles to the server", Done: end, Total: len(titles)})
 		if final {
@@ -434,6 +437,14 @@ func (h *Handler) mappedMount(id int64) string {
 		return ""
 	}
 	return mount
+}
+
+// A server rate limit fails this poll without marking the Audible account unhealthy.
+func (h *Handler) serverFailure(ctx context.Context, account, operation string, err error) error {
+	if busy, ok := link.RateLimited(err); ok {
+		return fmt.Errorf("%s: %w", operation, busy)
+	}
+	return h.fail(ctx, account, operation+": "+err.Error())
 }
 
 // fail records why the poll failed on the account and returns it as the job's
