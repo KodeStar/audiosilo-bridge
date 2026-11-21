@@ -935,10 +935,13 @@ func (s *service) rescan(ctx context.Context, id int64, show string, deferOnLimi
 	if srv == nil {
 		return fail("write_failed", "The server is unavailable for indexing. Check the feed again.")
 	}
+	var err error
 	if deferOnLimit {
-		ctx = link.WithRetryDeadline(ctx, nil) // the next poll can finish indexing a saved feed
+		err = s.askRescan(ctx, srv, id, show) // the next poll can finish indexing a saved feed
+	} else {
+		_, err = srv.RescanPodcast(ctx, id, show)
 	}
-	if _, err := srv.RescanPodcast(ctx, id, show); err != nil {
+	if err != nil {
 		if _, limited := link.RateLimited(err); limited && deferOnLimit {
 			slog.Info("podcasts: the server asked the Bridge to slow down; the next poll will index the show", "library", id, "show", show)
 			return nil

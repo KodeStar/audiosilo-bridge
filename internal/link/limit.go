@@ -69,8 +69,7 @@ type retryDeadlineKey struct{}
 // WithRetryDeadline supplies the end of a running job's 429 budget. Each
 // refused request reads it once, so renewals benefit later requests without
 // keeping one permanently limited request alive. A zero time means no known
-// lease. A nil deadline selects the ordinary request budget for work that can
-// be deferred. Calls with their own Backoff keep their own policy.
+// lease. Calls with their own Backoff keep their own policy.
 func WithRetryDeadline(ctx context.Context, deadline func() time.Time) context.Context {
 	return context.WithValue(ctx, retryDeadlineKey{}, deadline)
 }
