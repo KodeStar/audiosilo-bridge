@@ -641,7 +641,7 @@ func TestPairRateLimitWait(t *testing.T) {
 		set  bool
 		want string
 	}{
-		{"HTTP date", 2*time.Minute - time.Millisecond, true, "The server is limiting pairing requests. Try again in 2 minutes."},
+		{"rounds up to minutes", 2*time.Minute - time.Millisecond, true, "The server is limiting pairing requests. Try again in 2 minutes."},
 		{"one minute", time.Minute, true, "The server is limiting pairing requests. Try again in 1 minute."},
 		{"short wait", 1400 * time.Millisecond, true, "The server is limiting pairing requests. Try again in 2 seconds."},
 		{"one second", time.Second, true, "The server is limiting pairing requests. Try again in 1 second."},

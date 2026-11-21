@@ -101,30 +101,35 @@ func (b Backoff) Do(ctx context.Context, wait func(context.Context, time.Duratio
 		return call(ctx)
 	}
 	ctx = SingleAttempt(ctx)
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	err := call(ctx)
-	busy, limited := RateLimited(err)
-	if !limited {
-		return err
-	}
-
-	retryCtx := ctx
-	var until time.Time
-	if deadline, _ := ctx.Value(retryDeadlineKey{}).(func() time.Time); b.useLease && deadline != nil {
-		until = deadline()
-		if !until.IsZero() {
-			var cancel context.CancelFunc
-			retryCtx, cancel = context.WithDeadline(ctx, until)
-			defer cancel()
-			b.Tries = math.MaxInt
-		}
-	}
-	attempt := 1
-	for ; ; attempt++ {
+	// After the first refusal, a known lease turns the budget into time:
+	// callCtx ends at its deadline and the call is asked until then.
+	callCtx, until := ctx, time.Time{}
+	budgetOver := func() bool { return !until.IsZero() && ctx.Err() == nil && !time.Now().Before(until) }
+	var err error
+	attempt := 0
+	for {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		next := call(callCtx)
+		if errors.Is(next, context.DeadlineExceeded) && budgetOver() {
+			break // the lease budget ended, return the last refusal
+		}
+		attempt++
+		err = next
+		busy, limited := RateLimited(err)
+		if !limited {
+			return err
+		}
+		if attempt == 1 && b.useLease {
+			if deadline, _ := ctx.Value(retryDeadlineKey{}).(func() time.Time); deadline != nil {
+				if until = deadline(); !until.IsZero() {
+					var cancel context.CancelFunc
+					callCtx, cancel = context.WithDeadline(ctx, until)
+					defer cancel()
+					b.Tries = math.MaxInt
+				}
+			}
 		}
 		delay, retry := b.Wait(busy, attempt)
 		if !retry {
@@ -136,23 +141,15 @@ func (b Backoff) Do(ctx context.Context, wait func(context.Context, time.Duratio
 		if !busy.RetryAfterSet && delay > 0 {
 			delay = delay/2 + rand.N(delay-delay/2) //nolint:gosec // jitter only spreads retries
 		}
-		waitErr := wait(retryCtx, delay)
+		waitErr := wait(callCtx, delay)
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if !until.IsZero() && !time.Now().Before(until) {
+		if budgetOver() {
 			break
 		}
 		if waitErr != nil {
 			return waitErr
-		}
-		next := call(retryCtx)
-		if errors.Is(next, context.DeadlineExceeded) && retryCtx.Err() != nil && ctx.Err() == nil {
-			break // the lease budget ended, return the last refusal
-		}
-		err = next
-		if busy, limited = RateLimited(err); !limited {
-			return err
 		}
 	}
 	if ctx.Value(lastErrorKey{}) != nil {

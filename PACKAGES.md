@@ -2132,14 +2132,15 @@ internal/
             first refusal. It honors Retry-After within that budget, including
             waits over a minute. Outside a known lease the default is 3 attempts
             with waits capped at 60 s. A missing or invalid header starts at
-            0.5 to 1 s and doubles with jitter. Cancellation interrupts the wait. Each attempt rebuilds the
-            JSON body and gets its own HTTP timeout (a claim's wait plus 15 s).
+            0.5 to 1 s and doubles with jitter. Cancellation interrupts the
+            wait. Each attempt rebuilds the JSON body and gets its own HTTP
+            timeout (a claim's wait plus 15 s).
             The limiter refuses the request before the route acts, including
             pairing, claiming a job and posting listening events. An exhausted
             limit wraps the last APIError, which RateLimited recognizes.
             Server-queued handlers get the last error with its original wording.
-            Episode rescans and Audible enrichment use Backoff.Do with their
-            own budgets. Only the outer call waits or retries. A call a person
+            Episode rescans, a poll's show rescan and Audible enrichment use
+            Backoff.Do with their own budgets. Only the outer call waits or retries. A call a person
             waits for on the page (Pair, Client.Prompt: the Accounts tab's
             people read) waits at most 10 s per 429 and answers a longer
             Retry-After (a pairing lockout's) at once, inside the page's 60 s
@@ -3062,8 +3063,9 @@ internal/
             waited) leaves the saved episode for the show's next poll's rescan
             (isIndexed) and the fetch succeeds, never index_failed (a retain
             then leaves its other deletions' rescans to that poll too, rather
-            than wait again for each). A poll can also leave its show rescan to
-            the next poll, even if the feed then answers 304. A subscribe
+            than wait again for each). A poll's show rescan waits on the same
+            budget and can leave it to the next poll, even if the feed then
+            answers 304. A subscribe
             needs its first index and passes a lasting limit to the runner.
             A saved feed.json over
             the read cap fails as too_large, not write_failed. A new show never

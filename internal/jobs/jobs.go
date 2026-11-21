@@ -2603,15 +2603,20 @@ func (p *Reporter) answer(got *link.Job, err error, parked bool) (stop error) {
 	return nil
 }
 
-// retryDeadline leaves time for the final cancel check and report before the
-// server can hand the job to another Bridge attempt.
+// leaseMargin is how long before the lease expires a running job stops
+// waiting out 429s (retryDeadline), so it can still check for a cancel and
+// report before the server can hand the job to another Bridge attempt.
+const leaseMargin = 10 * time.Second
+
+// retryDeadline is the end of a running job's 429 budget (link.WithRetryDeadline):
+// leaseMargin before the lease its claim or latest report answer carried.
 func (p *Reporter) retryDeadline() time.Time {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.leaseUntil.IsZero() {
 		return time.Time{}
 	}
-	return p.leaseUntil.Add(-DefaultReportRetry)
+	return p.leaseUntil.Add(-leaseMargin)
 }
 
 // acted acts on an answer srv gave once answer has read it, outside sendMu:

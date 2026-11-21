@@ -301,13 +301,13 @@ func TestJobRetryDeadlineFollowsLease(t *testing.T) {
 	claim := now.Add(time.Minute).Format(time.RFC3339Nano)
 	job := jobOf(&link.Job{LeaseUntil: &claim})
 	rep := &Reporter{leaseUntil: job.leaseUntil}
-	if got := rep.retryDeadline(); !got.Equal(now.Add(time.Minute - DefaultReportRetry)) {
+	if got := rep.retryDeadline(); !got.Equal(now.Add(time.Minute - leaseMargin)) {
 		t.Fatalf("claim retry deadline = %v", got)
 	}
 	renewal := now.Add(2 * time.Minute).Format(time.RFC3339Nano)
 	rep.answer(&link.Job{LeaseUntil: &renewal}, nil, false)
 	rep.answer(nil, &link.APIError{Status: http.StatusTooManyRequests}, false)
-	if got := rep.retryDeadline(); !got.Equal(now.Add(2*time.Minute - DefaultReportRetry)) {
+	if got := rep.retryDeadline(); !got.Equal(now.Add(2*time.Minute - leaseMargin)) {
 		t.Fatalf("renewed retry deadline = %v", got)
 	}
 	rep.answer(&link.Job{State: link.StateNeedsAttention}, nil, true)
@@ -351,7 +351,7 @@ func TestRateLimitedJob(t *testing.T) {
 			defer api.Close()
 			cl, _ := link.New(api.URL, "", "dev")
 			db, srv := openStore(t), newFakeServer()
-			until := time.Now().Add(DefaultReportRetry + time.Second).Format(time.RFC3339Nano)
+			until := time.Now().Add(leaseMargin + time.Second).Format(time.RFC3339Nano)
 			srv.add(&link.Job{ID: 31, Kind: "k.scan", Attempts: 1, LeaseUntil: &until})
 			r := New(db, func() Server { return srv }, nil, testOpts(), handler{kind: "k.scan", lane: LaneLight, queued: tc.queued,
 				fn: func(ctx context.Context, _ Job, _ *Reporter) (any, error) {
