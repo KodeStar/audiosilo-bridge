@@ -72,6 +72,9 @@ const tmpHeadroom = 2.2
 // job that never resumed: cancelled while the Bridge was down, or lost).
 const PartialMaxAge = 7 * 24 * time.Hour
 
+// Only a successful decrypt is renamed to this suffix. Older .m4b files can be incomplete.
+const readySuffix = ".ready.m4b"
+
 // downloadAttempts bounds one license's download attempts in a row that add
 // nothing to the partial (a dropped connection resumes from it each time; an
 // attempt that added to it starts the count again).
@@ -211,6 +214,7 @@ type ImportAccounts interface {
 
 // ImportServer is the part of the server link an import calls (*link.Client).
 type ImportServer interface {
+	Book(ctx context.Context, libraryID int64, path string) (*link.Book, error)
 	LibraryBooks(ctx context.Context, libraryID int64, after string, limit int) (*link.LibraryBooks, error)
 	Rescan(ctx context.Context, libraryID int64, path string) (string, error)
 	Enrich(ctx context.Context, libraryID int64, path, asin string) error
@@ -250,8 +254,9 @@ type Importer struct {
 	o     ImportOptions
 	local *transfer.Local
 
-	mu    sync.Mutex
-	gates map[string]chan struct{}
+	mu      sync.Mutex
+	gates   map[string]chan struct{}
+	listing *bookSnapshot
 }
 
 // NewImport returns the import handler.
@@ -295,7 +300,7 @@ func (h *Importer) tmpBase(account, asin string) string {
 // with its state file) and the decrypted copy.
 func (h *Importer) partPaths(account, asin string) (part, decrypted string) {
 	base := h.tmpBase(account, asin)
-	return base + ".aaxc.part", base + ".m4b"
+	return base + ".aaxc.part", base + readySuffix
 }
 
 // Abandon removes the temp files of a job the runner ended without running it
@@ -323,6 +328,7 @@ func (h *Importer) Abandon(ctx context.Context, job jobs.Job) {
 	part, decrypted := h.partPaths(p.Account, p.ASIN)
 	audible.RemovePartial(part)
 	_ = os.Remove(decrypted)
+	_ = os.Remove(decrypted + ".json")
 }
 
 // Run imports the title: license, download, decrypt, place, rescan, enrich.
@@ -375,13 +381,13 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 	defer release()
 	part, decrypted := h.partPaths(p.Account, p.ASIN)
 	defer func() {
-		_ = os.Remove(decrypted)
-		// The partial outlives a stop the next start resumes, and a lost claim
-		// the server hands out again (decision 6); a cancel, a failure or the
-		// end delete it.
+		// A stop or lost claim keeps completed audio or a resumable download.
+		// Cancellation and terminal failure clear the private files.
 		if err != nil && ctx.Err() != nil && (jobs.Resumes(ctx) || jobs.Lost(ctx)) {
 			return
 		}
+		_ = os.Remove(decrypted)
+		_ = os.Remove(decrypted + ".json")
 		audible.RemovePartial(part)
 	}()
 
@@ -397,6 +403,7 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 	if err := h.importable(acct, err, serverID, p); err != nil {
 		return nil, err
 	}
+	library := importLibrary{server: serverID, pairing: job.Pairing(), id: p.LibraryID}
 	var srv ImportServer
 	if h.o.Server != nil {
 		srv = jobs.Link(job, h.o.Server())
@@ -405,7 +412,8 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 		return nil, errors.New("the Bridge isn't paired with a server")
 	}
 
-	lib, mount, err := h.mapped(ctx, p.LibraryID, rep, StepLicense, !job.Resumed)
+	stage := readStaged(decrypted, library, p.ASIN)
+	lib, mount, err := h.mapped(ctx, p.LibraryID, rep, StepLicense, !job.Resumed && stage == nil)
 	if err != nil {
 		return nil, err
 	}
@@ -424,9 +432,21 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 		return nil, err
 	}
 	if earlier != nil && earlier.request(p) {
-		return h.finish(ctx, rep, srv, acct.ID, p.ASIN, lib.ID, earlier.installed(), marker)
+		return h.finish(ctx, rep, srv, acct.ID, p.ASIN, library, earlier.installed(), marker)
 	}
 
+	// A process can die between publishing the staged bytes and writing its
+	// placement marker. Only adopt that destination if it is the same book.
+	if stage != nil && stage.LibraryID == lib.ID && stage.Request == requestOf(p) {
+		same, err := transfer.Matches(ctx, mount, stage.Path, decrypted)
+		if err != nil {
+			return nil, err
+		}
+		if same {
+			return h.finish(ctx, rep, srv, acct.ID, p.ASIN, library,
+				installed{rel: stage.Path, size: stage.Size, already: true, joins: stage.Joins}, marker)
+		}
+	}
 	// A refused account fails here, before asking Audible anything: each queued
 	// import would only be refused in turn (a device denied licenses, for one,
 	// stays denied) until the owner signs in again, which ends the refusal.
@@ -448,25 +468,23 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 		return nil, refusedSignIn()
 	}
 
-	h.report(rep, jobs.Progress{Step: StepLicense, Message: "Reading the title from Audible"})
-	rec, err := h.o.Accounts.Title(ctx, acct.ID, p.ASIN)
-	switch {
-	case errors.Is(err, audibleacct.ErrRefused):
-		return nil, refusedSignIn()
-	case errors.Is(err, audible.ErrNotInLibrary):
-		return nil, fail(CodeNoRights, "The title isn't in the Audible account's library.")
-	case err != nil:
-		return nil, fmt.Errorf("reading the title from Audible: %w", err)
-	case rec.Preorder:
-		return nil, fail(CodeNotReleased, "The title isn't released yet (%s).", audible.RedactAccountIDs(rec.UnavailableReason))
-	case strings.TrimSpace(rec.UnavailableReason) != "":
-		return nil, fail(CodeNoRights, "Audible won't let the account download the title: %s.", audible.RedactAccountIDs(rec.UnavailableReason))
+	var rec source.Record
+	if stage != nil {
+		rec = stage.Title
+	} else {
+		rec, err = h.readTitle(ctx, p, rep)
+		if err != nil {
+			return nil, err
+		}
 	}
-	rec.ASIN = p.ASIN
 
-	books, err := allBooks(ctx, srv, lib.ID)
-	if err != nil {
-		return nil, fmt.Errorf("reading the library's books on the server: %w", err)
+	var books []link.LibraryBook
+	checkPaths := strings.TrimSpace(p.DestPath) != ""
+	if !checkPaths {
+		books, checkPaths, err = h.booksFor(ctx, srv, library)
+		if err != nil {
+			return nil, fmt.Errorf("reading the library's books on the server: %w", err)
+		}
 	}
 	rel, err := Destination(p, rec, books)
 	if err != nil {
@@ -477,7 +495,7 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 	}
 	if earlier != nil {
 		if earlier.Path == rel {
-			return h.finish(ctx, rep, srv, acct.ID, p.ASIN, lib.ID, earlier.installed(), marker)
+			return h.finish(ctx, rep, srv, acct.ID, p.ASIN, library, earlier.installed(), marker)
 		}
 		// Placed for another destination: that copy stays where it is, and
 		// the title goes where this request asks.
@@ -485,31 +503,32 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 			"account", acct.ID, "asin", p.ASIN, "library", lib.ID, "path", earlier.Path)
 		_ = os.Remove(marker)
 	}
+	if checkPaths {
+		books, err = booksAt(ctx, srv, lib.ID, mount, rel)
+		if err != nil {
+			return nil, fmt.Errorf("checking the destination on the server: %w", err)
+		}
+	}
 	if err := h.vacant(mount, rel, books); err != nil {
 		return nil, err
 	}
 	joins := joinedBooks(rec, books, rel)
 
-	lic, err := h.license(ctx, acct.ID, p.ASIN)
-	if err != nil {
-		return nil, err
+	next := stagedBook{Server: serverID, Pairing: library.pairing, Title: rec, LibraryID: lib.ID, Request: requestOf(p), Path: rel, Joins: joins}
+	if stage == nil {
+		if err := h.prepare(ctx, p, part, decrypted, mount, rel, rep, next); err != nil {
+			if fsutil.IsNoSpace(err) {
+				return nil, fail(CodeDiskFull, "The Bridge ran out of space staging the book in its data folder.")
+			}
+			return nil, err
+		}
+	} else {
+		next.Size, next.ModTime = stage.Size, stage.ModTime
+		if err := next.save(decrypted); err != nil {
+			return nil, err
+		}
 	}
-	h.report(rep, jobs.Progress{Step: StepDownload, Message: "Downloading from Audible"})
-	if lic, err = h.download(ctx, acct.ID, p.ASIN, lic, part, mount, rel, rep); err != nil {
-		return nil, err
-	}
-
-	h.report(rep, jobs.Progress{Step: StepDecrypt, Message: "Removing the DRM (a lossless copy)"})
-	err = h.o.Decrypt(ctx, h.o.FFmpeg(), part, decrypted, lic)
-	switch {
-	case err != nil && ctx.Err() != nil:
-		return nil, ctx.Err()
-	case err != nil && ranOutOfRoom(err):
-		return nil, fail(CodeDiskFull, "The Bridge ran out of space removing the DRM: free some space in its data folder.")
-	case err != nil:
-		return nil, fmt.Errorf("removing the DRM: %w", err)
-	}
-	audible.RemovePartial(part) // room for the copy into the library
+	audible.RemovePartial(part)
 
 	h.report(rep, jobs.Progress{Step: StepPlace, Message: "Copying the book into the library"})
 	// Checked again before the copy: the mapping may have changed during the
@@ -518,7 +537,7 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 	if _, mount, err = h.mapped(ctx, lib.ID, rep, StepPlace, false); err != nil {
 		return nil, err
 	}
-	placed, err := h.local.Place(ctx, transfer.PlaceRequest{Root: mount, RelPath: rel, SrcPath: decrypted,
+	placed, err := h.local.Place(ctx, transfer.PlaceRequest{Root: mount, RelPath: rel, SrcPath: decrypted, LinkSource: true, BeforeInstall: rep.ConfirmLease,
 		Progress: func(copied, total int64) {
 			h.report(rep, jobs.Progress{Step: StepPlace, Message: "Copying the book into the library", Done: int(copied), Total: int(total)})
 		}})
@@ -538,8 +557,117 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 	if err := writePlaced(marker, requestOf(p), lib.ID, mount, placed.RelPath, joins); err != nil {
 		h.o.Log.Warn("audible: recording an imported book's placement failed", "account", acct.ID, "asin", p.ASIN, "err", err)
 	}
-	return h.finish(ctx, rep, srv, acct.ID, p.ASIN, lib.ID,
+	return h.finish(ctx, rep, srv, acct.ID, p.ASIN, library,
 		installed{rel: placed.RelPath, size: placed.Size, already: placed.AlreadyPresent, joins: joins}, marker)
+}
+
+// A ready file and its metadata were written by the same completed decrypt.
+type stagedBook struct {
+	LibraryID int64           `json:"library_id"`
+	Request   placedRequest   `json:"request"`
+	Path      string          `json:"path"`
+	Joins     map[string]bool `json:"joins,omitempty"`
+	ModTime   int64           `json:"mtime_ns"`
+	Server    string          `json:"server"`
+	Pairing   string          `json:"pairing,omitempty"`
+	Title     source.Record   `json:"title"`
+	Size      int64           `json:"size"`
+}
+
+func (m stagedBook) save(file string) error {
+	b, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	return fsutil.WriteFileAtomic(file+".json", b, 0o600)
+}
+
+func readStaged(file string, library importLibrary, asin string) *stagedBook {
+	info, err := os.Lstat(file)
+	if err != nil || !info.Mode().IsRegular() {
+		return nil
+	}
+	b, err := os.ReadFile(file + ".json") //nolint:gosec // named within the private import folder
+	var m stagedBook
+	if err != nil || json.Unmarshal(b, &m) != nil || m.Server != library.server || m.Pairing != library.pairing ||
+		m.Title.ASIN != asin || m.Size <= 0 || m.Size != info.Size() || m.ModTime != info.ModTime().UnixNano() {
+		return nil
+	}
+	return &m
+}
+
+func (h *Importer) readTitle(ctx context.Context, p ImportParams, rep *jobs.Reporter) (source.Record, error) {
+	h.report(rep, jobs.Progress{Step: StepLicense, Message: "Reading the title from Audible"})
+	rec, err := h.o.Accounts.Title(ctx, p.Account, p.ASIN)
+	switch {
+	case errors.Is(err, audibleacct.ErrRefused):
+		return source.Record{}, refusedSignIn()
+	case errors.Is(err, audible.ErrNotInLibrary):
+		return source.Record{}, fail(CodeNoRights, "The title isn't in the Audible account's library.")
+	case err != nil:
+		return source.Record{}, fmt.Errorf("reading the title from Audible: %w", err)
+	case rec.Preorder:
+		return source.Record{}, fail(CodeNotReleased, "The title isn't released yet (%s).", audible.RedactAccountIDs(rec.UnavailableReason))
+	case strings.TrimSpace(rec.UnavailableReason) != "":
+		return source.Record{}, fail(CodeNoRights, "Audible won't let the account download the title: %s.", audible.RedactAccountIDs(rec.UnavailableReason))
+	}
+	rec.ASIN = p.ASIN
+	return rec, nil
+}
+
+// prepare writes the title and completed audio before discarding the encrypted download.
+func (h *Importer) prepare(ctx context.Context, p ImportParams, part, decrypted, mount, rel string, rep *jobs.Reporter, stage stagedBook) error {
+	// A prior incomplete or invalid pair must never be vouched for by new metadata.
+	if err := os.Remove(decrypted); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	lic, err := h.license(ctx, p.Account, p.ASIN)
+	if err != nil {
+		return err
+	}
+	h.report(rep, jobs.Progress{Step: StepDownload, Message: "Downloading from Audible"})
+	if lic, err = h.download(ctx, p.Account, p.ASIN, lic, part, mount, rel, rep); err != nil {
+		return err
+	}
+
+	h.report(rep, jobs.Progress{Step: StepDecrypt, Message: "Removing the DRM (a lossless copy)"})
+	// A stopped ffmpeg can leave a valid-looking but incomplete MP4. Keep its
+	// output separate until it has closed successfully.
+	work := decrypted + ".partial"
+	defer func() { _ = os.Remove(work) }()
+	// Use the final library mode (subject to the umask) inside the private temp folder.
+	f, err := os.OpenFile(work, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o644) //nolint:gosec // G302: final library mode inside a private 0700 folder
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	err = h.o.Decrypt(ctx, h.o.FFmpeg(), part, work, lic)
+	switch {
+	case err != nil && ctx.Err() != nil:
+		return ctx.Err()
+	case err != nil && ranOutOfRoom(err):
+		return fail(CodeDiskFull, "The Bridge ran out of space removing the DRM: free some space in its data folder.")
+	case err != nil:
+		return fmt.Errorf("removing the DRM: %w", err)
+	}
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Size() == 0 {
+		return errors.New("the decrypted book is empty")
+	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	stage.Size, stage.ModTime = info.Size(), info.ModTime().UnixNano()
+	if err := stage.save(decrypted); err != nil {
+		return err
+	}
+	return os.Rename(work, decrypted)
 }
 
 // joinedBooks is, for each book of the library the file at rel could join (the
@@ -592,8 +720,9 @@ type installed struct {
 // finish is the steps after the install: the rescan, the ASIN (unless the
 // book it answers is one the file joined that may not take it) and the result.
 // The placement marker goes once the result is made.
-func (h *Importer) finish(ctx context.Context, rep *jobs.Reporter, srv ImportServer, account, asin string, libraryID int64,
+func (h *Importer) finish(ctx context.Context, rep *jobs.Reporter, srv ImportServer, account, asin string, library importLibrary,
 	in installed, marker string) (*ImportResult, error) {
+	libraryID := library.id
 	rel, size := in.rel, in.size
 	h.report(rep, jobs.Progress{Step: StepRescan, Message: "Asking the server to index the book"})
 	bookPath, err := h.rescan(ctx, srv, libraryID, rel)
@@ -601,6 +730,7 @@ func (h *Importer) finish(ctx context.Context, rep *jobs.Reporter, srv ImportSer
 		return nil, fmt.Errorf("the book is in the library at %s, but the server couldn't index it: %w", rel, err)
 	}
 
+	h.recordBook(library, bookPath)
 	enrich, joined := in.joins[bookPath]
 	if !joined {
 		enrich = true // a new book: the title's own
@@ -777,9 +907,15 @@ func (h *Importer) gate(ctx context.Context, account string, rep *jobs.Reporter)
 		return release, nil
 	}
 	g := h.gateOf(account)
+	// A parked gate holder may need this lane slot to resume.
+	rep.Yield()
 	h.report(rep, jobs.Progress{Step: StepLicense, Message: "Waiting for this account's other backup to finish"})
 	select {
 	case g <- struct{}{}:
+		if err := rep.Reclaim(ctx); err != nil {
+			<-g
+			return nil, err
+		}
 		return func() { <-g }, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -828,16 +964,27 @@ func (h *Importer) mapped(ctx context.Context, id int64, rep *jobs.Reporter, ste
 		why := fmt.Sprintf("Library %s must be mapped and writable on the Bridge: check its mapping on the Bridge's Status tab.", lib.Name)
 		switch {
 		case checked && st.MountPath == mount && st.Mapped && st.Writable:
-			rep.Unpark() // a park of its own, or one a restart restored
-			return lib, mount, nil
+			rep.Unpark()
+			if !rep.Yielded() {
+				return lib, mount, nil
+			}
+			h.report(rep, jobs.Progress{Step: step, Message: "Waiting for the Bridge's other download to finish"})
+			if err := rep.Reclaim(ctx); err != nil {
+				return link.Library{}, "", err
+			}
+			continue // the mapping may have changed while reclaiming the slot
 		case !checked || st.MountPath != mount:
 			h.report(rep, jobs.Progress{Step: step, Message: "Waiting for the library's mapping check"})
+			if !checked && st.Error != "" {
+				rep.Yield()
+			}
 		case strict:
 			return link.Library{}, "", fail(CodeNotWritable, "%s", why)
 		default:
 			h.report(rep, jobs.Progress{Step: step, Message: "Needs attention: " + why,
 				Extra: map[string]any{"park": map[string]any{"code": CodeNotWritable}}})
 			rep.Park(CodeNotWritable, why)
+			rep.Yield()
 		}
 		if err := h.o.Wait(ctx, mappingPoll); err != nil {
 			return link.Library{}, "", err
@@ -1288,10 +1435,8 @@ func size(n int64) string {
 
 // SweepTmp is the start-up sweep of the import's temp folder (decision 6): a
 // partial download (*.aaxc.part and its .state) younger than PartialMaxAge
-// stays for its job to resume, as does a placement marker (*.placed.json) as
-// young, for a retry to finish an installed book; everything else goes
-// (decrypted copies, older partials and markers, a state without its partial,
-// anything a crash left).
+// stays for its job to resume. A complete decrypt or placement marker as young
+// stays too. An interrupted decrypt has a different suffix and is discarded.
 func SweepTmp(dir string, now time.Time) error {
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -1306,11 +1451,14 @@ func SweepTmp(dir string, now time.Time) error {
 			continue
 		}
 		marker, part := strings.HasSuffix(e.Name(), placedSuffix), strings.HasSuffix(e.Name(), ".aaxc.part")
-		if !marker && !part {
+		if !marker && !part && !strings.HasSuffix(e.Name(), readySuffix) {
 			continue
 		}
 		if info, err := e.Info(); err == nil && now.Sub(info.ModTime()) < PartialMaxAge {
 			keep[e.Name()] = true
+			if strings.HasSuffix(e.Name(), readySuffix) {
+				keep[e.Name()+".json"] = true
+			}
 			if part {
 				keep[filepath.Base(audible.StatePath(e.Name()))] = true
 			}

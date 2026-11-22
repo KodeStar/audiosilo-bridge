@@ -24,7 +24,6 @@ import (
 
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 	"github.com/kodestar/audiosilo-bridge/internal/mapping"
-	"github.com/kodestar/audiosilo-bridge/internal/progress"
 )
 
 // Errors Place answers (wrapped; test with errors.Is).
@@ -55,6 +54,11 @@ type PlaceRequest struct {
 	RelPath string
 	// SrcPath is the file to copy (on this machine).
 	SrcPath string
+	// LinkSource allows a hard link to the caller's finished, private staging file.
+	// It already has library permissions and the caller only unlinks it after Place.
+	LinkSource bool
+	// BeforeInstall confirms the lease immediately before publishing the staged file.
+	BeforeInstall func(context.Context) error
 	// Progress (may be nil) reports bytes copied, throttled.
 	Progress func(copied, total int64)
 }
@@ -178,6 +182,9 @@ func RootFS(root *os.Root) LibraryFS { return root.FS().(LibraryFS) }
 // Missing folders are created (0755 under the umask). The caller checks the
 // mapping is still writable before calling.
 func (l *Local) Place(ctx context.Context, req PlaceRequest) (PlaceResult, error) {
+	if err := ctx.Err(); err != nil {
+		return PlaceResult{}, err
+	}
 	rel, err := CleanRel(req.RelPath)
 	if err != nil {
 		return PlaceResult{}, err
@@ -204,14 +211,16 @@ func (l *Local) Place(ctx context.Context, req PlaceRequest) (PlaceResult, error
 	size := info.Size()
 	res := PlaceResult{RelPath: rel, Size: size}
 
-	if same, err := l.sameAt(ctx, root, rel, src, size); err != nil {
+	if same, err := sameAt(ctx, root, rel, src, info); err != nil {
 		return PlaceResult{}, err
 	} else if same {
 		res.AlreadyPresent = true
 		return res, nil
 	}
-	if err := l.checkFree(req.Root, rel, size); err != nil {
-		return PlaceResult{}, err
+	if !req.LinkSource {
+		if err := l.checkFree(req.Root, rel, size); err != nil {
+			return PlaceResult{}, err
+		}
 	}
 	dir := path.Dir(rel)
 	if dir != "." {
@@ -219,13 +228,18 @@ func (l *Local) Place(ctx context.Context, req PlaceRequest) (PlaceResult, error
 			return PlaceResult{}, noSpace(fmt.Errorf("creating the book's folder: %w", err))
 		}
 	}
-	temp, err := l.stage(ctx, root, dir, src, size, req.Progress)
+	temp, err := l.stage(ctx, root, dir, src, size, req)
 	if err != nil {
 		return PlaceResult{}, err
 	}
 	defer func() { _ = root.Remove(temp) }() // gone already when the install renamed it
 	if l.beforeInstall != nil {
 		l.beforeInstall()
+	}
+	if req.BeforeInstall != nil {
+		if err := req.BeforeInstall(ctx); err != nil {
+			return PlaceResult{}, fmt.Errorf("confirming the lease before installing the book: %w", err)
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return PlaceResult{}, err
@@ -236,7 +250,7 @@ func (l *Local) Place(ctx context.Context, req PlaceRequest) (PlaceResult, error
 		}
 		// Something arrived at the destination meanwhile: these bytes are fine,
 		// anything else stays as it is.
-		same, serr := l.sameAt(ctx, root, rel, src, size)
+		same, serr := sameAt(ctx, root, rel, src, info)
 		if serr != nil {
 			return PlaceResult{}, serr
 		}
@@ -248,9 +262,37 @@ func (l *Local) Place(ctx context.Context, req PlaceRequest) (PlaceResult, error
 	return res, nil
 }
 
+// Matches checks the bytes at a previous placement destination during crash
+// recovery. A different file, link, folder or missing file never matches.
+func Matches(ctx context.Context, mount, rel, staged string) (bool, error) {
+	rel, err := CleanRel(rel)
+	if err != nil {
+		return false, err
+	}
+	root, err := os.OpenRoot(mount)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = root.Close() }()
+	src, err := os.Open(staged) //nolint:gosec // G304: private staging path from the validated account ID and ASIN
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = src.Close() }()
+	info, err := src.Stat()
+	if err != nil {
+		return false, err
+	}
+	same, err := sameAt(ctx, root, rel, src, info)
+	if errors.Is(err, ErrExists) {
+		return false, nil
+	}
+	return same, err
+}
+
 // sameAt reports whether rel holds exactly src's bytes. Nothing there is false;
 // a folder, a link, a special file or a different file is ErrExists.
-func (l *Local) sameAt(ctx context.Context, root *os.Root, rel string, src *os.File, size int64) (bool, error) {
+func sameAt(ctx context.Context, root *os.Root, rel string, src *os.File, info fs.FileInfo) (bool, error) {
 	st, err := root.Lstat(rel)
 	if errors.Is(err, fs.ErrNotExist) {
 		return false, nil
@@ -258,8 +300,11 @@ func (l *Local) sameAt(ctx context.Context, root *os.Root, rel string, src *os.F
 	if err != nil {
 		return false, err
 	}
-	if !st.Mode().IsRegular() || st.Size() != size {
+	if !st.Mode().IsRegular() || st.Size() != info.Size() {
 		return false, fmt.Errorf("%w: %s", ErrExists, rel)
+	}
+	if os.SameFile(st, info) {
+		return true, ctx.Err()
 	}
 	dst, err := root.Open(rel)
 	if err != nil {
@@ -340,7 +385,7 @@ func NearestDir(rootDir, rel string) string {
 
 // stage copies src into a new temp file in dir, synced and size-checked, and
 // returns its root-relative name. A failure removes it.
-func (l *Local) stage(ctx context.Context, root *os.Root, dir string, src *os.File, size int64, onProgress func(int64, int64)) (string, error) {
+func (l *Local) stage(ctx context.Context, root *os.Root, dir string, src *os.File, size int64, req PlaceRequest) (string, error) {
 	if _, err := src.Seek(0, io.SeekStart); err != nil {
 		return "", err
 	}
@@ -349,6 +394,21 @@ func (l *Local) stage(ctx context.Context, root *os.Root, dir string, src *os.Fi
 		return "", err
 	}
 	temp := path.Join(dir, tempPrefix+hex.EncodeToString(b)+".part")
+	if req.LinkSource {
+		linked, err := linkSource(root, dir, src.Name(), path.Base(temp))
+		if err != nil {
+			return "", noSpace(err)
+		}
+		if linked {
+			if req.Progress != nil {
+				req.Progress(size, size)
+			}
+			return temp, nil
+		}
+		if err := l.checkFree(req.Root, req.RelPath, size); err != nil {
+			return "", err
+		}
+	}
 	f, err := root.OpenFile(temp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		return "", noSpace(err)
@@ -358,16 +418,25 @@ func (l *Local) stage(ctx context.Context, root *os.Root, dir string, src *os.Fi
 		_ = root.Remove(temp)
 		return "", noSpace(err)
 	}
-	var w io.Writer = f
-	if onProgress != nil {
-		w = &progress.Writer{W: f, Total: size, CB: onProgress}
+	// Keep both files visible to io.CopyN so Go can use the kernel's copy
+	// operation. Bound each call to keep cancellation and progress responsive.
+	for copied := int64(0); copied < size; {
+		if err := ctx.Err(); err != nil {
+			return fail(err)
+		}
+		n, err := io.CopyN(f, src, min(1<<20, size-copied))
+		if err != nil {
+			return fail(err)
+		}
+		copied += n
+		if req.Progress != nil {
+			req.Progress(copied, size)
+		}
 	}
-	n, err := io.Copy(w, &ctxReader{ctx: ctx, r: src})
-	if err != nil {
+	if st, err := src.Stat(); err != nil {
 		return fail(err)
-	}
-	if n != size {
-		return fail(fmt.Errorf("copy size mismatch: wrote %d, expected %d", n, size))
+	} else if st.Size() != size {
+		return fail(fmt.Errorf("source size changed during copy: expected %d, got %d", size, st.Size()))
 	}
 	if err := f.Sync(); err != nil {
 		return fail(err)
@@ -385,16 +454,4 @@ func noSpace(err error) error {
 		return fmt.Errorf("%w: %v", ErrDiskFull, err)
 	}
 	return err
-}
-
-type ctxReader struct {
-	ctx context.Context //nolint:containedctx // a reader that stops with its copy's context
-	r   io.Reader
-}
-
-func (c *ctxReader) Read(p []byte) (int, error) {
-	if err := c.ctx.Err(); err != nil {
-		return 0, err
-	}
-	return c.r.Read(p)
 }

@@ -41,6 +41,7 @@ describe('AudibleCard', () => {
     expect(within(card).getByText('Not signed in')).toBeInTheDocument();
     // The module's toggle is the console's: the page says so.
     expect(within(card).getByText(/Audible module is on/)).toBeInTheDocument();
+    expect(within(card).getByText(/automatic backups for new purchases/)).toBeInTheDocument();
 
     await userEvent.click(within(card).getByRole('button', { name: 'Sign in to Audible' }));
     await userEvent.selectOptions(within(card).getByLabelText('Audible store'), 'uk');
@@ -98,6 +99,7 @@ describe('AudibleCard', () => {
           accounts: [
             audibleAccountFixture({
               marketplace: 'uk',
+              policy: 'series',
               refused: true,
               refused_at: '2026-11-03T12:00:00Z',
               last_error: 'Audible refused the sign-in: sign in again',
@@ -120,6 +122,7 @@ describe('AudibleCard', () => {
     expect(within(row).getByText('Sign in again', { selector: 'span' })).toBeInTheDocument();
     expect(within(row).getByText('Audible refused the sign-in: sign in again')).toBeInTheDocument();
     expect(within(row).getByText('30 titles, 12 already in the library')).toBeInTheDocument();
+    expect(within(row).getByText(/New titles in a series they already have/)).toBeInTheDocument();
     await userEvent.click(within(row).getByRole('button', { name: 'Sign in again' }));
     expect(within(card).getByLabelText('Audible store')).toHaveValue('uk');
     await userEvent.click(within(card).getByRole('button', { name: 'Open Amazon sign-in' }));

@@ -727,3 +727,40 @@ func TestSafeFileName(t *testing.T) {
 		}
 	}
 }
+
+func TestDownload416WithoutContentRange(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		recorded, licensed int64
+		calls              int
+	}{
+		{"complete by recorded size", 4, 0, 1},
+		{"complete by licensed size", 0, 4, 1},
+		{"partial", 8, 8, 2},
+		{"unknown length", 0, 0, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if r.Header.Get("Range") != "" {
+					w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+					return
+				}
+				_, _ = w.Write([]byte("download"))
+			}))
+			defer ts.Close()
+			dest := filepath.Join(t.TempDir(), "book.aaxc")
+			writePartial(t, dest, "done", &partialState{Size: tc.recorded, ETag: `"v1"`})
+			err := testClient(t, ts.URL).Download(context.Background(), ts.URL+"/f", dest, DownloadOptions{ExpectedSize: tc.licensed})
+			got, _ := os.ReadFile(dest)
+			want := "done"
+			if tc.calls == 2 {
+				want = "download"
+			}
+			if err != nil || calls != tc.calls || string(got) != want {
+				t.Fatalf("partial = %q after %d requests: %v", got, calls, err)
+			}
+		})
+	}
+}

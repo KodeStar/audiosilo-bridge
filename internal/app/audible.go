@@ -18,6 +18,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/secrets"
 	"github.com/kodestar/audiosilo-bridge/internal/setup"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
+	"github.com/kodestar/audiosilo-bridge/internal/transfer"
 )
 
 // The Accounts tab's Audible section (Phase 4a): the accounts (audibleacct),
@@ -51,6 +52,32 @@ func (b *Bridge) newAudible(vault secrets.Store, db *store.DB, log *slog.Logger,
 			return nil
 		}})
 	return m, h, imp
+}
+
+// Sweep each books mount once it has passed its first writable mapping check.
+func (b *Bridge) sweepAudible(ctx context.Context, cl *link.Client) {
+	for _, entry := range b.libs.Entries(b.mount) {
+		st := entry.Status
+		if ctx.Err() != nil || entry.Library.LibraryKind() != "books" || entry.Unknown || st == nil ||
+			!st.Mapped || !st.Writable || st.MountPath != entry.MountPath {
+			continue
+		}
+		if _, swept := b.audibleSwept.LoadOrStore(entry.MountPath, true); swept {
+			continue
+		}
+		stillMapped := func() bool {
+			cur, known := b.libs.Status(entry.Library.ID)
+			mount, _ := b.mount(entry.Library.ID, entry.Library.Root)
+			return b.conn.Client() == cl && mount == entry.MountPath && known && cur.MountPath == mount && cur.Mapped && cur.Writable
+		}
+		if err := transfer.SweepStaged(ctx, entry.MountPath, time.Now().Add(-audiblejob.PartialMaxAge), stillMapped); err != nil {
+			if errors.Is(err, context.Canceled) {
+				b.audibleSwept.Delete(entry.MountPath)
+				continue
+			}
+			b.log.Warn("audible: sweeping staged library copies failed", "library", entry.Library.ID, "err", err)
+		}
+	}
 }
 
 // newAudibleSync builds the position sync (Phase 4c): the audible.sync job

@@ -300,3 +300,49 @@ func TestPodcastLookWaitsOnItsUndo(t *testing.T) {
 		return st.Mapped && st.Writable && unanswered == nil
 	})
 }
+
+type emptyBookLibrary struct {
+	books
+	markerSourceFunc
+}
+
+func (s emptyBookLibrary) Book(ctx context.Context, id int64, at string) (*link.Book, error) {
+	return s.books.Book(ctx, id, at)
+}
+
+func TestEmptyBooksLibraryRequiresServerMarker(t *testing.T) {
+	for _, scenario := range []string{"same mount", "different mount", "book read failed"} {
+		t.Run(scenario, func(t *testing.T) {
+			dir := t.TempDir()
+			r := newRegistry()
+			r.SetLibraries([]link.Library{{ID: 3, Kind: "books", Root: dir}})
+			source := emptyBookLibrary{books: books{err: link.ErrNoBook}}
+			calls := 0
+			source.markerSourceFunc = func(context.Context, int64) (string, error) {
+				calls++
+				if scenario == "different mount" {
+					return "another nonce", nil
+				}
+				b, err := os.ReadFile(filepath.Join(dir, MarkerPath))
+				var marker libraryMarker
+				if err != nil || json.Unmarshal(b, &marker) != nil {
+					t.Fatal("missing local marker", err)
+				}
+				return marker.Nonce, nil
+			}
+			if scenario == "book read failed" {
+				source.err = &link.APIError{Status: 503}
+			}
+			r.Check(context.Background(), source, func(int64, string) (string, bool) { return dir, true }, time.Now)
+			st, _ := r.Status(3)
+			if st.Mapped != (scenario == "same mount") || st.Writable != st.Mapped || (calls > 0) != (scenario != "book read failed") {
+				t.Fatal(scenario, st, calls)
+			}
+			if !st.Mapped {
+				if _, err := os.Lstat(filepath.Join(dir, MarkerPath)); !errors.Is(err, os.ErrNotExist) {
+					t.Fatal("unverified marker left in the library", err)
+				}
+			}
+		})
+	}
+}

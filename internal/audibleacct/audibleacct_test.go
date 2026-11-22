@@ -181,6 +181,7 @@ func (s *stubService) Products(_ context.Context, _ audible.Credentials, asins [
 
 // stubServer is the server's account routes.
 type stubServer struct {
+	policy  string // the current console selection in the mapping reply
 	mu      sync.Mutex
 	put     map[string]link.AudibleAccountInput
 	deleted []string
@@ -202,7 +203,7 @@ func (s *stubServer) PutAudibleAccount(_ context.Context, id string, in link.Aud
 		s.put = map[string]link.AudibleAccountInput{}
 	}
 	s.put[id] = in
-	return &link.AudibleAccount{ID: id}, nil
+	return &link.AudibleAccount{ID: id, Policy: s.policy}, nil
 }
 
 func (s *stubServer) DeleteAudibleAccount(ctx context.Context, id string) error {
@@ -612,6 +613,20 @@ func TestSignInAgainThatFailsKeepsTheEarlierSignIn(t *testing.T) {
 		t.Fatalf("no warning: %s", e.logs)
 	}
 	e.noSecrets(t)
+}
+
+func TestAccountKeepsPolicyConfirmedByConsole(t *testing.T) {
+	e := newEnv(t)
+	e.srv.policy = "all"
+	a := e.signIn(t)
+	if a.Policy != "all" {
+		t.Fatal("sign-in policy", a.Policy)
+	}
+	e.srv.policy = "series"
+	got, err := e.m.Map(context.Background(), e.srv, "srv-1", a.ID, mapping())
+	if err != nil || got.Policy != "series" {
+		t.Fatal("remap policy", got.Policy, err)
+	}
 }
 
 func TestMapRecordsOnTheServerThenHere(t *testing.T) {

@@ -584,7 +584,7 @@ func (m *Manager) Finish(ctx context.Context, srv Server, serverID string, f Fin
 			}
 		}
 	}
-	if _, err := srv.PutAudibleAccount(ctx, acct.ID, input(acct)); err != nil {
+	if err := putMapping(ctx, srv, &acct); err != nil {
 		rollback("server")
 		return store.AudibleAccount{}, err
 	}
@@ -625,6 +625,16 @@ func input(a store.AudibleAccount) link.AudibleAccountInput {
 		Policy: a.Policy}
 }
 
+// putMapping remembers the policy the console currently applies. Older
+// servers may omit it, in which case keep the locally recorded selection.
+func putMapping(ctx context.Context, srv Server, a *store.AudibleAccount) error {
+	got, err := srv.PutAudibleAccount(ctx, a.ID, input(*a))
+	if err == nil && got != nil && slices.Contains(Policies, got.Policy) {
+		a.Policy = got.Policy
+	}
+	return err
+}
+
 // Map records a new mapping of account id: on the server (srv, paired with
 // serverID) first, then here. ErrNotFound: no such account. It runs under
 // finishMu, one at a time with sign-ins and removals.
@@ -648,7 +658,7 @@ func (m *Manager) Map(ctx context.Context, srv Server, serverID, id string, mp M
 	mp.keepUserName(a, serverID)
 	a.Label, a.UserID, a.UserName, a.LibraryID, a.Policy, a.ServerID =
 		mp.label(a.Marketplace), mp.UserID, mp.UserName, mp.LibraryID, mp.Policy, serverID
-	if _, err := srv.PutAudibleAccount(ctx, a.ID, input(a)); err != nil {
+	if err := putMapping(ctx, srv, &a); err != nil {
 		return store.AudibleAccount{}, err
 	}
 	if err := m.o.DB.MapAudibleAccount(ctx, a); err != nil {

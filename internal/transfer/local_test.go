@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 )
@@ -315,4 +316,114 @@ func TestOnDisk(t *testing.T) {
 	if _, err := OnDisk(RootFS(root), "Loose/Book/x.m4b"); err == nil {
 		t.Error("a file where a folder goes was accepted")
 	}
+}
+
+func TestPlaceLinksFinishedSourceAndConfirmsBeforePublication(t *testing.T) {
+	for _, fast := range []bool{true, false} {
+		for _, allowed := range []bool{true, false} {
+			root := t.TempDir()
+			src := source(t, "complete audio")
+			checks := 0
+			refused := errors.New("lease not held")
+			req := PlaceRequest{Root: root, RelPath: "Author/book.m4b", SrcPath: src, LinkSource: fast,
+				BeforeInstall: func(context.Context) error {
+					checks++
+					if _, err := os.Lstat(filepath.Join(root, "Author/book.m4b")); !errors.Is(err, os.ErrNotExist) {
+						t.Fatal("publication preceded lease confirmation")
+					}
+					if !allowed {
+						return refused
+					}
+					return nil
+				}}
+			_, err := NewLocal().Place(context.Background(), req)
+			dst, statErr := os.Stat(filepath.Join(root, "Author/book.m4b"))
+			if checks != 1 || !allowed && (!errors.Is(err, refused) || !errors.Is(statErr, os.ErrNotExist)) {
+				t.Fatalf("allowed=%t checks=%d result=%v stat=%v", allowed, checks, err, statErr)
+			}
+			if allowed {
+				original, _ := os.Stat(src)
+				if err != nil || statErr != nil || (runtime.GOOS == "linux" || runtime.GOOS == "darwin") && os.SameFile(original, dst) != fast {
+					t.Fatalf("fast=%t result=%v stat=%v", fast, err, statErr)
+				}
+			}
+			noTemps(t, root)
+		}
+	}
+}
+
+func TestSweepStagedOnlyRemovesOldPlaceFiles(t *testing.T) {
+	root, outside := t.TempDir(), t.TempDir()
+	const name = ".audiosilo-import-0123456789abcdef.part"
+	now := time.Date(2026, 11, 22, 8, 0, 0, 0, time.UTC)
+	cutoff := now.Add(-7 * 24 * time.Hour)
+	for _, dir := range []string{"Old", "Young", ".private"} {
+		p := filepath.Join(root, dir, name)
+		writeFile(t, p, "audio")
+		at := cutoff
+		if dir == "Young" {
+			at = cutoff.Add(time.Second)
+		}
+		if err := os.Chtimes(p, at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lookalike := filepath.Join(root, ".audiosilo-import-not-ours.part")
+	writeFile(t, lookalike, "mine")
+	if err := os.Chtimes(lookalike, cutoff, cutoff); err != nil {
+		t.Fatal(err)
+	}
+	external := filepath.Join(outside, name)
+	writeFile(t, external, "outside")
+	if err := os.Chtimes(external, cutoff, cutoff); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" {
+		if err := os.Symlink(outside, filepath.Join(root, "alias")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := SweepStaged(context.Background(), root, cutoff, func() bool { return false }); !errors.Is(err, context.Canceled) {
+		t.Fatal("sweep did not stop on remap", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "Old", name)); err != nil {
+		t.Fatal("sweep removed a file after a remap", err)
+	}
+	if err := SweepStaged(context.Background(), root, cutoff, func() bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "Old", name)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("old copy survived", err)
+	}
+	for _, p := range []string{filepath.Join(root, "Young", name), filepath.Join(root, ".private", name), lookalike, external} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatal("unrelated file removed", p, err)
+		}
+	}
+}
+
+func TestPlaceCopiesFinishedSourceAcrossDevices(t *testing.T) {
+	root := t.TempDir()
+	for _, base := range []string{".", "/dev/shm"} {
+		dir, err := os.MkdirTemp(base, ".transfer-test-")
+		if err != nil {
+			continue
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+		src := filepath.Join(dir, "source.m4b")
+		writeFile(t, src, "audio")
+		probe := filepath.Join(root, "probe")
+		err = os.Link(src, probe)
+		if !errors.Is(err, syscall.EXDEV) {
+			_ = os.Remove(probe)
+			continue
+		}
+		res, err := NewLocal().Place(context.Background(), PlaceRequest{Root: root, RelPath: "book.m4b", SrcPath: src, LinkSource: true})
+		if err != nil || res.Size != 5 || read(t, filepath.Join(root, "book.m4b")) != "audio" || read(t, src) != "audio" {
+			t.Fatal("cross-device install", res, err)
+		}
+		noTemps(t, root)
+		return
+	}
+	t.Skip("no second writable filesystem")
 }
