@@ -82,6 +82,12 @@ func (m *Manager) setSending(account string, on bool) bool {
 	return true
 }
 
+// maxRemovalAttempts bounds an owed removal: it goes only after a heartbeat
+// the server answered, so these are failures of a server that is up (about a
+// week of hourly ones), after which the removal is given up with a warning
+// rather than retried for the life of the pairing.
+const maxRemovalAttempts = 168
+
 // removeOnServer sends r's DELETE once. An answer clears r: any 2xx or a 404
 // (the server never knew it), or a refusal (a 4xx), which is returned and
 // logged. Anything else (the network, a 5xx, a 408, a 429, a refused token:
@@ -89,7 +95,8 @@ func (m *Manager) setSending(account string, on bool) bool {
 // leaves r pending (true) and due again after a backoff: a minute,
 // doubling to an hour, or the answer's longer Retry-After (at most a day). One
 // cut short by ctx's end (the Bridge stopping) is left as it was: due again at
-// once, at the next start's first heartbeat.
+// once, at the next start's first heartbeat. The maxRemovalAttempts-th
+// failure clears r (not pending) with a warning.
 func (m *Manager) removeOnServer(ctx context.Context, srv Server, r store.AudibleRemoval) (pending bool, err error) {
 	err = srv.DeleteAudibleAccount(link.SingleAttempt(ctx), r.Account)
 	// An answer is recorded even when ctx ends just after it.
@@ -106,6 +113,11 @@ func (m *Manager) removeOnServer(ctx context.Context, srv Server, r store.Audibl
 		return false, err
 	case ctx.Err() != nil:
 		return true, err
+	}
+	if r.Attempts+1 >= maxRemovalAttempts {
+		m.o.Log.Warn("audible: giving up on a pending removal the server never answered; the console can remove the account", "account", r.Account, "attempts", r.Attempts+1, "err", err)
+		m.clearRemoval(dbCtx, r.Account)
+		return false, err
 	}
 	delay := min(time.Minute<<min(r.Attempts, 6), time.Hour)
 	if hasStatus {

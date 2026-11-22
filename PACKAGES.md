@@ -3409,7 +3409,8 @@ internal/
             refusal (a non-transient 4xx) drops it with a warning, anything
             else (a 401 too: a refused token doesn't end the pairing) backs off a
             minute doubling to an hour (a longer Retry-After, at most a day,
-            wins), and one cut short by a stop stays due; another
+            wins), given up with a warning at the 168th failure (about a week
+            of a server that is up), and one cut short by a stop stays due; another
             pairing's are dropped unsent. A removal while the token is refused
             is owed on the pairing too (the app passes the refused link,
             Conn.pairedClient), and so is a failed sign-in's new account the

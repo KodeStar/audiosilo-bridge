@@ -384,3 +384,32 @@ func TestFailedSignInsServerRemovalIsRetried(t *testing.T) {
 	}
 	e.noPendingRemoval(t)
 }
+
+// An owed removal the server keeps failing is given up, with a warning, at
+// its maxRemovalAttempts-th failure rather than retried for good.
+func TestRemovalGivenUpAfterMaxAttempts(t *testing.T) {
+	e := newEnv(t)
+	ctx := t.Context()
+	now := time.Now()
+	e.m.o.Now = func() time.Time { return now }
+	a := e.signIn(t)
+	e.srv.delErr = &link.APIError{Status: http.StatusBadGateway}
+	if _, err := e.m.Remove(ctx, e.srv, a.ID); err != nil {
+		t.Fatal(err)
+	}
+	for range maxRemovalAttempts - 3 {
+		if err := e.db.DeferAudibleRemoval(ctx, a.ID, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.retry()
+	if r, err := e.db.NextAudibleRemoval(ctx, e.srv.PairingID(), now.AddDate(1, 0, 0)); err != nil || r.Attempts != maxRemovalAttempts-1 {
+		t.Fatalf("owed removal before the last attempt = %+v, %v", r, err)
+	}
+	now = now.Add(24 * time.Hour)
+	e.retry()
+	if len(e.srv.deleted) != 3 || !strings.Contains(e.logs.String(), "giving up on a pending removal") {
+		t.Fatalf("DELETE calls: %v, logs: %s", e.srv.deleted, e.logs)
+	}
+	e.noPendingRemoval(t)
+}
