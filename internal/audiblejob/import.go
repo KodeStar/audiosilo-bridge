@@ -459,6 +459,11 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 			return nil, err
 		}
 		if same {
+			// As after an install: a failed rescan's retry goes on from the
+			// marker, the staged copy gone with the failure.
+			if err := writePlaced(marker, requestOf(p), lib.ID, mount, stage.Path, stage.Joins); err != nil {
+				h.o.Log.Warn("audible: recording an imported book's placement failed", "account", acct.ID, "asin", p.ASIN, "err", err)
+			}
 			return h.finish(ctx, rep, srv, acct.ID, p.ASIN, library,
 				stage.installed(), marker)
 		}
@@ -470,18 +475,19 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 	// library's mapping, and a sign-in again meanwhile, or one still storing
 	// itself, ended the refusal the first read saw. The read again is checked
 	// as the first was: what it waited for may have removed the account or
-	// mapped it elsewhere.
-	if acct.RefusedAt != "" {
+	// mapped it elsewhere. A staged decrypt asks Audible nothing more, so a
+	// refusal since never throws it away.
+	if stage == nil && acct.RefusedAt != "" {
 		acct, err = h.o.Accounts.SettledAccount(ctx, acct.ID)
 		if err := h.importable(acct, err, serverID, p); err != nil {
 			return nil, err
 		}
-	}
-	if acct.RefusedAt != "" {
-		if audibleacct.Throttled(acct) {
-			return nil, throttledDevice()
+		if acct.RefusedAt != "" {
+			if audibleacct.Throttled(acct) {
+				return nil, throttledDevice()
+			}
+			return nil, refusedSignIn()
 		}
-		return nil, refusedSignIn()
 	}
 
 	var rec source.Record
@@ -673,15 +679,16 @@ func (h *Importer) prepare(ctx context.Context, p ImportParams, part, decrypted,
 	case err != nil:
 		return fmt.Errorf("removing the DRM: %w", err)
 	}
+	// Stat once synced: readStaged compares this size and time exactly.
+	if err := f.Sync(); err != nil {
+		return err
+	}
 	info, err := f.Stat()
 	if err != nil {
 		return err
 	}
 	if info.Size() == 0 {
 		return errors.New("the decrypted book is empty")
-	}
-	if err := f.Sync(); err != nil {
-		return err
 	}
 	if err := f.Close(); err != nil {
 		return err

@@ -1829,6 +1829,39 @@ func stopAtPlace(t *testing.T, e *importEnv) {
 	e.opts.onProgress = progress
 }
 
+// A restart that adopts the book a crash published records it as an install
+// does: a failed rescan's retry finishes from the marker, the staged copy gone.
+func TestAdoptedBookKeepsItsMarkerForTheRetry(t *testing.T) {
+	e := newImportEnv(t)
+	stopAtPlace(t, e)
+	e.writeLibrary(copperGrove, string(e.accts.body)) // published, then the crash
+	e.accts.titleErr = errors.New("Audible offline")
+	e.srv.rescanErr = []error{errors.New("busy"), errors.New("busy"), errors.New("busy")}
+	if _, err := e.resumed(context.Background(), e.params(nil), jobs.LocalReporter()); err == nil {
+		t.Fatal("the rescan failing must fail the job")
+	}
+	res, err := e.run(context.Background(), e.params(nil))
+	if err != nil || e.accts.downloads != 1 || e.accts.licenses != 1 {
+		t.Fatalf("retry = %v, %v (downloads %d, licenses %d)", res, err, e.accts.downloads, e.accts.licenses)
+	}
+	e.tmpEmpty(t)
+}
+
+// A staged decrypt needs nothing more from Audible: a refusal since the stop
+// places it rather than failing and throwing it away.
+func TestRefusedAccountStillPlacesItsStagedBook(t *testing.T) {
+	e := newImportEnv(t)
+	stopAtPlace(t, e)
+	e.accts.acct.RefusedAt, e.accts.acct.LastError, e.accts.acct.RefusalKind = "2026-11-03T10:00:00Z", audibleacct.RefusedText, store.RefusalSignIn
+	if _, err := e.resumed(context.Background(), e.params(nil), jobs.LocalReporter()); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(e.root, copperGrove)); !bytes.Equal(b, e.accts.body) || e.accts.downloads != 1 {
+		t.Fatalf("placed %d bytes after %d downloads", len(b), e.accts.downloads)
+	}
+	e.tmpEmpty(t)
+}
+
 // An import waiting for its account's gate keeps its lane slot while the
 // holder keeps its own (a free slot would have the lane claim the account's
 // whole queue), and gives it back once the holder gives its own back (a
