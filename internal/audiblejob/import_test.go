@@ -1667,7 +1667,7 @@ func TestImportAbandonKeepsTheAccountGate(t *testing.T) {
 		}
 	}
 	h := NewImport(e.opts)
-	release, ok := h.tryGate("acct0001") // an import of the account runs
+	release, ok := h.tryGate("acct0001", nil) // an import of the account runs
 	if !ok {
 		t.Fatal("the gate was taken")
 	}
@@ -1677,7 +1677,7 @@ func TestImportAbandonKeepsTheAccountGate(t *testing.T) {
 	release()
 	h.Abandon(jobs.AbandonContext(context.Background(), false), job)
 	e.tmpEmpty(t)
-	if release, ok := h.tryGate("acct0001"); !ok {
+	if release, ok := h.tryGate("acct0001", nil); !ok {
 		t.Fatal("Abandon kept the account's gate")
 	} else {
 		release()
@@ -1807,5 +1807,102 @@ func TestReadyBookRequiresItsPairingTitleAndCompleteFile(t *testing.T) {
 	}
 	if readStaged(file, library, asin) != nil {
 		t.Fatal("shortened stage accepted")
+	}
+}
+
+// stopAtPlace runs the import until the transfer has staged the bytes, then
+// stops it before publication (a restart's stop: the staged decrypt stays).
+func stopAtPlace(t *testing.T, e *importEnv) {
+	t.Helper()
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	progress := e.opts.onProgress
+	e.opts.onProgress = func(p jobs.Progress) {
+		progress(p)
+		if p.Step == StepPlace && p.Done > 0 {
+			stop()
+		}
+	}
+	if _, err := e.run(ctx, e.params(nil)); err == nil {
+		t.Fatal("the run did not stop")
+	}
+	e.opts.onProgress = progress
+}
+
+// An import waiting for its account's gate keeps its lane slot while the
+// holder keeps its own (a free slot would have the lane claim the account's
+// whole queue), and gives it back once the holder gives its own back (a
+// parked holder needs one to resume).
+func TestImportGateYieldsOnlyForAHolderThatYielded(t *testing.T) {
+	e := newImportEnv(t)
+	started, release := make(chan struct{}), make(chan struct{})
+	var startOnce, releaseOnce sync.Once
+	releaseAll := func() { releaseOnce.Do(func() { close(release) }) }
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() { cancel(); releaseAll() })
+	e.accts.download = func(_ context.Context, _, dest string, _ audible.DownloadOptions) error {
+		first := false
+		startOnce.Do(func() { first = true; close(started) })
+		if first {
+			<-release
+		}
+		return os.WriteFile(dest, e.accts.body, 0o600)
+	}
+	waiting := make(chan struct{})
+	var waitOnce sync.Once
+	progress := e.opts.onProgress
+	e.opts.onProgress = func(p jobs.Progress) {
+		progress(p)
+		if strings.Contains(p.Message, "other backup") {
+			waitOnce.Do(func() { close(waiting) })
+		}
+	}
+	h := NewImport(e.opts)
+	holder, waiter := jobs.LocalReporter(), jobs.LocalReporter()
+	errs := make(chan error, 2)
+	for i, rep := range []*jobs.Reporter{holder, waiter} {
+		params := e.params(func(p *ImportParams) { p.ASIN = fmt.Sprintf("B0FAKE000%d", i+2); p.DestPath = "Imports/" + p.ASIN })
+		go func() {
+			_, err := h.Run(ctx, jobs.Job{Kind: ImportKind, Params: params}, rep)
+			errs <- err
+		}()
+		if i == 0 {
+			select {
+			case <-started:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the first import never started its download")
+			}
+		}
+	}
+	select {
+	case <-waiting:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the second import never waited for the first")
+	}
+	time.Sleep(gatePoll + gatePoll/2) // a look or two at the holder
+	if waiter.Yielded() {
+		t.Fatal("the waiting import gave its slot back while the holder kept its own")
+	}
+	holder.Yield() // the holder parks
+	deadline := time.Now().Add(3 * gatePoll)
+	for !waiter.Yielded() {
+		if time.Now().After(deadline) {
+			t.Fatal("the waiting import kept its slot from a parked holder")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	releaseAll()
+	for range 2 {
+		select {
+		case err := <-errs:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(30 * time.Second):
+			t.Fatal("an import never finished")
+		}
+	}
+	if waiter.Yielded() {
+		t.Fatal("the waiting import never reclaimed its slot")
 	}
 }

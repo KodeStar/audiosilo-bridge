@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -255,8 +256,25 @@ type Importer struct {
 	local *transfer.Local
 
 	mu      sync.Mutex
-	gates   map[string]chan struct{}
+	gates   map[string]*accountGate
 	listing *bookSnapshot
+}
+
+// accountGate is one account's gate (gate): its token, and the reporter of
+// the import holding it (nil while Abandon holds it, or no import does).
+type accountGate struct {
+	token  chan struct{}
+	holder atomic.Pointer[jobs.Reporter]
+}
+
+// held records rep as the gate's holder, the token just taken, and returns
+// the release.
+func (g *accountGate) held(rep *jobs.Reporter) func() {
+	g.holder.Store(rep)
+	return func() {
+		g.holder.Store(nil)
+		<-g.token
+	}
 }
 
 // NewImport returns the import handler.
@@ -279,7 +297,7 @@ func NewImport(o ImportOptions) *Importer {
 	if o.Wait == nil {
 		o.Wait = link.Wait
 	}
-	return &Importer{o: o, local: transfer.NewLocal(), gates: map[string]chan struct{}{}}
+	return &Importer{o: o, local: transfer.NewLocal(), gates: map[string]*accountGate{}}
 }
 
 // Kind is audible.import.
@@ -320,7 +338,7 @@ func (h *Importer) Abandon(ctx context.Context, job jobs.Job) {
 	if err != nil {
 		return
 	}
-	release, ok := h.tryGate(p.Account)
+	release, ok := h.tryGate(p.Account, nil)
 	if !ok {
 		return
 	}
@@ -905,47 +923,62 @@ func (h *Importer) report(rep *jobs.Reporter, pr jobs.Progress) {
 	}
 }
 
+// gatePoll is how often an import waiting for its account's gate looks
+// whether the import holding it gave its lane slot back.
+const gatePoll = 2 * time.Second
+
 // gate waits until no other import of the account runs: one download per
 // account (Audible's limits are per account).
 func (h *Importer) gate(ctx context.Context, account string, rep *jobs.Reporter) (func(), error) {
-	if release, ok := h.tryGate(account); ok {
+	if release, ok := h.tryGate(account, rep); ok {
 		return release, nil
 	}
 	g := h.gateOf(account)
-	// A parked gate holder may need this lane slot to resume.
-	rep.Yield()
 	h.report(rep, jobs.Progress{Step: StepLicense, Message: "Waiting for this account's other backup to finish"})
-	select {
-	case g <- struct{}{}:
-		if err := rep.Reclaim(ctx); err != nil {
-			<-g
-			return nil, err
+	tick := time.NewTicker(gatePoll)
+	defer tick.Stop()
+	for {
+		// A holder without its lane slot (parked, or still reclaiming one)
+		// needs one again to go on, so this import waits without one then.
+		// While the holder keeps its own, this one keeps its slot too: a free
+		// slot would have the lane claim the account's whole queue to wait here.
+		if holder := g.holder.Load(); holder != nil && !holder.HoldsSlot() {
+			rep.Yield()
 		}
-		return func() { <-g }, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
+		select {
+		case g.token <- struct{}{}:
+			release := g.held(rep)
+			if err := rep.Reclaim(ctx); err != nil {
+				release()
+				return nil, err
+			}
+			return release, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-tick.C:
+		}
 	}
 }
 
 // gateOf is the account's gate (gate), made on first use.
-func (h *Importer) gateOf(account string) chan struct{} {
+func (h *Importer) gateOf(account string) *accountGate {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	g, ok := h.gates[account]
 	if !ok {
-		g = make(chan struct{}, 1)
+		g = &accountGate{token: make(chan struct{}, 1)}
 		h.gates[account] = g
 	}
 	return g
 }
 
-// tryGate takes the account's gate when no import of it holds it (false,
-// without waiting, when one does).
-func (h *Importer) tryGate(account string) (func(), bool) {
+// tryGate takes the account's gate for rep (nil: Abandon) when no import of
+// it holds it (false, without waiting, when one does).
+func (h *Importer) tryGate(account string, rep *jobs.Reporter) (func(), bool) {
 	g := h.gateOf(account)
 	select {
-	case g <- struct{}{}:
-		return func() { <-g }, true
+	case g.token <- struct{}{}:
+		return g.held(rep), true
 	default:
 		return nil, false
 	}
