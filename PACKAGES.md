@@ -2248,9 +2248,12 @@ internal/
             crash leaves nothing the server's scan walks). A library with no indexed
             book is never mapped by its files: with nothing to compare, a wrong mount
             would look right and a later write job would land in the wrong folder.
-            An empty books library needs an existing .audiosilo/library.json
-            naming its ID, with a nonce the server reads back from its own copy.
-            A bare mount point stays unmapped.
+            An empty books library is proven as a podcast library is: the Bridge
+            writes .audiosilo/library.json (or keeps the one naming its ID) and
+            maps it once the server reads the nonce back from its own copy; an
+            unverified marker it wrote is removed. Nothing else writes a books
+            library's marker. A share unmounted on a host the server shares still
+            maps its bare mount point, the trade podcasts already make.
             BookReadSettled is the rule verify's and generate's book reads retry
             by: settled is no such book or an answer that isn't a refused token
             or link's APIError.Transient (asking again won't change it);
