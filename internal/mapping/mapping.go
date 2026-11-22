@@ -803,20 +803,21 @@ func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, n
 // checkOne checks one library by its kind (Check, or CheckPodcast) with look,
 // its server read paced by pace.
 func checkOne(ctx context.Context, look looks, src BookSource, pace *pacer, l link.Library, path string, listed map[int64]bool) (link.LibraryStatus, error) {
-	marker, ok := src.(MarkerSource)
-	checkMarker := func() (link.LibraryStatus, error) {
-		return look.checkPodcast(ctx, pacedMarkers{marker, pace}, l, path, func(id int64) bool { return listed[id] })
-	}
-	if l.LibraryKind() == "podcasts" {
-		if !ok {
-			return link.LibraryStatus{LibraryID: l.ID, MountPath: path, Error: "the server link cannot check a library marker"}, nil
+	// The marker check: a podcast library's only one, an empty books library's
+	// fallback (nil when the link cannot read markers).
+	var checkMarker func() (link.LibraryStatus, error)
+	if marker, ok := src.(MarkerSource); ok {
+		checkMarker = func() (link.LibraryStatus, error) {
+			return look.checkPodcast(ctx, pacedMarkers{marker, pace}, l, path, func(id int64) bool { return listed[id] })
 		}
-		return checkMarker()
 	}
-	if !ok {
-		checkMarker = nil
+	if l.LibraryKind() != "podcasts" {
+		return look.check(ctx, pacedBooks{src, pace}, l, path, checkMarker)
 	}
-	return look.check(ctx, pacedBooks{src, pace}, l, path, checkMarker)
+	if checkMarker == nil {
+		return link.LibraryStatus{LibraryID: l.ID, MountPath: path, Error: "the server link cannot check a library marker"}, nil
+	}
+	return checkMarker()
 }
 
 // pacer spaces a run's server reads at least spacing apart. Only a read waits:
