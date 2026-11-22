@@ -182,18 +182,25 @@ func (s *stubService) Products(_ context.Context, _ audible.Credentials, asins [
 
 // stubServer is the server's account routes.
 type stubServer struct {
-	serverID string
-	pairing  string
-	policy   string // the current console selection in the mapping reply
-	mu       sync.Mutex
-	put      map[string]link.AudibleAccountInput
-	deleted  []string
-	putErr   error
-	delErr   error
-	onPut    func() // runs as a PUT is applied
+	serverID   string
+	noServerID bool // the link doesn't know its server's id yet
+	pairing    string
+	policy     string // the current console selection in the mapping reply
+	mu         sync.Mutex
+	put        map[string]link.AudibleAccountInput
+	deleted    []string
+	putErr     error
+	delErr     error
+	onPut      func() // runs as a PUT is applied
+	onDelete   func() // runs as a DELETE is applied
 }
 
-func (s *stubServer) ServerID() string  { return cmp.Or(s.serverID, "srv-1") }
+func (s *stubServer) ServerID() string {
+	if s.noServerID {
+		return ""
+	}
+	return cmp.Or(s.serverID, "srv-1")
+}
 func (s *stubServer) PairingID() string { return cmp.Or(s.pairing, "pairing-1") }
 
 func (s *stubServer) PutAudibleAccount(_ context.Context, id string, in link.AudibleAccountInput) (*link.AudibleAccount, error) {
@@ -218,6 +225,12 @@ func (s *stubServer) PutAudibleAccount(_ context.Context, id string, in link.Aud
 func (s *stubServer) DeleteAudibleAccount(ctx context.Context, id string) error {
 	if err := ctx.Err(); err != nil {
 		return err // as the HTTP call would
+	}
+	s.mu.Lock()
+	onDelete := s.onDelete
+	s.mu.Unlock()
+	if onDelete != nil {
+		onDelete() // outside mu, as onPut
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

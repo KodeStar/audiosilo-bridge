@@ -260,3 +260,67 @@ func TestRemovalWithoutAServerIDGoesToThePairedServer(t *testing.T) {
 	}
 	e.noPendingRemoval(t)
 }
+
+// Remove's own DELETE, still on its way, is never sent a second time by the
+// heartbeat its removal kicks (the removal is owed and due from the delete
+// transaction on).
+func TestRetryRemovalSkipsADeleteOnItsWay(t *testing.T) {
+	e := newEnv(t)
+	a := e.signIn(t)
+	reached, release := make(chan struct{}), make(chan struct{})
+	e.srv.onDelete = func() {
+		close(reached)
+		<-release
+	}
+	removed := make(chan error, 1)
+	go func() {
+		_, err := e.m.Remove(context.Background(), e.srv, a.ID)
+		removed <- err
+	}()
+	<-reached
+	e.srv.mu.Lock()
+	e.srv.onDelete = nil
+	e.srv.mu.Unlock()
+	e.retry()
+	close(release)
+	if err := <-removed; err != nil {
+		t.Fatal(err)
+	}
+	if len(e.srv.deleted) != 1 {
+		t.Fatalf("DELETEs %v, want Remove's alone", e.srv.deleted)
+	}
+	e.noPendingRemoval(t)
+}
+
+// A refusal ends the removal, and the page hears the server may still list
+// the account (it isn't tried again).
+func TestRefusedRemovalSaysTheServerMayStillListIt(t *testing.T) {
+	e := newEnv(t)
+	a := e.signIn(t)
+	e.srv.delErr = &link.APIError{Status: http.StatusForbidden}
+	warning, err := e.m.Remove(t.Context(), e.srv, a.ID)
+	if err != nil || !strings.Contains(warning, "may still list the account") || strings.Contains(warning, "try again") {
+		t.Fatalf("remove = %q, %v", warning, err)
+	}
+	e.noPendingRemoval(t)
+}
+
+// A retry cut short by the Bridge stopping leaves the removal as it was: due
+// at the next start, its failed attempts not counted up.
+func TestRetryCutShortByAStopStaysDue(t *testing.T) {
+	e := newEnv(t)
+	a := e.signIn(t)
+	e.srv.delErr = errors.New("unreachable")
+	if _, err := e.m.Remove(t.Context(), e.srv, a.ID); err != nil {
+		t.Fatal(err)
+	}
+	later := time.Now().Add(time.Hour)
+	e.m.o.Now = func() time.Time { return later }
+	ctx, cancel := context.WithCancel(context.Background())
+	e.srv.onDelete = cancel
+	e.m.RetryRemoval(ctx, e.srv)
+	r, err := e.db.NextAudibleRemoval(context.Background(), e.srv.PairingID(), later)
+	if err != nil || r.Attempts != 1 {
+		t.Fatalf("after a stopped retry = %+v, %v", r, err)
+	}
+}

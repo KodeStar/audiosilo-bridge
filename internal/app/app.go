@@ -575,8 +575,16 @@ func (b *Bridge) beat(ctx context.Context) {
 	// outstanding claims alone while capability changes refresh them now.
 	b.runner.Wake()
 	// The server just answered: the time to send a removal it still owes
-	// (only then, so a server that is down never slows the heartbeat).
-	b.audible.RetryRemoval(ctx, cl)
+	// (only then, so a server that is down never slows the heartbeat). In the
+	// background, so a DELETE the server is slow to answer never holds up the
+	// beat or the mapping check, and only while cl is still the pairing's
+	// link: a beat that raced an unpair and a pairing never drops the new
+	// pairing's removals as an ended one's.
+	b.bg.run(func(ctx context.Context) {
+		if b.conn.Client() == cl {
+			b.audible.RetryRemoval(ctx, cl)
+		}
+	})
 	// A run due only for slow folders checks just those (DueIDs).
 	if due, ids := b.libs.DueIDs(time.Now(), interval); changed || due {
 		if changed {

@@ -287,6 +287,11 @@ type Manager struct {
 
 	mu     sync.Mutex
 	logins map[string]login
+	// sending is the accounts whose server DELETE is on its way now (Remove's
+	// own, or a heartbeat's retry), under mu: a removal is owed, and due, from
+	// its delete transaction on, and its OnChange kicks the heartbeat, whose
+	// retry must not send a second DELETE alongside Remove's (RetryRemoval).
+	sending map[string]bool
 	// finishMu serialises Finish from the account lookup until the row is
 	// stored: two sign-ins of the same Amazon account finishing at once would
 	// otherwise both find no account and make two (the later now replaces the
@@ -360,7 +365,7 @@ func New(o Options) *Manager {
 	if o.Service == nil {
 		o.Service = Audible(audible.WithLogger(o.Log))
 	}
-	return &Manager{o: o, logins: map[string]login{}, finishMu: make(chan struct{}, 1)}
+	return &Manager{o: o, logins: map[string]login{}, sending: map[string]bool{}, finishMu: make(chan struct{}, 1)}
 }
 
 // Started is a sign-in waiting for the admin: open URL at Amazon, then paste
@@ -706,6 +711,10 @@ func (m *Manager) Remove(ctx context.Context, srv Server, id string) (warning st
 		warnings = append(warnings, "the account's server isn't paired with this Bridge, so it may still list the account")
 	default:
 		pairing = srv.PairingID()
+		// Owed and due from the delete transaction on: the DELETE is this
+		// Remove's own until it returns, never a heartbeat retry's too.
+		m.setSending(id, true)
+		defer m.setSending(id, false)
 	}
 	if err := m.o.DB.DeleteAudibleAccount(ctx, id, pairing); err != nil {
 		// SQLite kept the account and rolled back its pending removal.
@@ -718,11 +727,11 @@ func (m *Manager) Remove(ctx context.Context, srv Server, id string) (warning st
 	m.o.OnChange()
 	if pairing != "" {
 		if pending, err := m.removeOnServer(ctx, srv, store.AudibleRemoval{Account: id, Pairing: pairing}); err != nil {
-			warning := "the server didn't confirm the removal"
+			warning := "the server didn't confirm the removal, so it may still list the account"
 			if pending {
-				warning += ", so the Bridge will try again"
+				warning = "the server didn't confirm the removal, so the Bridge will try again"
+				m.o.Log.Warn("audible: removing the account on the server failed; the Bridge will try again", "account", id, "err", err)
 			}
-			m.o.Log.Warn("audible: removing the account on the server failed", "account", id, "err", err)
 			warnings = append(warnings, warning)
 		}
 	}

@@ -2219,7 +2219,9 @@ internal/
             null). audible.go mirrors the rest of the server's handlers_audible.go:
             Users (GET /bridge/users: enabled adults and admins, no email),
             PutAudibleAccount / DeleteAudibleAccount (PUT/DELETE
-            /bridge/audible/accounts/{account}; the delete is 204 known or not;
+            /bridge/audible/accounts/{account}; the delete is 204 known or not,
+            and the link takes any 2xx or a 404 as done, a cut-short body too,
+            and keeps any other answer's HTTP status as an APIError, bridge#40;
             AudibleAccountInput sends no sync, the console's alone since 4c, bridge#50),
             PutAudibleTitles (<= MaxAudibleTitles 500 per call, poll_id + final; a
             nil list sent as []; 404 unknown_account -> ErrUnknownAccount; each
@@ -3401,11 +3403,13 @@ internal/
             deregisters, run to the end even if the page goes away; either failing
             is a warning for the page, never the account kept. A DELETE the server
             didn't answer stays owed (audible_removals, on the pairing that
-            recorded it): a heartbeat the server answered sends one that is due
-            (RetryRemoval, no lock); a 2xx or 404 clears it, a refusal (401, a
-            non-transient 4xx) drops it with a warning, anything else backs off
-            a minute doubling to an hour (a longer Retry-After, at most a day,
-            wins); another pairing's are dropped unsent. A sign-in again after
+            recorded it): a heartbeat the server answered sends one that is due,
+            in the background (RetryRemoval, no lock; never one already on its
+            way, Remove's own included: sending); a 2xx or 404 clears it, a
+            refusal (401, a non-transient 4xx) drops it with a warning, anything
+            else backs off a minute doubling to an hour (a longer Retry-After, at
+            most a day, wins), and one cut short by a stop stays due; another
+            pairing's are dropped unsent. A sign-in again after
             a removal always gets a fresh id, so a late DELETE never reaches it.
             Library opens the
             sign-in and lists the library through Service (audibleacct.Audible(opts...):

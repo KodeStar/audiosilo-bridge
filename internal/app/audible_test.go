@@ -315,6 +315,7 @@ func TestHeartbeatRetriesAudibleRemovalOnlyOnItsPairing(t *testing.T) {
 			}
 			beatFails.Store(tc.beatFails)
 			b.beat(ctx)
+			b.bg.wg.Wait() // the retry runs beside the beat
 			if got := deletes.Load(); got != tc.deletes {
 				t.Fatalf("sent %d DELETEs, want %d", got, tc.deletes)
 			}
@@ -323,5 +324,58 @@ func TestHeartbeatRetriesAudibleRemovalOnlyOnItsPairing(t *testing.T) {
 				t.Fatalf("removal pending = %t (%v), want %t", pending, err, tc.pending)
 			}
 		})
+	}
+}
+
+// A DELETE the server is slow to answer never holds up the heartbeat: the
+// retry runs beside it and clears the removal once the server answers.
+func TestHeartbeatDoesNotWaitForAPendingRemoval(t *testing.T) {
+	ctx := t.Context()
+	status := &setupServer{kind: "old"}
+	reached, release := make(chan struct{}, 1), make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			reached <- struct{}{}
+			<-release
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		status.ServeHTTP(w, r)
+	}))
+	defer ts.Close()
+	var released atomic.Bool
+	free := func() {
+		if released.CompareAndSwap(false, true) {
+			close(release)
+		}
+	}
+	defer free()
+	b := newTestBridge(t)
+	if err := b.Pair(ctx, ts.URL, "CODE"); err != nil {
+		t.Fatal(err)
+	}
+	cl := b.conn.Client()
+	a := store.AudibleAccount{ID: "acct0001", Marketplace: "us", ServerID: cl.ServerID()}
+	if err := b.db.SignInAudibleAccount(ctx, a, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.db.DeleteAudibleAccount(ctx, a.ID, cl.PairingID()); err != nil {
+		t.Fatal(err)
+	}
+	beaten := make(chan struct{})
+	go func() {
+		b.beat(ctx)
+		close(beaten)
+	}()
+	<-reached
+	select {
+	case <-beaten:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the heartbeat waited for the pending removal's DELETE")
+	}
+	free()
+	b.bg.wg.Wait()
+	if _, err := b.db.NextAudibleRemoval(ctx, cl.PairingID(), time.Now().AddDate(1, 0, 0)); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("removal still pending: %v", err)
 	}
 }
