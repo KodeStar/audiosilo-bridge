@@ -431,6 +431,46 @@ func TestPlaceCopiesFinishedSourceAcrossDevices(t *testing.T) {
 	t.Skip("no second writable filesystem")
 }
 
+// A temp a Place here is still using is never swept, however old it looks: a
+// linked one carries its source's time, and a share's clock may run behind.
+func TestSweepStagedSparesAPlaceInFlight(t *testing.T) {
+	for _, link := range []bool{true, false} {
+		root := t.TempDir()
+		src := source(t, "complete audio")
+		old := time.Now().Add(-30 * 24 * time.Hour)
+		if err := os.Chtimes(src, old, old); err != nil {
+			t.Fatal(err)
+		}
+		swept := false
+		req := PlaceRequest{Root: root, RelPath: "Author/book.m4b", SrcPath: src, LinkSource: link,
+			BeforeInstall: func(ctx context.Context) error {
+				entries, err := os.ReadDir(filepath.Join(root, "Author"))
+				if err != nil {
+					return err
+				}
+				for _, e := range entries {
+					if strings.HasPrefix(e.Name(), tempPrefix) {
+						if err := os.Chtimes(filepath.Join(root, "Author", e.Name()), old, old); err != nil {
+							return err
+						}
+					}
+				}
+				swept = true
+				return SweepStaged(ctx, root, time.Now().Add(-7*24*time.Hour), func() bool { return true })
+			}}
+		if _, err := NewLocal().Place(context.Background(), req); err != nil || !swept {
+			t.Fatalf("link=%t: %v (swept %t)", link, err, swept)
+		}
+		if read(t, filepath.Join(root, "Author", "book.m4b")) != "complete audio" {
+			t.Fatalf("link=%t: the book was not installed", link)
+		}
+		noTemps(t, root)
+		if inUse(".audiosilo-import-0123456789abcdef.part") {
+			t.Fatal("a name nobody uses is in use")
+		}
+	}
+}
+
 // A link keeps its source's group, so a folder that gives a copy another group
 // (a set-group-ID library folder; any folder on macOS) gets the copy.
 func TestPlaceCopiesWhenALinkWouldKeepAnotherGroup(t *testing.T) {

@@ -13,8 +13,9 @@ import (
 
 var stagedName = regexp.MustCompile("^" + regexp.QuoteMeta(tempPrefix) + "[0-9a-f]{16}\\.part$")
 
-// SweepStaged removes old Place temporaries from a checked library. WalkDir
-// does not follow symlinks. Place never writes into hidden directories.
+// SweepStaged removes old Place temporaries from a checked library, never one
+// a Place here is still using (staging). WalkDir does not follow symlinks.
+// Place never writes into hidden directories.
 func SweepStaged(ctx context.Context, mount string, cutoff time.Time, stillMapped func() bool) error {
 	root, err := os.OpenRoot(mount)
 	if err != nil {
@@ -41,7 +42,7 @@ func SweepStaged(ctx context.Context, mount string, cutoff time.Time, stillMappe
 		if err == nil {
 			var info fs.FileInfo
 			info, err = parent.Lstat(e.Name())
-			if err == nil && info.Mode().IsRegular() && !info.ModTime().After(cutoff) {
+			if err == nil && info.Mode().IsRegular() && !info.ModTime().After(cutoff) && !inUse(e.Name()) {
 				if !stillMapped() {
 					_ = parent.Close()
 					return context.Canceled

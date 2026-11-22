@@ -21,6 +21,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 	"github.com/kodestar/audiosilo-bridge/internal/mapping"
@@ -46,6 +47,18 @@ const DefaultHeadroom = 1.1
 
 // tempPrefix names Place's staged copies (a dotfile the server's scan skips).
 const tempPrefix = ".audiosilo-import-"
+
+// staging holds the names of the temp files this process's Places are using
+// (each random, so unique), from before one is made until it is gone.
+// SweepStaged leaves them alone whatever their age: a linked temp carries its
+// source's modification time, and a share's clock may run behind this one's.
+var staging sync.Map
+
+// inUse reports whether name is a temp file a Place here is using.
+func inUse(name string) bool {
+	_, ok := staging.Load(name)
+	return ok
+}
 
 // PlaceRequest is one file to install.
 type PlaceRequest struct {
@@ -235,7 +248,10 @@ func (l *Local) Place(ctx context.Context, req PlaceRequest) (PlaceResult, error
 	if err != nil {
 		return PlaceResult{}, err
 	}
-	defer func() { _ = root.Remove(temp) }() // gone already when the install renamed it
+	defer func() {
+		_ = root.Remove(temp) // gone already when the install renamed it
+		staging.Delete(path.Base(temp))
+	}()
 	if req.BeforeInstall != nil {
 		if err := req.BeforeInstall(ctx); err != nil {
 			return PlaceResult{}, fmt.Errorf("confirming the lease before installing the book: %w", err)
@@ -386,7 +402,7 @@ func NearestDir(rootDir, rel string) string {
 // stage links (req.LinkSource) or copies src into a new temp file beside the
 // cleaned req.RelPath, a copy synced and size-checked, and returns its
 // root-relative name. A failure removes it.
-func (l *Local) stage(ctx context.Context, root *os.Root, src *os.File, size int64, req PlaceRequest) (string, error) {
+func (l *Local) stage(ctx context.Context, root *os.Root, src *os.File, size int64, req PlaceRequest) (_ string, err error) {
 	dir := path.Dir(req.RelPath)
 	if _, err := src.Seek(0, io.SeekStart); err != nil {
 		return "", err
@@ -395,9 +411,16 @@ func (l *Local) stage(ctx context.Context, root *os.Root, src *os.File, size int
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
-	temp := path.Join(dir, tempPrefix+hex.EncodeToString(b)+".part")
+	name := tempPrefix + hex.EncodeToString(b) + ".part"
+	staging.Store(name, struct{}{}) // Place forgets it once the temp is gone
+	defer func() {
+		if err != nil {
+			staging.Delete(name)
+		}
+	}()
+	temp := path.Join(dir, name)
 	if req.LinkSource {
-		linked, err := linkSource(root, dir, src.Name(), path.Base(temp))
+		linked, err := linkSource(root, dir, src.Name(), name)
 		if err != nil {
 			return "", noSpace(err)
 		}
