@@ -2246,8 +2246,11 @@ internal/
             compares SIZES (the only thing that catches a stale copy, spike 3), and
             only then probes writability with an exclusive dot-named probe file (a
             crash leaves nothing the server's scan walks). A library with no indexed
-            book is NEVER mapped: with nothing to compare, a wrong mount would look
-            right and a later write job would land in the wrong folder.
+            book is never mapped by its files: with nothing to compare, a wrong mount
+            would look right and a later write job would land in the wrong folder.
+            When the link reads markers, such a books library takes the podcast
+            libraries' marker check instead (the server reads the nonce back from
+            its own copy), else it stays unmapped.
             BookReadSettled is the rule verify's and generate's book reads retry
             by: settled is no such book or an answer that isn't a refused token
             or link's APIError.Transient (asking again won't change it);
@@ -2399,7 +2402,9 @@ internal/
             queues it first in line (waiting) and waits for admission. release
             knows the yielded state, and Yield clears the run's stray mark (a
             stray holds its dispatcher for its first wait only, never for the
-            wait in Reclaim); Yielded reports it (a
+            wait in Reclaim); Yielded reports it, and HoldsSlot is false both
+            while yielded and while Reclaim still waits (audible.import's
+            account gate asks it of the holder) (a
             LocalReporter only records its Yield and Reclaim, for a handler's
             tests). librivox.fetch yields while parked. Phase 2c-2b: dispatch.go owns ordinary and
             reserved dispatchers. InteractiveHandler opts a kind into the reserved
@@ -3609,8 +3614,27 @@ internal/
             its state for the next run; a cancel or a failure deletes it; Abandon
             deletes it for a job the runner ends unrun, unless its claim was lost
             or another import of the account holds the gate (tryGate: never
-            waited for; the temp files are then that import's, and the sweep's);
-            the decrypted copy always goes. After the install a placement marker
+            waited for; the temp files are then that import's, and the sweep's).
+            The decrypt goes to <acct>-<asin>.ready.m4b.partial (opened first, so
+            ffmpeg keeps its 0644 mode) and becomes .ready.m4b, with a .json beside
+            it (server, pairing, the title, the planned placement, size, mtime_ns),
+            only once ffmpeg succeeded and it is synced; a stop or a lost claim
+            keeps that pair too, and the next run (readStaged: the same server,
+            pairing, ASIN, size and mtime) skips the title read, the license, the
+            download and a refusal since. A crash between the install and the
+            marker is adopted (transfer.Matches: the same bytes at the planned
+            path), marker written. The install links the staged copy where it can
+            (PlaceRequest.LinkSource) and confirms the lease just before it
+            publishes (BeforeInstall: rep.ConfirmLease; a refusal fails the job).
+            An import waiting for its account's gate gives its lane slot back only
+            while the holder holds none (parked, or still reclaiming one: HoldsSlot; gatePoll), so the lane
+            never claims the account's whole queue to wait there; a parked import
+            (mapped) gives its slot back and reclaims it before going on. Without a
+            dest_path, imports of one pairing and library share a books listing for
+            15 minutes (booksFor, the rescanned books refreshed by their page:
+            importjob.Listing.BookAt), checking the destination's paths on the
+            server before vacant (booksAt: a book there reads the whole listing).
+            After the install a placement marker
             (<tmp>/<acct>-<asin>.placed.json: library_id, the request's dest_path
             and template, path, size, mtime_ns, the joins' verdicts) is written:
             while the library holds exactly that file (its size, and its time
@@ -3622,7 +3646,7 @@ internal/
             marker (exists), and one that can't be read now keeps it, failing to
             try again. The result removes it. SweepTmp at start keeps only
             *.aaxc.part younger than 7 days (PartialMaxAge) with their state, and
-            markers as young (decision 6). Deps: audibleacct (types), audible,
+            markers and *.ready.m4b (with their .json) as young (decision 6). Deps: audibleacct (types), audible,
             fsutil, importjob, jobs, link, mapping, placement, source, store,
             transfer.
   audiblesync/ Phase 4c: an account's places both ways. A title the Bridge remembers as a
@@ -3987,9 +4011,19 @@ internal/
             .audiosilo-import-*.part dotfile beside the destination (0644, synced,
             size-checked), installed with fsutil.InstallNoReplace, a file that
             raced in kept (ErrExists, or AlreadyPresent when it is these bytes); a
-            failure or cancel leaves no staged copy. Deps: fsutil, mapping, progress.
-  progress/ throttled byte-progress Reader/Writer (1 MiB) shared by the download
-            and the transfer.
+            failure or cancel leaves no staged copy. LinkSource stages a hard link
+            of the caller's finished private file instead (linux, darwin), unless
+            the folder would give a copy another group (set-group-ID, macOS) or a
+            default ACL, or the link fails (EXDEV, no links, EPERM, EACCES): a copy
+            then, its free space checked. BeforeInstall runs between the staging
+            and the install. Matches is sameAt for crash recovery. SweepStaged
+            (app, once per books mount and start, after its first writable check)
+            removes only .audiosilo-import-<16 hex>.part files at least 7 days old,
+            no hidden folder or link followed, never one a Place here still uses
+            (staging), stopping when the mapping changes. Deps: fsutil, mapping,
+            progress.
+  progress/ throttled byte-progress Reader (1 MiB) for the download; the
+            transfer copies in EmitEvery steps for the same cadence.
   generate/ sidecars.generate (Phase 1a): turns a server job into an ENGINE BOOK, follows
             it to the end reporting its stage, ETA, spend and parks, then writes the
             validated characters and recaps into the book's .audiosilo/ and asks the
