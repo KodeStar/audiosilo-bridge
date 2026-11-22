@@ -275,12 +275,19 @@ func (db *DB) AudibleAccountError(ctx context.Context, id, why string) error {
 }
 
 // DeleteAudibleAccount forgets id, its push rows and its remembered preorders.
-func (db *DB) DeleteAudibleAccount(ctx context.Context, id string) error {
+// A nonempty pairing records the pending server DELETE in the same transaction.
+func (db *DB) DeleteAudibleAccount(ctx context.Context, id, pairing string) error {
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if pairing != "" {
+		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO audible_removals (account, pairing)
+			SELECT id, ? FROM audible_accounts WHERE id = ?`, pairing, id); err != nil {
+			return err
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM audible_push WHERE account = ?`, id); err != nil {
 		return err
 	}

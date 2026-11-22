@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -253,5 +254,165 @@ func TestAudibleErrorKinds(t *testing.T) {
 	local := errors.New("disk full")
 	if got := audibleError(local); got != local {
 		t.Fatalf("a local failure = %v, want it as it is (a logged 500)", got)
+	}
+}
+
+// A heartbeat the server answered sends a pending Audible removal, only on
+// the pairing that recorded it (an unpair and a pairing again with the same
+// server drop it); one the server failed sends nothing and keeps it.
+func TestHeartbeatRetriesAudibleRemovalOnlyOnItsPairing(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		repair, beatFails bool
+		deletes           int32
+		pending           bool
+	}{
+		{name: "paired", deletes: 1},
+		{name: "repaired", repair: true},
+		{name: "heartbeat fails", beatFails: true, pending: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			status := &setupServer{kind: "old"}
+			var deletes atomic.Int32
+			var beatFails atomic.Bool
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodDelete {
+					if r.URL.Path != "/api/v1/bridge/audible/accounts/acct0001" {
+						t.Errorf("DELETE %s", r.URL.Path)
+					}
+					deletes.Add(1)
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				if beatFails.Load() && r.URL.Path == "/api/v1/bridge/status" {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					return
+				}
+				status.ServeHTTP(w, r)
+			}))
+			defer ts.Close()
+			b := newTestBridge(t)
+			if err := b.Pair(ctx, ts.URL, "CODE"); err != nil {
+				t.Fatal(err)
+			}
+			cl := b.conn.Client()
+			a := store.AudibleAccount{ID: "acct0001", Marketplace: "us", ServerID: cl.ServerID()}
+			if err := b.db.SignInAudibleAccount(ctx, a, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			// Simulate a stop after the local transaction but before the HTTP call.
+			if err := b.db.DeleteAudibleAccount(ctx, a.ID, cl.PairingID()); err != nil {
+				t.Fatal(err)
+			}
+			if tc.repair {
+				if err := b.Unpair(ctx); err != nil {
+					t.Fatal(err)
+				}
+				if err := b.Pair(ctx, ts.URL, "CODE"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			beatFails.Store(tc.beatFails)
+			b.beat(ctx)
+			b.bg.wg.Wait() // the retry runs beside the beat
+			if got := deletes.Load(); got != tc.deletes {
+				t.Fatalf("sent %d DELETEs, want %d", got, tc.deletes)
+			}
+			_, err := b.db.NextAudibleRemoval(ctx, cl.PairingID(), time.Now().AddDate(1, 0, 0))
+			if pending := err == nil; pending != tc.pending {
+				t.Fatalf("removal pending = %t (%v), want %t", pending, err, tc.pending)
+			}
+		})
+	}
+}
+
+// A DELETE the server is slow to answer never holds up the heartbeat: the
+// retry runs beside it and clears the removal once the server answers.
+func TestHeartbeatDoesNotWaitForAPendingRemoval(t *testing.T) {
+	ctx := t.Context()
+	status := &setupServer{kind: "old"}
+	reached, release := make(chan struct{}, 1), make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			reached <- struct{}{}
+			<-release
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		status.ServeHTTP(w, r)
+	}))
+	defer ts.Close()
+	var released atomic.Bool
+	free := func() {
+		if released.CompareAndSwap(false, true) {
+			close(release)
+		}
+	}
+	defer free()
+	b := newTestBridge(t)
+	if err := b.Pair(ctx, ts.URL, "CODE"); err != nil {
+		t.Fatal(err)
+	}
+	cl := b.conn.Client()
+	a := store.AudibleAccount{ID: "acct0001", Marketplace: "us", ServerID: cl.ServerID()}
+	if err := b.db.SignInAudibleAccount(ctx, a, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.db.DeleteAudibleAccount(ctx, a.ID, cl.PairingID()); err != nil {
+		t.Fatal(err)
+	}
+	beaten := make(chan struct{})
+	go func() {
+		b.beat(ctx)
+		close(beaten)
+	}()
+	<-reached
+	select {
+	case <-beaten:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the heartbeat waited for the pending removal's DELETE")
+	}
+	free()
+	b.bg.wg.Wait()
+	if _, err := b.db.NextAudibleRemoval(ctx, cl.PairingID(), time.Now().AddDate(1, 0, 0)); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("removal still pending: %v", err)
+	}
+}
+
+// A refused token doesn't end the pairing: an account removed meanwhile owes
+// the server its DELETE on the pairing, sent once the token works again,
+// rather than left to no one as while unpaired.
+func TestAudibleRemovalWhileRefusedStaysOwed(t *testing.T) {
+	ctx := t.Context()
+	status := &setupServer{kind: "old"}
+	var deletes atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			deletes.Add(1)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		status.ServeHTTP(w, r)
+	}))
+	defer ts.Close()
+	b := newTestBridge(t)
+	if err := b.Pair(ctx, ts.URL, "CODE"); err != nil {
+		t.Fatal(err)
+	}
+	cl := b.conn.Client()
+	a := store.AudibleAccount{ID: "acct0001", Marketplace: "us", ServerID: cl.ServerID()}
+	if err := b.db.SignInAudibleAccount(ctx, a, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	b.conn.mu.Lock()
+	b.conn.refusedAt = time.Now()
+	b.conn.mu.Unlock()
+	warning, err := b.RemoveAudibleAccount(ctx, a.ID)
+	if err != nil || !strings.Contains(warning, "try again") || deletes.Load() != 1 {
+		t.Fatalf("remove while refused = %q, %v, %d DELETEs", warning, err, deletes.Load())
+	}
+	if r, err := b.db.NextAudibleRemoval(ctx, cl.PairingID(), time.Now().AddDate(1, 0, 0)); err != nil || r.Account != a.ID {
+		t.Fatalf("owed removal = %+v, %v", r, err)
 	}
 }

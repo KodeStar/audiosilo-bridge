@@ -58,7 +58,7 @@ func TestImportAgainstTheFakeDeviceProfile(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = resp.Body.Close()
-	acct, err := m.Finish(context.Background(), accountServer{&fakeServer{}}, "srv1", audibleacct.Finish{Login: st.Login,
+	acct, err := m.Finish(context.Background(), accountServer{&fakeServer{}}, audibleacct.Finish{Login: st.Login,
 		RedirectURL: resp.Header.Get("Location"), Mapping: audibleacct.Mapping{UserID: 3, UserName: "Chris", LibraryID: 1, Policy: "manual"}})
 	if err != nil {
 		t.Fatal(err)
@@ -130,7 +130,7 @@ func TestImportAgainstTheFakeDeviceProfile(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = resp.Body.Close()
-	again, err := m.Finish(context.Background(), accountServer{&fakeServer{}}, "srv1", audibleacct.Finish{Login: st.Login,
+	again, err := m.Finish(context.Background(), accountServer{&fakeServer{}}, audibleacct.Finish{Login: st.Login,
 		RedirectURL: resp.Header.Get("Location"), Mapping: audibleacct.Mapping{UserID: 3, UserName: "Chris", LibraryID: 1, Policy: "manual"}})
 	if err != nil || again.ID != acct.ID || again.RefusedAt != "" {
 		t.Fatalf("signed in again = %+v, %v", again, err)
@@ -175,7 +175,7 @@ func TestPreorderPollReleaseImportAgainstTheFake(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = resp.Body.Close()
-	acct, err := m.Finish(context.Background(), accountServer{&fakeServer{}}, "srv1", audibleacct.Finish{Login: st.Login,
+	acct, err := m.Finish(context.Background(), accountServer{&fakeServer{}}, audibleacct.Finish{Login: st.Login,
 		RedirectURL: resp.Header.Get("Location"), Mapping: audibleacct.Mapping{UserID: 3, UserName: "Chris", LibraryID: 1, Policy: "manual"}})
 	if err != nil {
 		t.Fatal(err)

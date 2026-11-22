@@ -125,7 +125,7 @@ internal/
               0016 server_jobs.share_off, 0017 audible_accounts.push_at/push_error,
               0018 audible_accounts.push_reread,
               0019 books.share_skipped, 0020 audible_push.row_read,
-              0021 server_jobs.pairing)
+              0021 server_jobs.pairing, 0022 audible_removals)
   auth/       the page's single password + hashed sessions + login limiter
   -- Phase 1a --
   generate/   sidecars.generate: server job -> engine book -> .audiosilo/ + rescan;
@@ -440,7 +440,8 @@ store, open Amazon's sign-in, paste back the page it lands on, map the account t
 a person and a books library with a policy; sign in again, change, remove), the
 accounts (`audibleacct`, migration 0009, the vault's `audible_<id>`; the mapping
 recorded on the server first; a failed sign-in deregisters its device; removal
-forgets locally first, then the server, then Amazon), `audible.poll`
+forgets locally first, then the server, then Amazon, with pending server removals
+retried on the heartbeat), `audible.poll`
 (`audiblejob`, light lane: so the heartbeat's features gain `audible`), the link's
 Audible routes, and the optional `audible` setup item. The server's Audible routes
 are not behind the console's module toggle (the podcasts precedent): the page

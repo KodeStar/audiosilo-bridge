@@ -125,7 +125,7 @@ func TestAudiblePushRows(t *testing.T) {
 		t.Fatalf("list = %+v, %v", list, err)
 	}
 	// Removing the account removes its rows.
-	if err := db.DeleteAudibleAccount(ctx, a.ID); err != nil {
+	if err := db.DeleteAudibleAccount(ctx, a.ID, ""); err != nil {
 		t.Fatal(err)
 	}
 	if list, _ := db.AudiblePushes(ctx, a.ID); len(list) != 0 {

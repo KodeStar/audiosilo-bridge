@@ -29,6 +29,9 @@ import (
 
 type mapServer struct{}
 
+func (mapServer) ServerID() string  { return "srv-1" }
+func (mapServer) PairingID() string { return "pairing-1" }
+
 func (mapServer) PutAudibleAccount(_ context.Context, id string, _ link.AudibleAccountInput) (*link.AudibleAccount, error) {
 	return &link.AudibleAccount{ID: id}, nil
 }
@@ -82,7 +85,7 @@ func newFakeAccount(t *testing.T, now func() time.Time, wrap func(http.Handler) 
 		t.Fatal(err)
 	}
 	_ = resp.Body.Close()
-	acct, err := m.Finish(context.Background(), mapServer{}, "srv-1", audibleacct.Finish{Login: st.Login,
+	acct, err := m.Finish(context.Background(), mapServer{}, audibleacct.Finish{Login: st.Login,
 		RedirectURL: resp.Header.Get("Location"), Mapping: audibleacct.Mapping{UserID: 3, UserName: "Chris", LibraryID: 1, Policy: "manual"}})
 	if err != nil {
 		t.Fatal(err)

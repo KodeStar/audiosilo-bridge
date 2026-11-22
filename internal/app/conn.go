@@ -148,6 +148,15 @@ func (c *Conn) Client() *link.Client {
 	return c.client
 }
 
+// pairedClient is the pairing's link, a refused one's too (nil only while
+// unpaired): a refusal doesn't end the pairing, so what it owes the server
+// is still its to send once the token works again.
+func (c *Conn) pairedClient() *link.Client {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.client
+}
+
 // learnServerID asks cl's server for its id when the stored pairing has none
 // (link.FetchServerID) and keeps it, so cl's link counts for jobs from then on
 // (Bridge.server): a job of a server whose id isn't known runs nowhere. It

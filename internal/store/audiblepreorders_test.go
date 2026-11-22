@@ -54,7 +54,7 @@ func TestAudiblePreorders(t *testing.T) {
 		t.Fatalf("another account's rows = %+v", other)
 	}
 
-	if err := db.DeleteAudibleAccount(ctx, "abcd1234"); err != nil {
+	if err := db.DeleteAudibleAccount(ctx, "abcd1234", ""); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := db.AudiblePreorders(ctx, "abcd1234"); err != nil || len(got) != 0 {

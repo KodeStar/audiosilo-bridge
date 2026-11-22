@@ -1691,6 +1691,9 @@ internal/
             pairing (app.openConn, at an upgrade): the paired server's rows the
             one in place, every other row (another server's, none known, all
             while unpaired) one no pairing has.
+            0022 (bridge#40) adds audible_removals: a local removal records the
+            account id and the pairing in its delete transaction; the retry
+            count and due time survive a restart.
   state/    per-book pipeline state machine: table-driven states/lanes/transitions,
             CanStart/NextState guards, the audit fix-loop cap. Pure, no I/O. M6 added
             ParkCode (typed park reasons - M7 added contrib_unavailable, core_needed,
@@ -2216,7 +2219,9 @@ internal/
             null). audible.go mirrors the rest of the server's handlers_audible.go:
             Users (GET /bridge/users: enabled adults and admins, no email),
             PutAudibleAccount / DeleteAudibleAccount (PUT/DELETE
-            /bridge/audible/accounts/{account}; the delete is 204 known or not;
+            /bridge/audible/accounts/{account}; the delete is 204 known or not,
+            and the link takes any 2xx or a 404 as done, a cut-short body too,
+            and keeps any other answer's HTTP status as an APIError, bridge#40;
             AudibleAccountInput sends no sync, the console's alone since 4c, bridge#50),
             PutAudibleTitles (<= MaxAudibleTitles 500 per call, poll_id + final; a
             nil list sent as []; 404 unknown_account -> ErrUnknownAccount; each
@@ -3396,7 +3401,24 @@ internal/
             couldn't be read) keeps the stored name (Map and a sign-in again), never "". Remove forgets
             locally FIRST (vault, then row), then DELETEs on the server and
             deregisters, run to the end even if the page goes away; either failing
-            is a warning for the page, never the account kept. Library opens the
+            is a warning for the page, never the account kept. A DELETE the server
+            didn't answer stays owed (audible_removals, on the pairing that
+            recorded it): a heartbeat the server answered sends one that is due,
+            in the background (RetryRemoval, no lock; never one already on its
+            way, Remove's own included: sending); a 2xx or 404 clears it, a
+            refusal (a non-transient 4xx) drops it with a warning, anything
+            else (a 401 too: a refused token doesn't end the pairing) backs off a
+            minute doubling to an hour (a longer Retry-After, at most a day,
+            wins), given up with a warning at the 168th failure (about a week
+            of a server that is up), and one cut short by a stop stays due; another
+            pairing's are dropped unsent. A removal while the token is refused
+            is owed on the pairing too (the app passes the refused link,
+            Conn.pairedClient), and so is a failed sign-in's new account the
+            server may already hold (Finish's rollback, removeUnkept). An
+            account mapped on another server (both server ids known) is removed
+            here only. A sign-in again after a removal always gets a fresh id,
+            so a late DELETE never reaches it.
+            Library opens the
             sign-in and lists the library through Service (audibleacct.Audible(opts...):
             the audible package; a stub in tests), which answers ErrRefused on a
             401/403 signed call: Library lists again when a sign-in again replaced

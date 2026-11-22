@@ -204,9 +204,22 @@ func (c *Client) PutAudibleAccount(ctx context.Context, account string, in Audib
 }
 
 // DeleteAudibleAccount removes account on the server (its titles go with it).
-// The server answers 204 whether it knew the account or not.
+// Any 2xx or 404 acknowledges the removal, even if the body was cut short.
 func (c *Client) DeleteAudibleAccount(ctx context.Context, account string) error {
-	return c.do(ctx, http.MethodDelete, audiblePath(account), nil, nil, nil)
+	status, err := c.doStatus(ctx, http.MethodDelete, audiblePath(account), nil, nil, nil)
+	switch {
+	case status >= 200 && status < 300, status == http.StatusNotFound:
+		return nil
+	case status == http.StatusUnauthorized:
+		return ErrUnauthorized
+	}
+	// A proxy may truncate its error body or return a code normally used on
+	// another route. Keep the HTTP status for the removal retry decision.
+	var ae *APIError
+	if status != 0 && err != nil && !errors.As(err, &ae) {
+		return &APIError{Status: status, Message: err.Error()}
+	}
+	return err
 }
 
 // PutAudibleTitles stores one call of a poll's titles and returns how many the

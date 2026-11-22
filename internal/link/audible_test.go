@@ -264,3 +264,38 @@ func mustJSON(t *testing.T, v any) []byte {
 	}
 	return b
 }
+
+// A DELETE's HTTP status settles the removal even when a proxy cuts off
+// its body or sends an error code normally belonging to another route.
+func TestDeleteAudibleAccountStatus(t *testing.T) {
+	for _, code := range []int{http.StatusOK, http.StatusCreated, http.StatusNotFound, http.StatusUnauthorized, http.StatusForbidden, http.StatusBadGateway} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Length", "200")
+				w.WriteHeader(code)
+				_, _ = w.Write([]byte(`{"code":"no_book"}`))
+			}))
+			defer ts.Close()
+			cl, err := New(ts.URL, "token", "test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = cl.DeleteAudibleAccount(t.Context(), "abcd1234")
+			var ae *APIError
+			switch code {
+			case http.StatusUnauthorized:
+				if !errors.Is(err, ErrUnauthorized) {
+					t.Fatalf("got %v", err)
+				}
+			case http.StatusForbidden, http.StatusBadGateway:
+				if !errors.As(err, &ae) || ae.Status != code {
+					t.Fatalf("got %v", err)
+				}
+			default:
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}

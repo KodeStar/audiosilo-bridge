@@ -251,13 +251,20 @@ type Store interface {
 	RefuseAudibleAccount(ctx context.Context, id, kind, why string, at time.Time) error
 	AudibleAccepted(ctx context.Context, id, kind string) (bool, error)
 	AudibleAccountError(ctx context.Context, id, why string) error
-	DeleteAudibleAccount(ctx context.Context, id string) error
+	DeleteAudibleAccount(ctx context.Context, id, pairing string) error
+	NextAudibleRemoval(ctx context.Context, pairing string, now time.Time) (store.AudibleRemoval, error)
+	OweAudibleRemoval(ctx context.Context, account, pairing string) error
+	DropAudibleRemovals(ctx context.Context, keep string) (int64, error)
+	DeferAudibleRemoval(ctx context.Context, account string, until time.Time) error
+	ClearAudibleRemoval(ctx context.Context, account string) error
 	AudiblePreorders(ctx context.Context, account string) ([]store.AudiblePreorder, error)
 	SetAudiblePreorders(ctx context.Context, account string, ps []store.AudiblePreorder) error
 }
 
 // Server is the part of the server link the accounts use (*link.Client).
 type Server interface {
+	ServerID() string
+	PairingID() string
 	PutAudibleAccount(ctx context.Context, account string, in link.AudibleAccountInput) (*link.AudibleAccount, error)
 	DeleteAudibleAccount(ctx context.Context, account string) error
 }
@@ -281,6 +288,11 @@ type Manager struct {
 
 	mu     sync.Mutex
 	logins map[string]login
+	// sending is the accounts whose server DELETE is on its way now (Remove's
+	// own, or a heartbeat's retry), under mu: a removal is owed, and due, from
+	// its delete transaction on, and its OnChange kicks the heartbeat, whose
+	// retry must not send a second DELETE alongside Remove's (RetryRemoval).
+	sending map[string]bool
 	// finishMu serialises Finish from the account lookup until the row is
 	// stored: two sign-ins of the same Amazon account finishing at once would
 	// otherwise both find no account and make two (the later now replaces the
@@ -354,7 +366,7 @@ func New(o Options) *Manager {
 	if o.Service == nil {
 		o.Service = Audible(audible.WithLogger(o.Log))
 	}
-	return &Manager{o: o, logins: map[string]login{}, finishMu: make(chan struct{}, 1)}
+	return &Manager{o: o, logins: map[string]login{}, sending: map[string]bool{}, finishMu: make(chan struct{}, 1)}
 }
 
 // Started is a sign-in waiting for the admin: open URL at Amazon, then paste
@@ -478,7 +490,7 @@ type Finish struct {
 }
 
 // Finish ends a sign-in: registers the device with the code in the pasted URL,
-// records the mapping on the server (srv, paired with serverID), seals the
+// records the mapping on the server (srv), seals the
 // sign-in and records the account. A second sign-in of the same Amazon account
 // in the same marketplace replaces the first (its id kept, its old device
 // deregistered after). Anything that fails after the device registered
@@ -486,13 +498,14 @@ type Finish struct {
 // back what it changed: the account's earlier sign-in in the vault and the
 // server's record of it (a new account removed, an existing one's earlier
 // mapping recorded again).
-func (m *Manager) Finish(ctx context.Context, srv Server, serverID string, f Finish) (store.AudibleAccount, error) {
+func (m *Manager) Finish(ctx context.Context, srv Server, f Finish) (store.AudibleAccount, error) {
 	if err := f.check(); err != nil {
 		return store.AudibleAccount{}, err
 	}
 	if srv == nil {
 		return store.AudibleAccount{}, ErrNotPaired
 	}
+	serverID := srv.ServerID()
 	code, err := audible.ParseAuthCode(f.RedirectURL)
 	if err != nil {
 		// The login stays: the admin can paste the right page.
@@ -575,9 +588,7 @@ func (m *Manager) Finish(ctx context.Context, srv Server, serverID string, f Fin
 		}
 		switch {
 		case prev.ID == "":
-			if derr := srv.DeleteAudibleAccount(bg, acct.ID); derr != nil {
-				m.o.Log.Warn("audible: removing a failed sign-in's account from the server failed", "account", acct.ID, "err", derr)
-			}
+			m.removeUnkept(bg, srv, acct.ID)
 		case prev.ServerID == serverID:
 			if _, perr := srv.PutAudibleAccount(bg, prev.ID, input(prev)); perr != nil {
 				m.o.Log.Warn("audible: recording the account's earlier mapping on the server again failed", "account", acct.ID, "err", perr)
@@ -635,10 +646,9 @@ func putMapping(ctx context.Context, srv Server, a *store.AudibleAccount) error 
 	return err
 }
 
-// Map records a new mapping of account id: on the server (srv, paired with
-// serverID) first, then here. ErrNotFound: no such account. It runs under
-// finishMu, one at a time with sign-ins and removals.
-func (m *Manager) Map(ctx context.Context, srv Server, serverID, id string, mp Mapping) (store.AudibleAccount, error) {
+// Map records a new mapping on the paired server first, then here. It returns
+// ErrNotFound for an unknown id and runs under finishMu with sign-ins and removals.
+func (m *Manager) Map(ctx context.Context, srv Server, id string, mp Mapping) (store.AudibleAccount, error) {
 	if err := mp.check(); err != nil {
 		return store.AudibleAccount{}, err
 	}
@@ -655,6 +665,7 @@ func (m *Manager) Map(ctx context.Context, srv Server, serverID, id string, mp M
 	if madeLabel(mp.Label, a) {
 		mp.Label = ""
 	}
+	serverID := srv.ServerID()
 	mp.keepUserName(a, serverID)
 	a.Label, a.UserID, a.UserName, a.LibraryID, a.Policy, a.ServerID =
 		mp.label(a.Marketplace), mp.UserID, mp.UserName, mp.LibraryID, mp.Policy, serverID
@@ -680,26 +691,52 @@ func (m *Manager) Remove(ctx context.Context, srv Server, id string) (warning st
 	m.lockFinish()
 	unlock := sync.OnceFunc(m.unlockFinish)
 	defer unlock()
-	if _, err := m.Account(ctx, id); err != nil {
+	a, err := m.Account(ctx, id)
+	if err != nil {
 		return "", err
 	}
 	ctx = context.WithoutCancel(ctx)
-	creds, credErr := m.credentials(id)
-	if err := m.o.Vault.Delete(secrets.AudibleName(id)); err != nil {
+	name := secrets.AudibleName(id)
+	raw, credErr := m.o.Vault.Get(name)
+	if err := m.o.Vault.Delete(name); err != nil {
 		return "", fmt.Errorf("could not forget the sign-in: %w", err)
 	}
-	if err := m.o.DB.DeleteAudibleAccount(ctx, id); err != nil {
+	var pairing string
+	var warnings []string
+	switch {
+	case srv == nil:
+		warnings = append(warnings, "the Bridge isn't paired, so the server may still list the account")
+	case a.ServerID != "" && srv.ServerID() != "" && srv.ServerID() != a.ServerID:
+		// Only when both ids are known: an account recorded, or a link made,
+		// before the server's id was known is removed on the paired server.
+		warnings = append(warnings, "the account's server isn't paired with this Bridge, so it may still list the account")
+	default:
+		pairing = srv.PairingID()
+		// Owed and due from the delete transaction on: the DELETE is this
+		// Remove's own until it returns, never a heartbeat retry's too.
+		m.setSending(id, true)
+		defer m.setSending(id, false)
+	}
+	if err := m.o.DB.DeleteAudibleAccount(ctx, id, pairing); err != nil {
+		// SQLite kept the account and rolled back its pending removal.
+		if raw != "" {
+			err = errors.Join(err, m.o.Vault.Set(name, raw))
+		}
 		return "", err
 	}
 	unlock()
 	m.o.OnChange()
-	var warnings []string
-	if srv == nil {
-		warnings = append(warnings, "the Bridge isn't paired, so the server may still list the account")
-	} else if err := srv.DeleteAudibleAccount(ctx, id); err != nil {
-		m.o.Log.Warn("audible: removing the account on the server failed", "account", id, "err", err)
-		warnings = append(warnings, "the server didn't confirm the removal, so it may still list the account")
+	if pairing != "" {
+		if pending, err := m.removeOnServer(ctx, srv, store.AudibleRemoval{Account: id, Pairing: pairing}); err != nil {
+			warning := "the server didn't confirm the removal, so it may still list the account"
+			if pending {
+				warning = "the server didn't confirm the removal, so the Bridge will try again"
+				m.o.Log.Warn("audible: removing the account on the server failed; the Bridge will try again", "account", id, "err", err)
+			}
+			warnings = append(warnings, warning)
+		}
 	}
+	creds, credErr := parseSignIn(raw, credErr)
 	if credErr != nil {
 		warnings = append(warnings, "the sign-in couldn't be read, so its AudioSilo device is still on the Amazon account: remove it in Amazon's device list")
 	} else if err := m.o.Service.Deregister(ctx, creds); err != nil {
@@ -774,7 +811,11 @@ func NotHere(a store.AudibleAccount, err error, serverID string) bool {
 
 // credentials opens account id's sealed sign-in.
 func (m *Manager) credentials(id string) (audible.Credentials, error) {
-	raw, err := m.o.Vault.Get(secrets.AudibleName(id))
+	return parseSignIn(m.o.Vault.Get(secrets.AudibleName(id)))
+}
+
+// parseSignIn opens a vault read's sealed sign-in (ErrNotFound for none).
+func parseSignIn(raw string, err error) (audible.Credentials, error) {
 	if err != nil {
 		return audible.Credentials{}, err
 	}

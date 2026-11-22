@@ -205,7 +205,7 @@ func (b *Bridge) FinishAudibleSignIn(ctx context.Context, f api.AudibleFinish) e
 	if err != nil {
 		return err
 	}
-	_, err = b.audible.Finish(ctx, b.audibleServer(), b.conn.Pairing().ServerID, audibleacct.Finish{Login: f.Login, RedirectURL: f.RedirectURL, Mapping: mp})
+	_, err = b.audible.Finish(ctx, b.audibleServer(), audibleacct.Finish{Login: f.Login, RedirectURL: f.RedirectURL, Mapping: mp})
 	return audibleError(err)
 }
 
@@ -215,14 +215,20 @@ func (b *Bridge) MapAudibleAccount(ctx context.Context, id string, m api.Audible
 	if err != nil {
 		return err
 	}
-	_, err = b.audible.Map(ctx, b.audibleServer(), b.conn.Pairing().ServerID, id, mp)
+	_, err = b.audible.Map(ctx, b.audibleServer(), id, mp)
 	return audibleError(err)
 }
 
 // RemoveAudibleAccount forgets an account, then removes it on the server and
-// deregisters its device.
+// deregisters its device. A refused token's link is the pairing's still: its
+// DELETE is refused too, so the removal stays owed until the token works
+// again (or an unpair drops it), rather than left to no one.
 func (b *Bridge) RemoveAudibleAccount(ctx context.Context, id string) (string, error) {
-	warning, err := b.audible.Remove(ctx, b.audibleServer(), id)
+	var srv audibleacct.Server
+	if cl := b.conn.pairedClient(); cl != nil {
+		srv = cl
+	}
+	warning, err := b.audible.Remove(ctx, srv, id)
 	return warning, audibleError(err)
 }
 
