@@ -1790,7 +1790,8 @@ func TestReadyBookRequiresItsPairingTitleAndCompleteFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	library := importLibrary{server: "srv", pairing: "original", id: 1}
-	m := stagedBook{Server: library.server, Pairing: library.pairing, Title: source.Record{ASIN: asin}, Size: st.Size(), ModTime: st.ModTime().UnixNano()}
+	m := stagedBook{Server: library.server, Pairing: library.pairing, Title: source.Record{ASIN: asin},
+		placedMarker: placedMarker{Size: st.Size(), ModTime: st.ModTime().UnixNano()}}
 	if err := m.save(file); err != nil {
 		t.Fatal(err)
 	}

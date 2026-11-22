@@ -327,8 +327,7 @@ func (h *Importer) Abandon(ctx context.Context, job jobs.Job) {
 	defer release()
 	part, decrypted := h.partPaths(p.Account, p.ASIN)
 	audible.RemovePartial(part)
-	_ = os.Remove(decrypted)
-	_ = os.Remove(decrypted + ".json")
+	removeStaged(decrypted)
 }
 
 // Run imports the title: license, download, decrypt, place, rescan, enrich.
@@ -386,8 +385,7 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 		if err != nil && ctx.Err() != nil && (jobs.Resumes(ctx) || jobs.Lost(ctx)) {
 			return
 		}
-		_ = os.Remove(decrypted)
-		_ = os.Remove(decrypted + ".json")
+		removeStaged(decrypted)
 		audible.RemovePartial(part)
 	}()
 
@@ -437,14 +435,14 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 
 	// A process can die between publishing the staged bytes and writing its
 	// placement marker. Only adopt that destination if it is the same book.
-	if stage != nil && stage.LibraryID == lib.ID && stage.Request == requestOf(p) {
+	if stage != nil && stage.LibraryID == lib.ID && stage.request(p) {
 		same, err := transfer.Matches(ctx, mount, stage.Path, decrypted)
 		if err != nil {
 			return nil, err
 		}
 		if same {
 			return h.finish(ctx, rep, srv, acct.ID, p.ASIN, library,
-				installed{rel: stage.Path, size: stage.Size, already: true, joins: stage.Joins}, marker)
+				stage.installed(), marker)
 		}
 	}
 	// A refused account fails here, before asking Audible anything: each queued
@@ -514,7 +512,8 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 	}
 	joins := joinedBooks(rec, books, rel)
 
-	next := stagedBook{Server: serverID, Pairing: library.pairing, Title: rec, LibraryID: lib.ID, Request: requestOf(p), Path: rel, Joins: joins}
+	next := stagedBook{Server: serverID, Pairing: library.pairing, Title: rec,
+		placedMarker: placedMarker{LibraryID: lib.ID, placedRequest: requestOf(p), Path: rel, Joins: joins}}
 	if stage == nil {
 		if err := h.prepare(ctx, p, part, decrypted, mount, rel, rep, next); err != nil {
 			if fsutil.IsNoSpace(err) {
@@ -562,16 +561,22 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 }
 
 // A ready file and its metadata were written by the same completed decrypt.
+// The marker's Size and ModTime are the staged file's here, and its request,
+// library, path and joins are the placement the stage was planned for.
 type stagedBook struct {
-	LibraryID int64           `json:"library_id"`
-	Request   placedRequest   `json:"request"`
-	Path      string          `json:"path"`
-	Joins     map[string]bool `json:"joins,omitempty"`
-	ModTime   int64           `json:"mtime_ns"`
-	Server    string          `json:"server"`
-	Pairing   string          `json:"pairing,omitempty"`
-	Title     source.Record   `json:"title"`
-	Size      int64           `json:"size"`
+	placedMarker
+	Server  string        `json:"server"`
+	Pairing string        `json:"pairing,omitempty"`
+	Title   source.Record `json:"title"`
+}
+
+// stagedMeta is the metadata file beside a ready decrypt.
+func stagedMeta(file string) string { return file + ".json" }
+
+// removeStaged removes a ready decrypt and its metadata.
+func removeStaged(file string) {
+	_ = os.Remove(file)
+	_ = os.Remove(stagedMeta(file))
 }
 
 func (m stagedBook) save(file string) error {
@@ -579,7 +584,7 @@ func (m stagedBook) save(file string) error {
 	if err != nil {
 		return err
 	}
-	return fsutil.WriteFileAtomic(file+".json", b, 0o600)
+	return fsutil.WriteFileAtomic(stagedMeta(file), b, 0o600)
 }
 
 func readStaged(file string, library importLibrary, asin string) *stagedBook {
@@ -587,7 +592,7 @@ func readStaged(file string, library importLibrary, asin string) *stagedBook {
 	if err != nil || !info.Mode().IsRegular() {
 		return nil
 	}
-	b, err := os.ReadFile(file + ".json") //nolint:gosec // named within the private import folder
+	b, err := os.ReadFile(stagedMeta(file)) //nolint:gosec // named within the private import folder
 	var m stagedBook
 	if err != nil || json.Unmarshal(b, &m) != nil || m.Server != library.server || m.Pairing != library.pairing ||
 		m.Title.ASIN != asin || m.Size <= 0 || m.Size != info.Size() || m.ModTime != info.ModTime().UnixNano() {
@@ -1450,14 +1455,15 @@ func SweepTmp(dir string, now time.Time) error {
 		if !e.Type().IsRegular() {
 			continue
 		}
-		marker, part := strings.HasSuffix(e.Name(), placedSuffix), strings.HasSuffix(e.Name(), ".aaxc.part")
-		if !marker && !part && !strings.HasSuffix(e.Name(), readySuffix) {
+		name := e.Name()
+		marker, part, ready := strings.HasSuffix(name, placedSuffix), strings.HasSuffix(name, ".aaxc.part"), strings.HasSuffix(name, readySuffix)
+		if !marker && !part && !ready {
 			continue
 		}
 		if info, err := e.Info(); err == nil && now.Sub(info.ModTime()) < PartialMaxAge {
 			keep[e.Name()] = true
-			if strings.HasSuffix(e.Name(), readySuffix) {
-				keep[e.Name()+".json"] = true
+			if ready {
+				keep[stagedMeta(name)] = true
 			}
 			if part {
 				keep[filepath.Base(audible.StatePath(e.Name()))] = true

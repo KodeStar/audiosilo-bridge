@@ -97,12 +97,13 @@ func booksAt(ctx context.Context, srv ImportServer, libraryID int64, mount, rel 
 }
 
 // Mark the rescan for the next planning pass. The library's new book can
-// supply the author folder or the series siblings for the next import.
+// supply the author folder or the series siblings for the next import. A
+// listing past booksMaxAge is dropped rather than kept for the process's life.
 func (h *Importer) recordBook(library importLibrary, at string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	var next bookSnapshot
-	if h.listing != nil {
+	if h.listing != nil && time.Since(h.listing.readAt) < booksMaxAge {
 		next = *h.listing
 	}
 	if next.library == library {
