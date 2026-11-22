@@ -430,3 +430,53 @@ func TestPlaceCopiesFinishedSourceAcrossDevices(t *testing.T) {
 	}
 	t.Skip("no second writable filesystem")
 }
+
+// A link keeps its source's group, so a folder that gives a copy another group
+// (a set-group-ID library folder; any folder on macOS) gets the copy.
+func TestPlaceCopiesWhenALinkWouldKeepAnotherGroup(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("no hard-link install here")
+	}
+	src := source(t, "audio")
+	st, err := os.Stat(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srcGid := st.Sys().(*syscall.Stat_t).Gid
+	groups, err := os.Getgroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := -1
+	for _, g := range groups {
+		if g >= 0 && uint32(g) != srcGid {
+			other = g
+			break
+		}
+	}
+	if other < 0 {
+		t.Skip("the test user has no second group")
+	}
+	root := t.TempDir()
+	dir := filepath.Join(root, "Author")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(dir, -1, other); err != nil {
+		t.Skip("can't give the folder another group:", err)
+	}
+	if err := os.Chmod(dir, 0o755|os.ModeSetgid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewLocal().Place(context.Background(), PlaceRequest{Root: root, RelPath: "Author/book.m4b", SrcPath: src, LinkSource: true}); err != nil {
+		t.Fatal(err)
+	}
+	dst, err := os.Stat(filepath.Join(dir, "book.m4b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(st, dst) || dst.Sys().(*syscall.Stat_t).Gid != uint32(other) { //nolint:gosec // G115: a test gid
+		t.Fatalf("linked %t, group %d, want a copy in group %d", os.SameFile(st, dst), dst.Sys().(*syscall.Stat_t).Gid, other)
+	}
+	noTemps(t, root)
+}
