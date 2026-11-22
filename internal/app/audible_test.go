@@ -379,3 +379,40 @@ func TestHeartbeatDoesNotWaitForAPendingRemoval(t *testing.T) {
 		t.Fatalf("removal still pending: %v", err)
 	}
 }
+
+// A refused token doesn't end the pairing: an account removed meanwhile owes
+// the server its DELETE on the pairing, sent once the token works again,
+// rather than left to no one as while unpaired.
+func TestAudibleRemovalWhileRefusedStaysOwed(t *testing.T) {
+	ctx := t.Context()
+	status := &setupServer{kind: "old"}
+	var deletes atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			deletes.Add(1)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		status.ServeHTTP(w, r)
+	}))
+	defer ts.Close()
+	b := newTestBridge(t)
+	if err := b.Pair(ctx, ts.URL, "CODE"); err != nil {
+		t.Fatal(err)
+	}
+	cl := b.conn.Client()
+	a := store.AudibleAccount{ID: "acct0001", Marketplace: "us", ServerID: cl.ServerID()}
+	if err := b.db.SignInAudibleAccount(ctx, a, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	b.conn.mu.Lock()
+	b.conn.refusedAt = time.Now()
+	b.conn.mu.Unlock()
+	warning, err := b.RemoveAudibleAccount(ctx, a.ID)
+	if err != nil || !strings.Contains(warning, "try again") || deletes.Load() != 1 {
+		t.Fatalf("remove while refused = %q, %v, %d DELETEs", warning, err, deletes.Load())
+	}
+	if r, err := b.db.NextAudibleRemoval(ctx, cl.PairingID(), time.Now().AddDate(1, 0, 0)); err != nil || r.Account != a.ID {
+		t.Fatalf("owed removal = %+v, %v", r, err)
+	}
+}
