@@ -397,13 +397,16 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 	}
 	defer release()
 	part, decrypted := h.partPaths(p.Account, p.ASIN)
+	var jobGone bool
 	defer func() {
-		// A stop or lost claim keeps completed audio or a resumable download.
-		// Cancellation and terminal failure clear the private files.
 		if err != nil && ctx.Err() != nil && (jobs.Resumes(ctx) || jobs.Lost(ctx)) {
 			return
 		}
-		removeStaged(decrypted)
+		// A failure placing the book can be retried with the same decrypt.
+		// Cancellation, a dropped pairing or a definitive refusal ends its use.
+		if err == nil || ctx.Err() != nil || jobGone || bookRefused(err) {
+			removeStaged(decrypted)
+		}
 		audible.RemovePartial(part)
 	}()
 
@@ -459,11 +462,7 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 			return nil, err
 		}
 		if same {
-			// As after an install: a failed rescan's retry goes on from the
-			// marker, the staged copy gone with the failure.
-			if err := writePlaced(marker, requestOf(p), lib.ID, mount, stage.Path, stage.Joins); err != nil {
-				h.o.Log.Warn("audible: recording an imported book's placement failed", "account", acct.ID, "asin", p.ASIN, "err", err)
-			}
+			h.recordPlacement(marker, p, mount, stage.Path, stage.Joins, decrypted)
 			return h.finish(ctx, rep, srv, acct.ID, p.ASIN, library,
 				stage.installed(), marker)
 		}
@@ -560,7 +559,13 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 	if _, mount, err = h.mapped(ctx, lib.ID, rep, StepPlace, false); err != nil {
 		return nil, err
 	}
-	placed, err := h.local.Place(ctx, transfer.PlaceRequest{Root: mount, RelPath: rel, SrcPath: decrypted, LinkSource: true, BeforeInstall: rep.ConfirmLease,
+	placed, err := h.local.Place(ctx, transfer.PlaceRequest{Root: mount, RelPath: rel, SrcPath: decrypted, LinkSource: true,
+		BeforeInstall: func(ctx context.Context) error {
+			err := rep.ConfirmLease(ctx)
+			var api *link.APIError
+			jobGone = errors.As(err, &api) && (api.Status == http.StatusNotFound || api.Status == http.StatusGone)
+			return err
+		},
 		Progress: func(copied, total int64) {
 			h.report(rep, jobs.Progress{Step: StepPlace, Message: "Copying the book into the library", Done: int(copied), Total: int(total)})
 		}})
@@ -577,11 +582,32 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 		return nil, fmt.Errorf("copying the book into the library: %w", err)
 	}
 
-	if err := writePlaced(marker, requestOf(p), lib.ID, mount, placed.RelPath, joins); err != nil {
-		h.o.Log.Warn("audible: recording an imported book's placement failed", "account", acct.ID, "asin", p.ASIN, "err", err)
-	}
+	h.recordPlacement(marker, p, mount, placed.RelPath, joins, decrypted)
 	return h.finish(ctx, rep, srv, acct.ID, p.ASIN, library,
 		installed{rel: placed.RelPath, size: placed.Size, already: placed.AlreadyPresent, joins: joins}, marker)
+}
+
+// bookRefused identifies failures that say this account or title is no longer
+// eligible. A failure reading a library or writing the destination can be retried.
+func bookRefused(err error) bool {
+	var f *Failure
+	if errors.As(err, &f) {
+		return f.Code == CodeUnknownAccount || f.Code == CodeNoRights
+	}
+	var api *link.APIError
+	if errors.As(err, &api) && api.Status >= 400 && api.Status < 500 && !api.Transient() {
+		return api.Code == CodeUnknownAccount || api.Code == "unknown_title" || api.Code == CodeNoRights
+	}
+	return false
+}
+
+// Once the marker records the installed book, it takes over recovery from the decrypt.
+func (h *Importer) recordPlacement(marker string, p ImportParams, mount, rel string, joins map[string]bool, decrypted string) {
+	if err := writePlaced(marker, requestOf(p), p.LibraryID, mount, rel, joins); err != nil {
+		h.o.Log.Warn("audible: recording an imported book's placement failed", "account", p.Account, "asin", p.ASIN, "err", err)
+		return
+	}
+	removeStaged(decrypted)
 }
 
 // A ready file and its metadata were written by the same completed decrypt.
@@ -1478,18 +1504,44 @@ func size(n int64) string {
 	}
 }
 
+// PlacementFolder locates a library directory named by an import's private record.
+type PlacementFolder struct {
+	Server    string
+	LibraryID int64
+	Dir       string
+}
+
+func recordedFolder(file, server string) (PlacementFolder, bool) {
+	var m stagedBook
+	b, err := os.ReadFile(file) //nolint:gosec // regular metadata file in the private import folder
+	if err != nil || json.Unmarshal(b, &m) != nil || m.LibraryID <= 0 {
+		return PlacementFolder{}, false
+	}
+	rel, err := transfer.CleanRel(m.Path)
+	if err != nil {
+		return PlacementFolder{}, false
+	}
+	if m.Server == "" && strings.HasSuffix(file, placedSuffix) {
+		m.Server = server
+	}
+	return PlacementFolder{Server: m.Server, LibraryID: m.LibraryID, Dir: path.Dir(rel)}, true
+}
+
 // SweepTmp is the start-up sweep of the import's temp folder (decision 6): a
 // partial download (*.aaxc.part and its .state) younger than PartialMaxAge
 // stays for its job to resume. A complete decrypt or placement marker as young
 // stays too. An interrupted decrypt has a different suffix and is discarded.
-func SweepTmp(dir string, now time.Time) error {
+// Before expiring records, collect the placement folders for the library sweep.
+// Placement markers carry only a library ID, scoped here to the paired server.
+func SweepTmp(dir string, now time.Time, server string) ([]PlacementFolder, error) {
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil
+		return nil, nil
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
+	var folders []PlacementFolder
 	keep := map[string]bool{}
 	for _, e := range entries {
 		if !e.Type().IsRegular() {
@@ -1497,6 +1549,11 @@ func SweepTmp(dir string, now time.Time) error {
 		}
 		name := e.Name()
 		marker, part, ready := strings.HasSuffix(name, placedSuffix), strings.HasSuffix(name, ".aaxc.part"), strings.HasSuffix(name, readySuffix)
+		if marker || strings.HasSuffix(name, stagedMeta(readySuffix)) {
+			if f, ok := recordedFolder(filepath.Join(dir, name), server); ok {
+				folders = append(folders, f)
+			}
+		}
 		if !marker && !part && !ready {
 			continue
 		}
@@ -1519,5 +1576,5 @@ func SweepTmp(dir string, now time.Time) error {
 			errs = append(errs, err)
 		}
 	}
-	return errors.Join(errs...)
+	return folders, errors.Join(errs...)
 }

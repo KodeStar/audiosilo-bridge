@@ -15,13 +15,27 @@ var stagedName = regexp.MustCompile("^" + regexp.QuoteMeta(tempPrefix) + "[0-9a-
 
 // SweepStaged removes old Place temporaries from a checked library, never one
 // a Place here is still using (staging). WalkDir does not follow symlinks.
-// Place never writes into hidden directories.
-func SweepStaged(ctx context.Context, mount string, cutoff time.Time, stillMapped func() bool) error {
+// Known placement folders restrict the walk to their entries and the ancestors
+// leading to them. With no records, an account's library may have older temps anywhere.
+func SweepStaged(ctx context.Context, mount string, cutoff time.Time, stillMapped func() bool, folders ...string) error {
 	root, err := os.OpenRoot(mount)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = root.Close() }()
+	// A true entry names a placement folder. A false entry is only on the
+	// way to one. WalkDir skips every other directory before reading it.
+	dirs := map[string]bool{}
+	for _, dir := range folders {
+		dirs[dir] = true
+		for dir != "." {
+			dir = path.Dir(dir)
+			if _, seen := dirs[dir]; seen {
+				break
+			}
+			dirs[dir] = false
+		}
+	}
 	var failures []error
 	err = fs.WalkDir(root.FS(), ".", func(rel string, e fs.DirEntry, walkErr error) error {
 		if err := ctx.Err(); err != nil {
@@ -31,10 +45,14 @@ func SweepStaged(ctx context.Context, mount string, cutoff time.Time, stillMappe
 			failures = append(failures, walkErr)
 			return nil
 		}
-		if e.IsDir() && rel != "." && strings.HasPrefix(e.Name(), ".") {
-			return fs.SkipDir
+		if e.IsDir() {
+			_, visit := dirs[rel]
+			if (rel != "." && strings.HasPrefix(e.Name(), ".")) || (len(folders) > 0 && !visit) {
+				return fs.SkipDir
+			}
+			return nil
 		}
-		if !e.Type().IsRegular() || !stagedName.MatchString(e.Name()) {
+		if (len(folders) > 0 && !dirs[path.Dir(rel)]) || !e.Type().IsRegular() || !stagedName.MatchString(e.Name()) {
 			return nil
 		}
 		// Pin the parent for the final check and unlink.

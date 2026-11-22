@@ -1,9 +1,13 @@
 package audiblejob
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"slices"
 	"sync/atomic"
 	"testing"
@@ -108,6 +112,23 @@ type namedImportServer struct{ *stubImportServer }
 func (namedImportServer) ServerID() string { return "srv1" }
 
 func TestImportLeaseRefusalFailsWithoutPublishing(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		err   error
+		retry bool
+	}{
+		{"rate limited", &link.APIError{Status: http.StatusTooManyRequests, RetryAfter: time.Hour}, true},
+		{"server unavailable", &link.APIError{Status: http.StatusServiceUnavailable}, true},
+		{"network error", errors.New("connection reset"), true},
+		{"job removed", &link.APIError{Status: http.StatusNotFound}, false},
+		{"title refused", &link.APIError{Status: http.StatusForbidden, Code: CodeNoRights}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) { testImportLeaseRefusal(t, tc.err, tc.retry) })
+	}
+}
+
+func testImportLeaseRefusal(t *testing.T, refusal error, retry bool) {
+	t.Helper()
 	e := newImportEnv(t)
 	srv := namedImportServer{e.srv}
 	e.opts.Server = func() ImportServer { return srv }
@@ -126,9 +147,8 @@ func TestImportLeaseRefusalFailsWithoutPublishing(t *testing.T) {
 		if u.State != nil {
 			switch *u.State {
 			case link.StateRunning:
-				if staged.Load() && len(u.Progress) == 0 {
-					confirmed.Store(true)
-					return &link.APIError{Status: http.StatusTooManyRequests, RetryAfter: time.Hour}
+				if staged.Load() && len(u.Progress) == 0 && confirmed.CompareAndSwap(false, true) {
+					return refusal
 				}
 			case link.StateDone, link.StateFailed, link.StateNeedsAttention:
 				terminal <- *u.State
@@ -155,4 +175,22 @@ func TestImportLeaseRefusalFailsWithoutPublishing(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("no terminal report")
 	}
+	if !retry {
+		e.tmpEmpty(t)
+		return
+	}
+	e.accts.titleErr = errors.New("Audible is offline")
+	q.next <- &link.Job{ID: 2, Attempts: 1, Kind: ImportKind, Params: e.params(nil)}
+	select {
+	case state := <-terminal:
+		if state != link.StateDone || e.accts.downloads != 1 || e.accts.licenses != 1 || len(e.decrypted) != 1 {
+			t.Fatalf("retry %s, downloads %d, licenses %d, decrypts %d", state, e.accts.downloads, e.accts.licenses, len(e.decrypted))
+		}
+	case <-ctx.Done():
+		t.Fatal("retry did not finish")
+	}
+	if got, err := os.ReadFile(filepath.Join(e.root, copperGrove)); err != nil || !bytes.Equal(got, e.accts.body) {
+		t.Fatalf("retry placed %d bytes, %v", len(got), err)
+	}
+	e.tmpEmpty(t)
 }

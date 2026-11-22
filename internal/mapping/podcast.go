@@ -107,8 +107,46 @@ func (l looks) checkPodcast(ctx context.Context, src MarkerSource, lib link.Libr
 			return st, folderSlow{error: err, wrote: writes.unsettled()}
 		}
 	}
-	nonce, err := src.Marker(ctx, lib.ID)
-	if err != nil || nonce != found.marker.Nonce {
+	st, unanswered = l.verifyMarker(ctx, src, st, found.marker)
+	if unanswered != nil && !st.Mapped && found.createdMarker {
+		unanswered = unproven{unanswered}
+	}
+	return st, unanswered
+}
+
+// An empty books library must already hold its marker. Creating one here
+// would also let two processes sharing a bare mount point verify each other.
+func (l looks) checkBooksMarker(ctx context.Context, src MarkerSource, st link.LibraryStatus) (link.LibraryStatus, error) {
+	st.CheckedPath = MarkerPath
+	m, err := fsutil.LookWithin("read books marker", st.MountPath, LookTimeout, func(mount string) (libraryMarker, error) {
+		root, err := os.OpenRoot(mount)
+		if err != nil {
+			return libraryMarker{}, err
+		}
+		defer func() { _ = root.Close() }()
+		info, err := root.Lstat(".audiosilo")
+		if err != nil {
+			return libraryMarker{}, err
+		}
+		if !info.IsDir() {
+			return libraryMarker{}, errors.New("the marker folder must be a directory")
+		}
+		return readMarker(root, nil)
+	})
+	if err != nil {
+		st.Error = "no verified marker for the empty books library: " + describeStatError(err)
+		return st, slowLook(err)
+	}
+	if m.LibraryID != st.LibraryID {
+		st.Error = "the local marker names another library"
+		return st, nil
+	}
+	return l.verifyMarker(ctx, src, st, m)
+}
+
+func (l looks) verifyMarker(ctx context.Context, src MarkerSource, st link.LibraryStatus, m libraryMarker) (link.LibraryStatus, error) {
+	nonce, err := src.Marker(ctx, st.LibraryID)
+	if err != nil || nonce != m.Nonce {
 		var api *link.APIError
 		switch {
 		case errors.Is(err, link.ErrNoMarker), err == nil:
@@ -118,14 +156,10 @@ func (l looks) checkPodcast(ctx context.Context, src MarkerSource, lib link.Libr
 		default:
 			st.Error = "could not verify this folder with the server"
 		}
-		unanswered = unsettled(err)
-		if unanswered != nil && found.createdMarker {
-			unanswered = unproven{unanswered}
-		}
-		return st, unanswered
+		return st, unsettled(err)
 	}
 	st.Mapped = true
-	if err := l.probe(mount); err != nil {
+	if err := l.probe(st.MountPath); err != nil {
 		st.Error = "mapped, but not writable here: " + describeStatError(err)
 		return st, slowLook(err)
 	}

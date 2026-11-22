@@ -112,8 +112,9 @@ type Bridge struct {
 	// audiblePush the position sync's push loop (Phase 4c).
 	audible     *audibleacct.Manager
 	audiblePush *audiblesync.Pusher
-	// Mounts already swept for interrupted Audible placement copies this start.
-	audibleSwept sync.Map
+	// Placement folders known at startup, including records that have since expired.
+	audibleFolders []audiblejob.PlacementFolder
+	audibleSwept   sync.Map
 	// est caches the heartbeat's estimates (estimates.go of the engine wiring).
 	est estimatesCache
 	// bg runs the tasks a change starts in the background (the re-admits after a

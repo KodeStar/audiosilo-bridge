@@ -1010,7 +1010,7 @@ func TestImportStopKeepsThePartial(t *testing.T) {
 		t.Fatal("a stopped import succeeded")
 	}
 	part := filepath.Join(e.tmp, "acct0001-B0FAKE0002.aaxc.part")
-	if err := SweepTmp(e.tmp, time.Now()); err != nil {
+	if _, err := SweepTmp(e.tmp, time.Now(), "srv1"); err != nil {
 		t.Fatal(err)
 	}
 	for _, p := range []string{part, audible.StatePath(part)} {
@@ -1053,7 +1053,7 @@ func TestImportStopDuringPlaceResumesReadyBook(t *testing.T) {
 				e.tmpEmpty(t)
 				return
 			}
-			if err := SweepTmp(e.tmp, time.Now()); err != nil {
+			if _, err := SweepTmp(e.tmp, time.Now(), "srv1"); err != nil {
 				t.Fatal(err)
 			}
 			e.opts.onProgress = progress
@@ -1123,8 +1123,21 @@ func TestSweepTmp(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "audible-123"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := SweepTmp(dir, now); err != nil {
+	for name, body := range map[string]string{
+		"expired.ready.m4b.json": `{"server":"srv1","library_id":3,"path":"Author/Book/Audio.m4b"}`,
+		"other.ready.m4b.json":   `{"server":"srv2","library_id":3,"path":"Other/Book.m4b"}`,
+		"invalid.ready.m4b.json": `{"server":"srv1","library_id":3,"path":"../Outside/Book.m4b"}`,
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	folders, err := SweepTmp(dir, now, "srv1")
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !slices.Equal(folders, []PlacementFolder{{"srv1", 3, "Author/Book"}, {"srv2", 3, "Other"}}) {
+		t.Fatalf("placement folders: %v", folders)
 	}
 	entries, _ := os.ReadDir(dir)
 	var left []string
@@ -1134,7 +1147,7 @@ func TestSweepTmp(t *testing.T) {
 	if strings.Join(left, ",") != "a-B0FAKE0001.aaxc.part,a-B0FAKE0001.aaxc.part.state,a-B0FAKE0004.placed.json,young.ready.m4b,young.ready.m4b.json" {
 		t.Fatalf("left %v", left)
 	}
-	if err := SweepTmp(filepath.Join(dir, "missing"), now); err != nil {
+	if _, err := SweepTmp(filepath.Join(dir, "missing"), now, "srv1"); err != nil {
 		t.Fatalf("a missing folder: %v", err)
 	}
 }
@@ -1251,7 +1264,7 @@ func TestImportRetryAfterTheInstallFinishes(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(e.tmp, "acct0001-B0FAKE0002"+placedSuffix)); err != nil {
 		t.Fatalf("no placement marker: %v", err)
 	}
-	if err := SweepTmp(e.tmp, time.Now()); err != nil {
+	if _, err := SweepTmp(e.tmp, time.Now(), "srv1"); err != nil {
 		t.Fatal(err)
 	}
 	e.steps = nil
@@ -1860,6 +1873,21 @@ func TestRefusedAccountStillPlacesItsStagedBook(t *testing.T) {
 		t.Fatalf("placed %d bytes after %d downloads", len(b), e.accts.downloads)
 	}
 	e.tmpEmpty(t)
+}
+
+func TestRemovedAccountDiscardsStagedBook(t *testing.T) {
+	e := newImportEnv(t)
+	stopAtPlace(t, e)
+	e.accts.acctErr = audibleacct.ErrNotFound
+	_, err := e.run(t.Context(), e.params(nil))
+	var f *Failure
+	if !errors.As(err, &f) || f.Code != CodeUnknownAccount {
+		t.Fatalf("removed account: %v", err)
+	}
+	e.tmpEmpty(t)
+	if files := e.libraryFiles(); len(files) != 0 {
+		t.Fatalf("placed files for the removed account: %v", files)
+	}
 }
 
 // An import waiting for its account's gate keeps its lane slot while the

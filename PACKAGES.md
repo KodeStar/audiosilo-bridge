@@ -2248,9 +2248,9 @@ internal/
             crash leaves nothing the server's scan walks). A library with no indexed
             book is never mapped by its files: with nothing to compare, a wrong mount
             would look right and a later write job would land in the wrong folder.
-            When the link reads markers, such a books library takes the podcast
-            libraries' marker check instead (the server reads the nonce back from
-            its own copy), else it stays unmapped.
+            An empty books library needs an existing .audiosilo/library.json
+            naming its ID, with a nonce the server reads back from its own copy.
+            A bare mount point stays unmapped.
             BookReadSettled is the rule verify's and generate's book reads retry
             by: settled is no such book or an answer that isn't a refused token
             or link's APIError.Transient (asking again won't change it);
@@ -3618,8 +3618,10 @@ internal/
             The decrypt goes to <acct>-<asin>.ready.m4b.partial (opened first, so
             ffmpeg keeps its 0644 mode) and becomes .ready.m4b, with a .json beside
             it (server, pairing, the title, the planned placement, size, mtime_ns),
-            only once ffmpeg succeeded and it is synced; a stop or a lost claim
-            keeps that pair too, and the next run (readStaged: the same server,
+            only once ffmpeg succeeded and it is synced. A stop, a lost claim
+            or a temporary placement failure keeps that pair. Cancellation,
+            a permanent refusal of the book or a recorded install clears it.
+            The next run with a staged book (readStaged: the same server,
             pairing, ASIN, size and mtime) skips the title read, the license, the
             download and a refusal since. A crash between the install and the
             marker is adopted (transfer.Matches: the same bytes at the planned
@@ -4017,7 +4019,10 @@ internal/
             default ACL, or the link fails (EXDEV, no links, EPERM, EACCES): a copy
             then, its free space checked. BeforeInstall runs between the staging
             and the install. Matches is sameAt for crash recovery. SweepStaged
-            (app, once per books mount and start, after its first writable check)
+            runs once after a books mount passes a writable check. It visits
+            folders named by the staged and placement records found at startup.
+            With no recorded folder it walks a library only if an Audible
+            account on this server maps to it. The sweep
             removes only .audiosilo-import-<16 hex>.part files at least 7 days old,
             no hidden folder or link followed, never one a Place here still uses
             (staging), stopping when the mapping changes. Deps: fsutil, mapping,

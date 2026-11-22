@@ -311,37 +311,53 @@ func (s emptyBookLibrary) Book(ctx context.Context, id int64, at string) (*link.
 }
 
 func TestEmptyBooksLibraryRequiresServerMarker(t *testing.T) {
-	for _, scenario := range []string{"same mount", "different mount", "book read failed"} {
-		t.Run(scenario, func(t *testing.T) {
+	const nonce = "0123456789abcdef0123456789abcdef"
+	for _, tc := range []struct {
+		name               string
+		markerID           int64
+		serverNonce        string
+		bookErr            error
+		mapped, asksMarker bool
+	}{
+		{"bare mount", 0, nonce, link.ErrNoBook, false, false},
+		{"matching marker", 3, nonce, link.ErrNoBook, true, true},
+		{"different nonce", 3, "another nonce", link.ErrNoBook, false, true},
+		{"another library", 4, nonce, link.ErrNoBook, false, false},
+		{"book read failed", 3, nonce, &link.APIError{Status: 503}, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
+			file := filepath.Join(dir, MarkerPath)
+			body := fmt.Sprintf(`{"version":1,"library_id":%d,"nonce":"%s"}`, tc.markerID, nonce)
+			if tc.markerID != 0 {
+				if err := os.Mkdir(filepath.Dir(file), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(file, []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
 			r := newRegistry()
 			r.SetLibraries([]link.Library{{ID: 3, Kind: "books", Root: dir}})
-			source := emptyBookLibrary{books: books{err: link.ErrNoBook}}
-			calls := 0
-			source.markerSourceFunc = func(context.Context, int64) (string, error) {
-				calls++
-				if scenario == "different mount" {
-					return "another nonce", nil
+			asked := false
+			source := emptyBookLibrary{books: books{err: tc.bookErr}, markerSourceFunc: func(_ context.Context, id int64) (string, error) {
+				asked = true
+				if id != 3 {
+					t.Fatalf("asked for marker of library %d", id)
 				}
-				b, err := os.ReadFile(filepath.Join(dir, MarkerPath))
-				var marker libraryMarker
-				if err != nil || json.Unmarshal(b, &marker) != nil {
-					t.Fatal("missing local marker", err)
-				}
-				return marker.Nonce, nil
-			}
-			if scenario == "book read failed" {
-				source.err = &link.APIError{Status: 503}
-			}
-			r.Check(context.Background(), source, func(int64, string) (string, bool) { return dir, true }, time.Now)
+				return tc.serverNonce, nil
+			}}
+			r.Check(t.Context(), source, func(int64, string) (string, bool) { return dir, true }, time.Now)
 			st, _ := r.Status(3)
-			if st.Mapped != (scenario == "same mount") || st.Writable != st.Mapped || (calls > 0) != (scenario != "book read failed") {
-				t.Fatal(scenario, st, calls)
+			if st.Mapped != tc.mapped || st.Writable != tc.mapped || asked != tc.asksMarker {
+				t.Fatalf("status %+v, asked for marker %t", st, asked)
 			}
-			if !st.Mapped {
-				if _, err := os.Lstat(filepath.Join(dir, MarkerPath)); !errors.Is(err, os.ErrNotExist) {
-					t.Fatal("unverified marker left in the library", err)
+			if tc.markerID == 0 {
+				if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+					t.Fatalf("bare mount changed: %v, %v", entries, err)
 				}
+			} else if got, err := os.ReadFile(file); err != nil || string(got) != body {
+				t.Fatalf("existing marker changed: %q, %v", got, err)
 			}
 		})
 	}
