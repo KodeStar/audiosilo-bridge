@@ -253,6 +253,7 @@ type Store interface {
 	AudibleAccountError(ctx context.Context, id, why string) error
 	DeleteAudibleAccount(ctx context.Context, id, pairing string) error
 	NextAudibleRemoval(ctx context.Context, pairing string, now time.Time) (store.AudibleRemoval, error)
+	OweAudibleRemoval(ctx context.Context, account, pairing string) error
 	DropAudibleRemovals(ctx context.Context, keep string) (int64, error)
 	DeferAudibleRemoval(ctx context.Context, account string, until time.Time) error
 	ClearAudibleRemoval(ctx context.Context, account string) error
@@ -587,9 +588,7 @@ func (m *Manager) Finish(ctx context.Context, srv Server, f Finish) (store.Audib
 		}
 		switch {
 		case prev.ID == "":
-			if derr := srv.DeleteAudibleAccount(bg, acct.ID); derr != nil {
-				m.o.Log.Warn("audible: removing a failed sign-in's account from the server failed", "account", acct.ID, "err", derr)
-			}
+			m.removeUnkept(bg, srv, acct.ID)
 		case prev.ServerID == serverID:
 			if _, perr := srv.PutAudibleAccount(bg, prev.ID, input(prev)); perr != nil {
 				m.o.Log.Warn("audible: recording the account's earlier mapping on the server again failed", "account", acct.ID, "err", perr)

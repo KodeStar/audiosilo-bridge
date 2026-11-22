@@ -26,6 +26,14 @@ func (db *DB) NextAudibleRemoval(ctx context.Context, pairing string, now time.T
 	return r, err
 }
 
+// OweAudibleRemoval records a server DELETE owed on pairing for account, one
+// never kept here (a failed sign-in's): due at once, no attempt counted.
+func (db *DB) OweAudibleRemoval(ctx context.Context, account, pairing string) error {
+	_, err := db.sql.ExecContext(ctx, `INSERT OR REPLACE INTO audible_removals (account, pairing) VALUES (?, ?)`,
+		account, pairing)
+	return err
+}
+
 // DropAudibleRemovals forgets the removals of every pairing but keep (they
 // ended: their DELETEs must not reach another pairing's server) and returns
 // how many it dropped.

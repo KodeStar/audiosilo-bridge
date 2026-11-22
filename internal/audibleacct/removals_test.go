@@ -354,3 +354,33 @@ func TestRemovalOutlivesARefusedToken(t *testing.T) {
 	}
 	e.noPendingRemoval(t)
 }
+
+// A failed sign-in's new account, recorded on the server before the failure,
+// is owed a DELETE like a removed one: one the server doesn't answer goes
+// again on the heartbeat until it does.
+func TestFailedSignInsServerRemovalIsRetried(t *testing.T) {
+	e := newEnv(t)
+	ctx := t.Context()
+	now := time.Now()
+	e.m.o.Now = func() time.Time { return now }
+	e.srv.putErr = errors.New("lost response")
+	e.srv.delErr = errors.New("connection refused")
+	if _, err := e.trySignIn(); err == nil {
+		t.Fatal("a sign-in the server never answered succeeded")
+	}
+	if list, _ := e.m.Accounts(ctx); len(list) != 0 || len(e.srv.deleted) != 1 {
+		t.Fatalf("accounts %+v, DELETEs %v", list, e.srv.deleted)
+	}
+	id := e.srv.deleted[0]
+	r, err := e.db.NextAudibleRemoval(ctx, e.srv.PairingID(), now.Add(time.Minute))
+	if err != nil || r.Account != id || r.Attempts != 1 {
+		t.Fatalf("owed removal = %+v, %v", r, err)
+	}
+	e.srv.putErr, e.srv.delErr = nil, nil
+	now = now.Add(time.Minute)
+	e.retry()
+	if got := e.srv.deleted; len(got) != 2 || got[1] != id {
+		t.Fatalf("DELETEs %v, want two of %s", got, id)
+	}
+	e.noPendingRemoval(t)
+}

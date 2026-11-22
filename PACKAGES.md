@@ -3412,8 +3412,10 @@ internal/
             wins), and one cut short by a stop stays due; another
             pairing's are dropped unsent. A removal while the token is refused
             is owed on the pairing too (the app passes the refused link,
-            Conn.pairedClient). An account mapped on another server (both
-            server ids known) is removed here only. A sign-in again after a removal always gets a fresh id,
+            Conn.pairedClient), and so is a failed sign-in's new account the
+            server may already hold (Finish's rollback, removeUnkept). An
+            account mapped on another server (both server ids known) is removed
+            here only. A sign-in again after a removal always gets a fresh id,
             so a late DELETE never reaches it.
             Library opens the
             sign-in and lists the library through Service (audibleacct.Audible(opts...):
