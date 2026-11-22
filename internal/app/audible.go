@@ -205,7 +205,7 @@ func (b *Bridge) FinishAudibleSignIn(ctx context.Context, f api.AudibleFinish) e
 	if err != nil {
 		return err
 	}
-	_, err = b.audible.Finish(ctx, b.audibleServer(), b.conn.Pairing().ServerID, audibleacct.Finish{Login: f.Login, RedirectURL: f.RedirectURL, Mapping: mp})
+	_, err = b.audible.Finish(ctx, b.audibleServer(), audibleacct.Finish{Login: f.Login, RedirectURL: f.RedirectURL, Mapping: mp})
 	return audibleError(err)
 }
 
@@ -215,7 +215,7 @@ func (b *Bridge) MapAudibleAccount(ctx context.Context, id string, m api.Audible
 	if err != nil {
 		return err
 	}
-	_, err = b.audible.Map(ctx, b.audibleServer(), b.conn.Pairing().ServerID, id, mp)
+	_, err = b.audible.Map(ctx, b.audibleServer(), id, mp)
 	return audibleError(err)
 }
 

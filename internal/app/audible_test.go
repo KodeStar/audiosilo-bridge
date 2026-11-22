@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -253,5 +254,61 @@ func TestAudibleErrorKinds(t *testing.T) {
 	local := errors.New("disk full")
 	if got := audibleError(local); got != local {
 		t.Fatalf("a local failure = %v, want it as it is (a logged 500)", got)
+	}
+}
+
+// The heartbeat owns the retry even after an unpair and a pairing with the
+// same server. Only the original pairing can send the recorded DELETE.
+func TestHeartbeatRetriesAudibleRemovalOnlyOnItsPairing(t *testing.T) {
+	for _, repair := range []bool{false, true} {
+		t.Run(fmt.Sprintf("repaired=%t", repair), func(t *testing.T) {
+			ctx := t.Context()
+			status := &setupServer{kind: "old"}
+			var deletes atomic.Int32
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodDelete {
+					if r.URL.Path != "/api/v1/bridge/audible/accounts/acct0001" {
+						t.Errorf("DELETE %s", r.URL.Path)
+					}
+					deletes.Add(1)
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				status.ServeHTTP(w, r)
+			}))
+			defer ts.Close()
+			b := newTestBridge(t)
+			if err := b.Pair(ctx, ts.URL, "CODE"); err != nil {
+				t.Fatal(err)
+			}
+			cl := b.conn.Client()
+			a := store.AudibleAccount{ID: "acct0001", Marketplace: "us", ServerID: cl.ServerID()}
+			if err := b.db.SignInAudibleAccount(ctx, a, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			// Simulate a stop after the local transaction but before the HTTP call.
+			if err := b.db.DeleteAudibleAccount(ctx, a.ID, cl.PairingID()); err != nil {
+				t.Fatal(err)
+			}
+			if repair {
+				if err := b.Unpair(ctx); err != nil {
+					t.Fatal(err)
+				}
+				if err := b.Pair(ctx, ts.URL, "CODE"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			b.beat(ctx)
+			want := int32(1)
+			if repair {
+				want = 0
+			}
+			if got := deletes.Load(); got != want {
+				t.Fatalf("sent %d DELETEs, want %d", got, want)
+			}
+			if _, err := b.db.NextAudibleRemoval(ctx, cl.PairingID(), time.Now().AddDate(1, 0, 0)); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("removal still queued: %v", err)
+			}
+		})
 	}
 }

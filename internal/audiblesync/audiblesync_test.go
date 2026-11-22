@@ -496,7 +496,7 @@ func TestSyncReadsPastAChangeInFlight(t *testing.T) {
 		now  func(e *env, a store.AudibleAccount) error // the account as the sync first reads it
 	}{
 		{"a first sign-in", func(e *env, a store.AudibleAccount) error {
-			return e.db.DeleteAudibleAccount(context.Background(), a.ID)
+			return e.db.DeleteAudibleAccount(context.Background(), a.ID, "")
 		}},
 		{"a mapping from another server", func(e *env, a store.AudibleAccount) error {
 			a.ServerID = "srv-2"

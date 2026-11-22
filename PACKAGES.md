@@ -1691,6 +1691,10 @@ internal/
             pairing (app.openConn, at an upgrade): the paired server's rows the
             one in place, every other row (another server's, none known, all
             while unpaired) one no pairing has.
+            0022 (bridge#40) adds audible_removals. A local removal records the
+            account id, pairing, customer hash and marketplace in its delete
+            transaction. The retry count, due time and whether a DELETE could
+            already have reached the server survive a restart.
   state/    per-book pipeline state machine: table-driven states/lanes/transitions,
             CanStart/NextState guards, the audit fix-loop cap. Pure, no I/O. M6 added
             ParkCode (typed park reasons - M7 added contrib_unavailable, core_needed,
@@ -3387,7 +3391,7 @@ internal/
             here (customer_hash + marketplace) replaces it: same id, the old device
             deregistered after (an earlier sign-in that can't be opened is logged:
             its device stays). Finish runs one at a time from the lookup until
-            the row is stored (finishMu; Remove takes it while it forgets locally), so two sign-ins of one Amazon account finishing together
+            the row is stored (finishMu, also held through a removal DELETE), so two sign-ins of one Amazon account finishing together
             end as a sign-in again, not two accounts (the unique index backs it). A name the Bridge made ("<person> (<STORE>)") follows
             the person when Map or a sign-in again changes it; a typed one stays.
             Map records a new mapping on the server, then here, under finishMu (bridge#40:
@@ -3396,7 +3400,13 @@ internal/
             couldn't be read) keeps the stored name (Map and a sign-in again), never "". Remove forgets
             locally FIRST (vault, then row), then DELETEs on the server and
             deregisters, run to the end even if the page goes away; either failing
-            is a warning for the page, never the account kept. Library opens the
+            is a warning for the page, never the account kept. The heartbeat retries
+            one due server removal on its original pairing. A 2xx or 404 clears it.
+            A permanent refusal or an ended pairing drops it with a warning.
+            A re-add of the same customer in the same marketplace can reclaim the
+            old id after dial failures or 429s. If a DELETE could have reached the
+            server, the re-add confirms the old deletion before using a fresh id.
+            Library opens the
             sign-in and lists the library through Service (audibleacct.Audible(opts...):
             the audible package; a stub in tests), which answers ErrRefused on a
             401/403 signed call: Library lists again when a sign-in again replaced

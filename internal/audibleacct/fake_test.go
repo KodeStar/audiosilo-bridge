@@ -54,7 +54,7 @@ func TestAccountAgainstTheFake(t *testing.T) {
 	}
 	_ = resp.Body.Close()
 	redirect := resp.Header.Get("Location")
-	a, err := m.Finish(context.Background(), srv, "srv-1", Finish{Login: st.Login, RedirectURL: redirect, Mapping: mapping()})
+	a, err := m.Finish(context.Background(), srv, Finish{Login: st.Login, RedirectURL: redirect, Mapping: mapping()})
 	if err != nil {
 		t.Fatal(err)
 	}

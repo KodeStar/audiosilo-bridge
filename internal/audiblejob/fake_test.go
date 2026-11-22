@@ -26,6 +26,9 @@ import (
 // accountServer adds the account route to fakeServer (the sign-in maps there).
 type accountServer struct{ *fakeServer }
 
+func (accountServer) ServerID() string  { return "srv1" }
+func (accountServer) PairingID() string { return "pairing-1" }
+
 func (s accountServer) PutAudibleAccount(_ context.Context, id string, _ link.AudibleAccountInput) (*link.AudibleAccount, error) {
 	return &link.AudibleAccount{ID: id}, nil
 }
@@ -77,7 +80,7 @@ func TestPollAgainstTheFake(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = resp.Body.Close()
-	acct, err := m.Finish(context.Background(), srv, "srv-1", audibleacct.Finish{Login: st.Login, RedirectURL: resp.Header.Get("Location"),
+	acct, err := m.Finish(context.Background(), srv, audibleacct.Finish{Login: st.Login, RedirectURL: resp.Header.Get("Location"),
 		Mapping: audibleacct.Mapping{UserID: 3, UserName: "Chris", LibraryID: 1, Policy: "manual"}})
 	if err != nil {
 		t.Fatal(err)
@@ -91,7 +94,7 @@ func TestPollAgainstTheFake(t *testing.T) {
 	lts := httptest.NewServer(fs)
 	defer lts.Close()
 	cl, _ := link.New(lts.URL, "tok", "0.9.0")
-	h := New(Options{Accounts: contested, Server: func() Server { return cl }, ServerID: func() string { return "srv-1" }, Log: log})
+	h := New(Options{Accounts: contested, Server: func() Server { return cl }, ServerID: func() string { return "srv1" }, Log: log})
 	params, _ := json.Marshal(Params{Account: acct.ID})
 	out, err := h.Run(context.Background(), jobs.Job{ID: 1, Kind: Kind, Params: params, Attempt: 1}, jobs.LocalReporter())
 	if err != nil {

@@ -70,7 +70,7 @@ func TestAudibleAccounts(t *testing.T) {
 		list[0].DeviceProfile != "4.60/26.2/46000856" {
 		t.Fatalf("list = %+v, %v", list, err)
 	}
-	if err := db.DeleteAudibleAccount(ctx, "abcd1234"); err != nil {
+	if err := db.DeleteAudibleAccount(ctx, "abcd1234", ""); err != nil {
 		t.Fatal(err)
 	}
 	if list, _ := db.AudibleAccounts(ctx); len(list) != 0 {
@@ -257,5 +257,52 @@ func TestMigrationRefusalKind(t *testing.T) {
 	}
 	if got, _ := db.GetAudibleAccount(ctx, "throttled1"); got.RefusedAt == "" || got.LastError != throttled {
 		t.Fatalf("a migrated device refusal ended with a poll: %+v", got)
+	}
+}
+
+func TestMigrationAudibleRemovals(t *testing.T) {
+	ctx := t.Context()
+	sqldb, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqldb.SetMaxOpenConns(1)
+	db := &DB{sql: sqldb}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.migrateTo(ctx, "0021_server_jobs_pairing.sql"); err != nil {
+		t.Fatal(err)
+	}
+	a := AudibleAccount{ID: "abcd1234", Label: "Chris", Marketplace: "us", CustomerHash: "customer", ServerID: "server"}
+	if _, err := sqldb.ExecContext(ctx, `INSERT INTO audible_accounts (id, label, marketplace, customer_hash, server_id, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)`, a.ID, a.Label, a.Marketplace, a.CustomerHash, a.ServerID, timestamp(time.Now())); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := db.GetAudibleAccount(ctx, a.ID); err != nil || got.Label != a.Label || got.CustomerHash != a.CustomerHash {
+		t.Fatalf("upgraded account = %+v, %v", got, err)
+	}
+	if _, err := db.NextAudibleRemoval(ctx, "pair", time.Now()); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("upgrade queued a removal: %v", err)
+	}
+	if _, err := sqldb.ExecContext(ctx, `CREATE TRIGGER fail_removal BEFORE DELETE ON audible_accounts
+		BEGIN SELECT RAISE(ABORT, 'local delete failed'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteAudibleAccount(ctx, a.ID, "pair"); err == nil {
+		t.Fatal("local deletion succeeded despite the trigger")
+	}
+	if _, err := db.NextAudibleRemoval(ctx, "pair", time.Now()); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("rolled back local removal queued a DELETE: %v", err)
+	}
+	if _, err := sqldb.ExecContext(ctx, `DROP TRIGGER fail_removal`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteAudibleAccount(ctx, a.ID, "pair"); err != nil {
+		t.Fatal(err)
+	}
+	if r, err := db.NextAudibleRemoval(ctx, "pair", time.Now()); err != nil || r.Account != a.ID || r.Pairing != "pair" || r.Attempts != 0 {
+		t.Fatalf("removal after upgrade = %+v, %v", r, err)
 	}
 }

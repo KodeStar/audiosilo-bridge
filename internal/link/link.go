@@ -583,8 +583,8 @@ func (c *Client) claim(ctx context.Context, kinds []string, wait time.Duration, 
 	var out Job
 	cc := *c
 	cc.timeout = wait + claimSlack
-	found, err := cc.doFound(ctx, http.MethodGet, "/api/v1/bridge/jobs/next", q, nil, &out)
-	if err != nil || !found {
+	status, err := cc.doStatus(ctx, http.MethodGet, "/api/v1/bridge/jobs/next", q, nil, &out)
+	if err != nil || status == http.StatusNoContent {
 		return nil, err
 	}
 	return &out, nil
@@ -667,18 +667,19 @@ func (c *Client) RescanAttachments(ctx context.Context, libraryID int64, path st
 	return &out.Attachments, nil
 }
 
-// do is doFound for calls where 204 isn't an answer.
+// do makes a call whose caller only needs its decoded answer or error.
 func (c *Client) do(ctx context.Context, method, path string, q url.Values, body, out any) error {
-	_, err := c.doFound(ctx, method, path, q, body, out)
+	_, err := c.doStatus(ctx, method, path, q, body, out)
 	return err
 }
 
-// doFound retries only an explicit 429. The server's limiter refuses the
+// doStatus returns the last HTTP status (zero without a response) and retries
+// only an explicit 429. The server's limiter refuses the
 // request before the route runs, so even consuming a pairing code, claiming
 // a job, updating its lease, rescanning or posting listening events is safe
 // to retry. A lost response gives no such assurance. How long a 429 is
 // waited out is the client's retry (a page call's is shorter: Prompt).
-func (c *Client) doFound(ctx context.Context, method, path string, q url.Values, body, out any) (bool, error) {
+func (c *Client) doStatus(ctx context.Context, method, path string, q url.Values, body, out any) (int, error) {
 	u := *c.base
 	u.Path = strings.TrimRight(u.Path, "/") + path
 	u.RawQuery = q.Encode()
@@ -687,19 +688,19 @@ func (c *Client) doFound(ctx context.Context, method, path string, q url.Values,
 		var err error
 		payload, err = json.Marshal(body)
 		if err != nil {
-			return false, err
+			return 0, err
 		}
 	}
-	var found bool
+	var status int
 	err := c.retry.Do(ctx, c.wait, func(ctx context.Context) error {
 		var err error
-		found, err = c.attempt(ctx, method, &u, payload, out)
+		status, err = c.attempt(ctx, method, &u, payload, out)
 		return err
 	})
-	return found, err
+	return status, err
 }
 
-func (c *Client) attempt(ctx context.Context, method string, u *url.URL, payload []byte, out any) (bool, error) {
+func (c *Client) attempt(ctx context.Context, method string, u *url.URL, payload []byte, out any) (int, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 	var rd io.Reader
@@ -708,7 +709,7 @@ func (c *Client) attempt(ctx context.Context, method string, u *url.URL, payload
 	}
 	req, err := http.NewRequestWithContext(ctx, method, u.String(), rd)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 	req.Header.Set(ClientHeader, c.client)
 	req.Header.Set("Accept", "application/json")
@@ -720,31 +721,31 @@ func (c *Client) attempt(ctx context.Context, method string, u *url.URL, payload
 	}
 	resp, err := c.httpc.Do(req)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 	if err != nil && resp.StatusCode != http.StatusTooManyRequests {
-		return false, err
+		return resp.StatusCode, err
 	}
 	if resp.StatusCode == http.StatusNoContent {
-		return false, nil
+		return resp.StatusCode, nil
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		if out == nil {
-			return true, nil
+			return resp.StatusCode, nil
 		}
 		if err := json.Unmarshal(raw, out); err != nil {
-			return false, unusableError{fmt.Errorf("decode the server's answer to %s %s: %w", method, u.Path, err)}
+			return resp.StatusCode, unusableError{fmt.Errorf("decode the server's answer to %s %s: %w", method, u.Path, err)}
 		}
-		return true, nil
+		return resp.StatusCode, nil
 	}
 	err = answerError(resp.StatusCode, raw)
 	var ae *APIError
 	if errors.As(err, &ae) {
 		ae.RetryAfter, ae.RetryAfterSet = retryAfter(resp.Header.Get("Retry-After"), time.Now())
 	}
-	return false, err
+	return resp.StatusCode, err
 }
 
 // unusableError is an answer the Bridge couldn't use (ErrUnusableAnswer),

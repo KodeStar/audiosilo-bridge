@@ -458,6 +458,7 @@ func heartbeatLoop(ctx context.Context, kick <-chan struct{}, beat func(context.
 // libraries, and starts a mapping check when one is due or the libraries
 // changed.
 func (b *Bridge) beat(ctx context.Context) {
+	defer b.audible.RetryRemoval(ctx, b.audibleServer)
 	cl := b.conn.Client()
 	if cl == nil {
 		b.conn.finishUnpair(ctx) // an unpair that couldn't forget the pairing

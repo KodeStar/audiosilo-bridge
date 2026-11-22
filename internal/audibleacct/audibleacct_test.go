@@ -2,6 +2,7 @@ package audibleacct
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -10,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -181,14 +183,18 @@ func (s *stubService) Products(_ context.Context, _ audible.Credentials, asins [
 
 // stubServer is the server's account routes.
 type stubServer struct {
-	policy  string // the current console selection in the mapping reply
-	mu      sync.Mutex
-	put     map[string]link.AudibleAccountInput
-	deleted []string
-	putErr  error
-	delErr  error
-	onPut   func() // runs as a PUT is applied
+	serverID string
+	policy   string // the current console selection in the mapping reply
+	mu       sync.Mutex
+	put      map[string]link.AudibleAccountInput
+	deleted  []string
+	putErr   error
+	delErr   error
+	onPut    func() // runs as a PUT is applied
 }
+
+func (s *stubServer) ServerID() string { return cmp.Or(s.serverID, "srv-1") }
+func (*stubServer) PairingID() string  { return "pairing-1" }
 
 func (s *stubServer) PutAudibleAccount(_ context.Context, id string, in link.AudibleAccountInput) (*link.AudibleAccount, error) {
 	s.mu.Lock()
@@ -213,6 +219,9 @@ func (s *stubServer) DeleteAudibleAccount(ctx context.Context, id string) error 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.deleted = append(s.deleted, id)
+	if s.delErr == nil {
+		delete(s.put, id)
+	}
 	return s.delErr
 }
 
@@ -263,7 +272,7 @@ func (e *env) trySignIn() (store.AudibleAccount, error) {
 	if err != nil {
 		return store.AudibleAccount{}, err
 	}
-	return e.m.Finish(context.Background(), e.srv, "srv-1", Finish{Login: st.Login,
+	return e.m.Finish(context.Background(), e.srv, Finish{Login: st.Login,
 		RedirectURL: "https://www.amazon.com/ap/maplanding?openid.oa2.authorization_code=" + stubCode, Mapping: mapping()})
 }
 
@@ -336,11 +345,11 @@ func TestSignInSealsTheCredentialsAndMapsOnTheServerFirst(t *testing.T) {
 		t.Fatalf("an unknown marketplace = %v", err)
 	}
 	// A pasted page with no code keeps the sign-in for another try.
-	_, err = e.m.Finish(context.Background(), e.srv, "srv-1", Finish{Login: st.Login, RedirectURL: "https://www.amazon.com/", Mapping: mapping()})
+	_, err = e.m.Finish(context.Background(), e.srv, Finish{Login: st.Login, RedirectURL: "https://www.amazon.com/", Mapping: mapping()})
 	if !errors.Is(err, ErrInvalid) {
 		t.Fatalf("no code = %v", err)
 	}
-	a, err := e.m.Finish(context.Background(), e.srv, "srv-1", Finish{Login: st.Login,
+	a, err := e.m.Finish(context.Background(), e.srv, Finish{Login: st.Login,
 		RedirectURL: " https://www.amazon.com/ap/maplanding?openid.oa2.authorization_code=" + stubCode + " ", Mapping: mapping()})
 	if err != nil {
 		t.Fatal(err)
@@ -353,7 +362,7 @@ func TestSignInSealsTheCredentialsAndMapsOnTheServerFirst(t *testing.T) {
 		t.Fatalf("server mapping = %+v", in)
 	}
 	// The login is spent.
-	if _, err := e.m.Finish(context.Background(), e.srv, "srv-1", Finish{Login: st.Login,
+	if _, err := e.m.Finish(context.Background(), e.srv, Finish{Login: st.Login,
 		RedirectURL: "https://x/ap/maplanding?openid.oa2.authorization_code=" + stubCode, Mapping: mapping()}); !errors.Is(err, ErrLoginExpired) {
 		t.Fatalf("a spent login = %v", err)
 	}
@@ -384,21 +393,21 @@ func TestSignInRefusals(t *testing.T) {
 		{UserID: 0, LibraryID: 1, Policy: "all"},
 		{UserID: 3, LibraryID: 0, Policy: "all"},
 	} {
-		if _, err := e.m.Finish(context.Background(), e.srv, "srv-1", Finish{Login: st.Login, RedirectURL: redirect, Mapping: bad}); !errors.Is(err, ErrInvalid) {
+		if _, err := e.m.Finish(context.Background(), e.srv, Finish{Login: st.Login, RedirectURL: redirect, Mapping: bad}); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("%+v = %v", bad, err)
 		}
 	}
-	if _, err := e.m.Finish(context.Background(), e.srv, "srv-1", Finish{Login: "nosuchlogin", RedirectURL: redirect, Mapping: mapping()}); !errors.Is(err, ErrLoginExpired) {
+	if _, err := e.m.Finish(context.Background(), e.srv, Finish{Login: "nosuchlogin", RedirectURL: redirect, Mapping: mapping()}); !errors.Is(err, ErrLoginExpired) {
 		t.Fatalf("an unknown login = %v", err)
 	}
-	if _, err := e.m.Finish(context.Background(), nil, "", Finish{Login: st.Login, RedirectURL: redirect, Mapping: mapping()}); !errors.Is(err, ErrNotPaired) {
+	if _, err := e.m.Finish(context.Background(), nil, Finish{Login: st.Login, RedirectURL: redirect, Mapping: mapping()}); !errors.Is(err, ErrNotPaired) {
 		t.Fatalf("finishing while unpaired = %v", err)
 	}
 
 	// The server refuses the mapping: the new device is deregistered again and
 	// nothing is kept.
 	e.srv.putErr = &link.APIError{Status: 404, Code: "unknown_user", Message: "no such user"}
-	_, err := e.m.Finish(context.Background(), e.srv, "srv-1", Finish{Login: st.Login, RedirectURL: redirect, Mapping: mapping()})
+	_, err := e.m.Finish(context.Background(), e.srv, Finish{Login: st.Login, RedirectURL: redirect, Mapping: mapping()})
 	var apiErr *link.APIError
 	if !errors.As(err, &apiErr) || apiErr.Code != "unknown_user" {
 		t.Fatalf("a refused mapping = %v", err)
@@ -419,7 +428,7 @@ func TestSignInRefusals(t *testing.T) {
 	e.srv.putErr = nil
 	e.svc.registerErr = errors.New("400 invalid_grant")
 	st, _ = e.m.Start("uk")
-	if _, err := e.m.Finish(context.Background(), e.srv, "srv-1", Finish{Login: st.Login, RedirectURL: redirect, Mapping: mapping()}); !errors.Is(err, ErrRegister) {
+	if _, err := e.m.Finish(context.Background(), e.srv, Finish{Login: st.Login, RedirectURL: redirect, Mapping: mapping()}); !errors.Is(err, ErrRegister) {
 		t.Fatalf("a refused code = %v", err)
 	}
 
@@ -429,7 +438,7 @@ func TestSignInRefusals(t *testing.T) {
 	e.svc.registerErr = nil
 	st, _ = e.m.Start("uk")
 	e.m.o.Now = func() time.Time { return now.Add(LoginTTL) }
-	if _, err := e.m.Finish(context.Background(), e.srv, "srv-1", Finish{Login: st.Login, RedirectURL: redirect, Mapping: mapping()}); !errors.Is(err, ErrLoginExpired) {
+	if _, err := e.m.Finish(context.Background(), e.srv, Finish{Login: st.Login, RedirectURL: redirect, Mapping: mapping()}); !errors.Is(err, ErrLoginExpired) {
 		t.Fatalf("an expired login = %v", err)
 	}
 	e.noSecrets(t)
@@ -532,7 +541,7 @@ func TestConcurrentSignInsOfOneAmazonAccount(t *testing.T) {
 	var wg sync.WaitGroup
 	for i, login := range logins {
 		wg.Go(func() {
-			got[i], errs[i] = e.m.Finish(context.Background(), e.srv, "srv-1", Finish{Login: login,
+			got[i], errs[i] = e.m.Finish(context.Background(), e.srv, Finish{Login: login,
 				RedirectURL: "https://www.amazon.com/ap/maplanding?openid.oa2.authorization_code=" + stubCode, Mapping: mapping()})
 		})
 	}
@@ -580,7 +589,7 @@ func TestSignInAgainThatFailsKeepsTheEarlierSignIn(t *testing.T) {
 	// The page goes away just as the server answers: the store write fails.
 	e.srv.onPut = cancel
 	st, _ := e.m.Start("us")
-	_, err := e.m.Finish(ctx, e.srv, "srv-1", Finish{Login: st.Login,
+	_, err := e.m.Finish(ctx, e.srv, Finish{Login: st.Login,
 		RedirectURL: "https://www.amazon.com/ap/maplanding?openid.oa2.authorization_code=" + stubCode,
 		Mapping:     Mapping{UserID: 4, UserName: "Sam", LibraryID: 2, Policy: "all"}})
 	if err == nil {
@@ -623,7 +632,7 @@ func TestAccountKeepsPolicyConfirmedByConsole(t *testing.T) {
 		t.Fatal("sign-in policy", a.Policy)
 	}
 	e.srv.policy = "series"
-	got, err := e.m.Map(context.Background(), e.srv, "srv-1", a.ID, mapping())
+	got, err := e.m.Map(context.Background(), e.srv, a.ID, mapping())
 	if err != nil || got.Policy != "series" {
 		t.Fatal("remap policy", got.Policy, err)
 	}
@@ -636,12 +645,13 @@ func TestMapRecordsOnTheServerThenHere(t *testing.T) {
 	// The name the Bridge made follows the person (the form sends it back as it
 	// is); a typed one stays.
 	made := Mapping{Label: a.Label, UserID: 4, UserName: "Sam", LibraryID: 1, Policy: "manual"}
-	if got, err := e.m.Map(context.Background(), e.srv, "srv-1", a.ID, made); err != nil || got.Label != "Sam (US)" ||
+	if got, err := e.m.Map(context.Background(), e.srv, a.ID, made); err != nil || got.Label != "Sam (US)" ||
 		e.srv.put[a.ID].Label != "Sam (US)" {
 		t.Fatalf("mapped to Sam = %+v, %v", got, err)
 	}
 	mp := Mapping{Label: "  Kids'   shelf ", UserID: 4, UserName: "Sam", LibraryID: 2, Policy: "SERIES"}
-	got, err := e.m.Map(context.Background(), e.srv, "srv-2", a.ID, mp)
+	e.srv.serverID = "srv-2"
+	got, err := e.m.Map(context.Background(), e.srv, a.ID, mp)
 	if err != nil || got.Label != "Kids' shelf" || got.UserID != 4 || got.LibraryID != 2 || got.Policy != "series" || got.Sync ||
 		got.ServerID != "srv-2" {
 		t.Fatalf("mapped = %+v, %v", got, err)
@@ -650,13 +660,13 @@ func TestMapRecordsOnTheServerThenHere(t *testing.T) {
 		t.Fatalf("server = %+v", in)
 	}
 	e.srv.putErr = &link.APIError{Status: 400, Code: "not_books"}
-	if _, err := e.m.Map(context.Background(), e.srv, "srv-2", a.ID, mapping()); err == nil {
+	if _, err := e.m.Map(context.Background(), e.srv, a.ID, mapping()); err == nil {
 		t.Fatal("a refused mapping")
 	}
 	if kept, _ := e.m.Account(context.Background(), a.ID); kept.LibraryID != 2 {
 		t.Fatalf("a refused mapping changed the account: %+v", kept)
 	}
-	if _, err := e.m.Map(context.Background(), e.srv, "srv-2", "nosuch00", mapping()); !errors.Is(err, ErrNotFound) {
+	if _, err := e.m.Map(context.Background(), e.srv, "nosuch00", mapping()); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("unknown = %v", err)
 	}
 	if _, err := e.m.Account(context.Background(), "../../x"); !errors.Is(err, ErrNotFound) {
@@ -675,7 +685,7 @@ func TestMapHoldsTheAccountsLock(t *testing.T) {
 	reached, release := e.holdPut(t)
 	mapped := make(chan error, 1)
 	go func() {
-		_, err := e.m.Map(context.Background(), e.srv, "srv-1", a.ID, Mapping{UserID: 4, UserName: "Sam", LibraryID: 2, Policy: "manual"})
+		_, err := e.m.Map(context.Background(), e.srv, a.ID, Mapping{UserID: 4, UserName: "Sam", LibraryID: 2, Policy: "manual"})
 		mapped <- err
 	}()
 	reached("the remap")
@@ -729,7 +739,7 @@ func TestAwaitedAccountWaitsForAMappingInFlight(t *testing.T) {
 	reached, release := e.holdPut(t)
 	mapped := make(chan error, 1)
 	go func() {
-		_, err := e.m.Map(context.Background(), e.srv, "srv-1", a.ID, Mapping{UserID: 4, UserName: "Sam", LibraryID: 2, Policy: "manual"})
+		_, err := e.m.Map(context.Background(), e.srv, a.ID, Mapping{UserID: 4, UserName: "Sam", LibraryID: 2, Policy: "manual"})
 		mapped <- err
 	}()
 	reached("the remap")
@@ -939,7 +949,7 @@ func TestMappingKeepsTheUserName(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	a := e.signIn(t)
-	got, err := e.m.Map(context.Background(), e.srv, "srv-1", a.ID, Mapping{Label: a.Label, UserID: 3, LibraryID: 1, Policy: "manual"})
+	got, err := e.m.Map(context.Background(), e.srv, a.ID, Mapping{Label: a.Label, UserID: 3, LibraryID: 1, Policy: "manual"})
 	if err != nil || got.UserName != "Chris" || got.Label != "Chris (US)" {
 		t.Fatalf("same person = %+v, %v", got, err)
 	}
@@ -949,20 +959,21 @@ func TestMappingKeepsTheUserName(t *testing.T) {
 	}
 	nameless := mapping()
 	nameless.UserName = ""
-	again, err := e.m.Finish(context.Background(), e.srv, "srv-1", Finish{Login: st.Login,
+	again, err := e.m.Finish(context.Background(), e.srv, Finish{Login: st.Login,
 		RedirectURL: "https://www.amazon.com/ap/maplanding?openid.oa2.authorization_code=" + stubCode, Mapping: nameless})
 	if err != nil || again.ID != a.ID || again.UserName != "Chris" || again.Label != "Chris (US)" {
 		t.Fatalf("signed in again = %+v, %v", again, err)
 	}
-	other, err := e.m.Map(context.Background(), e.srv, "srv-1", a.ID, Mapping{Label: again.Label, UserID: 4, LibraryID: 1, Policy: "manual"})
+	other, err := e.m.Map(context.Background(), e.srv, a.ID, Mapping{Label: again.Label, UserID: 4, LibraryID: 1, Policy: "manual"})
 	if err != nil || other.UserName != "" || other.Label != "Audible (US)" {
 		t.Fatalf("another person = %+v, %v", other, err)
 	}
 	// Denied: the same person id on another server is someone else.
-	if _, err := e.m.Map(context.Background(), e.srv, "srv-1", a.ID, Mapping{UserID: 3, UserName: "Chris", LibraryID: 1, Policy: "manual"}); err != nil {
+	if _, err := e.m.Map(context.Background(), e.srv, a.ID, Mapping{UserID: 3, UserName: "Chris", LibraryID: 1, Policy: "manual"}); err != nil {
 		t.Fatal(err)
 	}
-	moved, err := e.m.Map(context.Background(), e.srv, "srv-2", a.ID, Mapping{Label: "Chris (US)", UserID: 3, LibraryID: 1, Policy: "manual"})
+	e.srv.serverID = "srv-2"
+	moved, err := e.m.Map(context.Background(), e.srv, a.ID, Mapping{Label: "Chris (US)", UserID: 3, LibraryID: 1, Policy: "manual"})
 	if err != nil || moved.UserName != "" || moved.Label != "Audible (US)" {
 		t.Fatalf("same id on another server = %+v, %v", moved, err)
 	}
@@ -993,7 +1004,7 @@ func TestRemoveForgetsFirstThenDeregisters(t *testing.T) {
 	}
 
 	b := e.signIn(t)
-	e.srv.delErr = errors.New("unreachable")
+	e.srv.delErr = &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("unreachable")}
 	e.svc.deregErr = errors.New("500")
 	warning, err = e.m.Remove(context.Background(), e.srv, b.ID)
 	if err != nil || !strings.Contains(warning, "server didn't confirm") || !strings.Contains(warning, "device list") {
