@@ -257,14 +257,25 @@ func TestAudibleErrorKinds(t *testing.T) {
 	}
 }
 
-// The heartbeat owns the retry even after an unpair and a pairing with the
-// same server. Only the original pairing can send the recorded DELETE.
+// A heartbeat the server answered sends a pending Audible removal, only on
+// the pairing that recorded it (an unpair and a pairing again with the same
+// server drop it); one the server failed sends nothing and keeps it.
 func TestHeartbeatRetriesAudibleRemovalOnlyOnItsPairing(t *testing.T) {
-	for _, repair := range []bool{false, true} {
-		t.Run(fmt.Sprintf("repaired=%t", repair), func(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		repair, beatFails bool
+		deletes           int32
+		pending           bool
+	}{
+		{name: "paired", deletes: 1},
+		{name: "repaired", repair: true},
+		{name: "heartbeat fails", beatFails: true, pending: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
 			status := &setupServer{kind: "old"}
 			var deletes atomic.Int32
+			var beatFails atomic.Bool
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Method == http.MethodDelete {
 					if r.URL.Path != "/api/v1/bridge/audible/accounts/acct0001" {
@@ -272,6 +283,10 @@ func TestHeartbeatRetriesAudibleRemovalOnlyOnItsPairing(t *testing.T) {
 					}
 					deletes.Add(1)
 					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				if beatFails.Load() && r.URL.Path == "/api/v1/bridge/status" {
+					w.WriteHeader(http.StatusServiceUnavailable)
 					return
 				}
 				status.ServeHTTP(w, r)
@@ -290,7 +305,7 @@ func TestHeartbeatRetriesAudibleRemovalOnlyOnItsPairing(t *testing.T) {
 			if err := b.db.DeleteAudibleAccount(ctx, a.ID, cl.PairingID()); err != nil {
 				t.Fatal(err)
 			}
-			if repair {
+			if tc.repair {
 				if err := b.Unpair(ctx); err != nil {
 					t.Fatal(err)
 				}
@@ -298,16 +313,14 @@ func TestHeartbeatRetriesAudibleRemovalOnlyOnItsPairing(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			beatFails.Store(tc.beatFails)
 			b.beat(ctx)
-			want := int32(1)
-			if repair {
-				want = 0
+			if got := deletes.Load(); got != tc.deletes {
+				t.Fatalf("sent %d DELETEs, want %d", got, tc.deletes)
 			}
-			if got := deletes.Load(); got != want {
-				t.Fatalf("sent %d DELETEs, want %d", got, want)
-			}
-			if _, err := b.db.NextAudibleRemoval(ctx, cl.PairingID(), time.Now().AddDate(1, 0, 0)); !errors.Is(err, store.ErrNotFound) {
-				t.Fatalf("removal still queued: %v", err)
+			_, err := b.db.NextAudibleRemoval(ctx, cl.PairingID(), time.Now().AddDate(1, 0, 0))
+			if pending := err == nil; pending != tc.pending {
+				t.Fatalf("removal pending = %t (%v), want %t", pending, err, tc.pending)
 			}
 		})
 	}

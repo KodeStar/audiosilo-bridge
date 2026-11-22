@@ -458,7 +458,6 @@ func heartbeatLoop(ctx context.Context, kick <-chan struct{}, beat func(context.
 // libraries, and starts a mapping check when one is due or the libraries
 // changed.
 func (b *Bridge) beat(ctx context.Context) {
-	defer b.audible.RetryRemoval(ctx, b.audibleServer)
 	cl := b.conn.Client()
 	if cl == nil {
 		b.conn.finishUnpair(ctx) // an unpair that couldn't forget the pairing
@@ -575,6 +574,9 @@ func (b *Bridge) beat(ctx context.Context) {
 	// The dispatcher compares eligibility, so an unchanged heartbeat leaves
 	// outstanding claims alone while capability changes refresh them now.
 	b.runner.Wake()
+	// The server just answered: the time to send a removal it still owes
+	// (only then, so a server that is down never slows the heartbeat).
+	b.audible.RetryRemoval(ctx, cl)
 	// A run due only for slow folders checks just those (DueIDs).
 	if due, ids := b.libs.DueIDs(time.Now(), interval); changed || due {
 		if changed {

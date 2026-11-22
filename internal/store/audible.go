@@ -200,11 +200,6 @@ func (db *DB) SignInAudibleAccount(ctx context.Context, a AudibleAccount, at tim
 		a.DeviceProfile); err != nil {
 		return err
 	}
-	// A re-add can take back its pending id. Commit the sign-in and cancel
-	// the corresponding DELETE together, before the retry lock is released.
-	if _, err := tx.ExecContext(ctx, `DELETE FROM audible_removals WHERE account = ?`, a.ID); err != nil {
-		return err
-	}
 	return tx.Commit()
 }
 
@@ -288,8 +283,8 @@ func (db *DB) DeleteAudibleAccount(ctx context.Context, id, pairing string) erro
 	}
 	defer func() { _ = tx.Rollback() }()
 	if pairing != "" {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO audible_removals (account, pairing, customer_hash, marketplace)
-			SELECT id, ?, customer_hash, marketplace FROM audible_accounts WHERE id = ?`, pairing, id); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO audible_removals (account, pairing)
+			SELECT id, ? FROM audible_accounts WHERE id = ?`, pairing, id); err != nil {
 			return err
 		}
 	}

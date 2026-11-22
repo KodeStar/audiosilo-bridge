@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -184,6 +183,7 @@ func (s *stubService) Products(_ context.Context, _ audible.Credentials, asins [
 // stubServer is the server's account routes.
 type stubServer struct {
 	serverID string
+	pairing  string
 	policy   string // the current console selection in the mapping reply
 	mu       sync.Mutex
 	put      map[string]link.AudibleAccountInput
@@ -193,15 +193,18 @@ type stubServer struct {
 	onPut    func() // runs as a PUT is applied
 }
 
-func (s *stubServer) ServerID() string { return cmp.Or(s.serverID, "srv-1") }
-func (*stubServer) PairingID() string  { return "pairing-1" }
+func (s *stubServer) ServerID() string  { return cmp.Or(s.serverID, "srv-1") }
+func (s *stubServer) PairingID() string { return cmp.Or(s.pairing, "pairing-1") }
 
 func (s *stubServer) PutAudibleAccount(_ context.Context, id string, in link.AudibleAccountInput) (*link.AudibleAccount, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.onPut != nil {
-		s.onPut()
+	onPut := s.onPut
+	s.mu.Unlock()
+	if onPut != nil {
+		onPut() // outside mu: a held PUT doesn't hold up a DELETE
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.putErr != nil {
 		return nil, s.putErr
 	}
@@ -1004,7 +1007,7 @@ func TestRemoveForgetsFirstThenDeregisters(t *testing.T) {
 	}
 
 	b := e.signIn(t)
-	e.srv.delErr = &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("unreachable")}
+	e.srv.delErr = errors.New("unreachable")
 	e.svc.deregErr = errors.New("500")
 	warning, err = e.m.Remove(context.Background(), e.srv, b.ID)
 	if err != nil || !strings.Contains(warning, "server didn't confirm") || !strings.Contains(warning, "device list") {
