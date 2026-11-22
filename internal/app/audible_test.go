@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +20,106 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/setup"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
+
+type sweepBook struct{}
+
+func (sweepBook) Book(_ context.Context, id int64, _ string) (*link.Book, error) {
+	return &link.Book{LibraryID: id, Path: "Sample.m4b", Files: []link.BookFile{{Path: "Sample.m4b", Size: 1}}}, nil
+}
+
+func checkedBooksMount(t *testing.T, b *Bridge) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "Sample.m4b"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b.libs.SetLibraries([]link.Library{{ID: 1, Root: root}})
+	b.libs.Check(t.Context(), sweepBook{}, b.mount, time.Now)
+	if st, ok := b.libs.Status(1); !ok || !st.Writable {
+		t.Fatalf("library check: %+v", st)
+	}
+	return root
+}
+
+func oldPlaceTemp(t *testing.T, root, folder string) string {
+	t.Helper()
+	dir := filepath.Join(root, folder)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(dir, ".audiosilo-import-0123456789abcdef.part")
+	if err := os.WriteFile(file, []byte("audio"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-8 * 24 * time.Hour)
+	if err := os.Chtimes(file, old, old); err != nil {
+		t.Fatal(err)
+	}
+	return file
+}
+
+func TestAudibleSweepNeedsAccountWithoutPlacementRecords(t *testing.T) {
+	b, ctx := pairedBridge(t, &setupServer{kind: "new"})
+	root := checkedBooksMount(t, b)
+	file := oldPlaceTemp(t, root, "Author/Book")
+	b.sweepAudible(ctx, b.conn.Client())
+	b.audibleSwept.Range(func(_, _ any) bool {
+		t.Error("walked the library with no Audible account or record")
+		return false
+	})
+	if _, err := os.Stat(file); err != nil {
+		t.Fatal(err)
+	}
+	a := store.AudibleAccount{ID: "acct0001", LibraryID: 1, ServerID: b.conn.Client().ServerID(), Marketplace: "us"}
+	if err := b.db.SignInAudibleAccount(ctx, a, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	b.sweepAudible(ctx, b.conn.Client())
+	if _, err := os.Stat(file); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old temp in the account's library: %v", err)
+	}
+}
+
+func TestAudibleSweepUsesExpiredPlacementRecord(t *testing.T) {
+	before, ctx := pairedBridge(t, &setupServer{kind: "new"})
+	dir := filepath.Join(before.dataDir, "audible", "tmp")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-8 * 24 * time.Hour)
+	record := filepath.Join(dir, "acct0001-B0FAKE0001.placed.json")
+	if err := os.WriteFile(record, []byte(`{"library_id":1,"path":"Author/Book/Book.m4b"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(record, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := before.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	b, _, err := New(ctx, Options{DataDir: before.dataDir, Version: "test", Logger: quiet()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.db.Close()
+	if _, err := os.Stat(record); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expired private record: %v", err)
+	}
+	root := checkedBooksMount(t, b)
+	recorded := oldPlaceTemp(t, root, "Author/Book")
+	ancestor := oldPlaceTemp(t, root, "Author")
+	descendant := oldPlaceTemp(t, root, "Author/Book/Extras")
+	sibling := oldPlaceTemp(t, root, "Author/Other")
+	b.sweepAudible(ctx, b.conn.Client())
+	if _, err := os.Stat(recorded); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old temp in recorded folder: %v", err)
+	}
+	for _, keep := range []string{ancestor, descendant, sibling} {
+		if _, err := os.Stat(keep); err != nil {
+			t.Fatalf("outside the recorded folder: %v", err)
+		}
+	}
+}
 
 // registerErr is a real Register failure against an identity API answering
 // status, wrapped as audibleacct.Finish wraps it.

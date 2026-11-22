@@ -107,8 +107,18 @@ func (l looks) checkPodcast(ctx context.Context, src MarkerSource, lib link.Libr
 			return st, folderSlow{error: err, wrote: writes.unsettled()}
 		}
 	}
-	nonce, err := src.Marker(ctx, lib.ID)
-	if err != nil || nonce != found.marker.Nonce {
+	st, unanswered = l.verifyMarker(ctx, src, st, found.marker)
+	if unanswered != nil && !st.Mapped && found.createdMarker {
+		unanswered = unproven{unanswered}
+	}
+	return st, unanswered
+}
+
+// verifyMarker maps st once the server reads back m's nonce, and probes the
+// folder for writing.
+func (l looks) verifyMarker(ctx context.Context, src MarkerSource, st link.LibraryStatus, m libraryMarker) (link.LibraryStatus, error) {
+	nonce, err := src.Marker(ctx, st.LibraryID)
+	if err != nil || nonce != m.Nonce {
 		var api *link.APIError
 		switch {
 		case errors.Is(err, link.ErrNoMarker), err == nil:
@@ -118,14 +128,10 @@ func (l looks) checkPodcast(ctx context.Context, src MarkerSource, lib link.Libr
 		default:
 			st.Error = "could not verify this folder with the server"
 		}
-		unanswered = unsettled(err)
-		if unanswered != nil && found.createdMarker {
-			unanswered = unproven{unanswered}
-		}
-		return st, unanswered
+		return st, unsettled(err)
 	}
 	st.Mapped = true
-	if err := l.probe(mount); err != nil {
+	if err := l.probe(st.MountPath); err != nil {
 		st.Error = "mapped, but not writable here: " + describeStatError(err)
 		return st, slowLook(err)
 	}

@@ -87,9 +87,10 @@ type Options struct {
 
 // Handler runs audible.poll.
 type Handler struct {
-	o     Options
-	now   func() time.Time
-	sleep func(context.Context, time.Duration) error // the enrichment's pace (tests stub both)
+	enriching chan struct{} // one paced backfill across accounts
+	o         Options
+	now       func() time.Time
+	sleep     func(context.Context, time.Duration) error // the enrichment's pace (tests stub both)
 }
 
 // New returns the handler.
@@ -100,7 +101,7 @@ func New(o Options) *Handler {
 	if o.ServerID == nil {
 		o.ServerID = func() string { return "" }
 	}
-	return &Handler{o: o, now: time.Now, sleep: link.Wait}
+	return &Handler{o: o, now: time.Now, sleep: link.Wait, enriching: make(chan struct{}, 1)}
 }
 
 // Kind is audible.poll.

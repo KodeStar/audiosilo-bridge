@@ -72,9 +72,10 @@ export function AudibleCard({ client }: { client: ApiClient }) {
     <Card title="Audible" actions={badge}>
       <div className="flex flex-col gap-4">
         <p className="text-sm text-body">
-          The Bridge signs in to Audible as a device called AudioSilo, lists the books the account
-          owns and finds the ones already in the library. Each account belongs to one person on the
-          server. The sign-in stays sealed on the Bridge.
+          The Bridge signs in to Audible as a device called AudioSilo, finds the books already in
+          the library and backs up the titles you choose. You can also turn on automatic backups for
+          new purchases. Each account belongs to one person on the server. The sign-in stays sealed
+          on the Bridge.
         </p>
         <Notice kind="info">
           The server checks the accounts only while the Audible module is on: turn it on in the
@@ -211,7 +212,10 @@ function AccountRow({
         <Row label="Audible store">{marketplaceName(a.marketplace)}</Row>
         <Row label="Belongs to">{a.user_name || `Person ${a.user_id}`}</Row>
         <Row label="Library">{a.library_name || `Library ${a.library_id}`}</Row>
-        <Row label="Back up">{POLICY_IN_CONSOLE}</Row>
+        <Row label="Back up">
+          {POLICY_LABELS[a.policy] ?? a.policy}. Last known to the Bridge. The server’s Audible
+          account card shows the current setting.
+        </Row>
         <Row label="Last checked">
           {a.last_poll_at ? (
             <>
@@ -408,11 +412,6 @@ function SignInForm({
     </div>
   );
 }
-
-// POLICY_IN_CONSOLE: an account's backup policy is the server's once the
-// account exists (the console's Audible account card edits it); the page picks
-// it only for a new account, and the server keeps its own after that.
-const POLICY_IN_CONSOLE = "Chosen in the server's console (the Audible account card)";
 
 function MappingForm({
   data,

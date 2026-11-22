@@ -308,13 +308,20 @@ func noAnswer(err error) string {
 // 5xx, a timeout, no answer at all): the status says so too, and the Registry
 // may keep the library's last known state instead of it (proveKept). A look at
 // the folder that a hung mount holds past LookTimeout is no definite answer
-// either: unanswered is then folderSlow.
+// either: unanswered is then folderSlow. A library the server holds no book of
+// yet is proven as a podcast library is (CheckPodcast): the server reads back
+// the marker the Bridge finds or writes there. Nothing else writes a books
+// library's marker, so without this a new, empty library could never map.
 func Check(ctx context.Context, src BookSource, lib link.Library, mount string) (st link.LibraryStatus, unanswered error) {
-	return bounded.check(ctx, src, lib, mount)
+	marker, _ := src.(MarkerSource)
+	// Without the registry we cannot tell if a different marker's library was
+	// removed: keep it for its owner.
+	return bounded.check(ctx, src, lib, mount, marker, func(int64) bool { return true })
 }
 
-// check is Check with these looks.
-func (l looks) check(ctx context.Context, src BookSource, lib link.Library, mount string) (st link.LibraryStatus, unanswered error) {
+// check is Check with these looks. current is as CheckPodcast's, for the
+// marker check of a library with no book (marker nil: the link reads none).
+func (l looks) check(ctx context.Context, src BookSource, lib link.Library, mount string, marker MarkerSource, current func(int64) bool) (st link.LibraryStatus, unanswered error) {
 	st = link.LibraryStatus{LibraryID: lib.ID, MountPath: mount}
 	info, err := l.stat(mount)
 	switch {
@@ -328,6 +335,9 @@ func (l looks) check(ctx context.Context, src BookSource, lib link.Library, moun
 	book, err := src.Book(ctx, lib.ID, "")
 	switch {
 	case errors.Is(err, link.ErrNoBook):
+		if marker != nil {
+			return l.checkPodcast(ctx, marker, lib, mount, current)
+		}
 		st.Error = "the library has no indexed book to compare against yet"
 		return st, nil
 	case err != nil:
@@ -792,14 +802,17 @@ func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, n
 // checkOne checks one library by its kind (Check, or CheckPodcast) with look,
 // its server read paced by pace.
 func checkOne(ctx context.Context, look looks, src BookSource, pace *pacer, l link.Library, path string, listed map[int64]bool) (link.LibraryStatus, error) {
-	if l.LibraryKind() != "podcasts" {
-		return look.check(ctx, pacedBooks{src, pace}, l, path)
+	var marker MarkerSource
+	if m, ok := src.(MarkerSource); ok {
+		marker = pacedMarkers{m, pace}
 	}
-	marker, ok := src.(MarkerSource)
-	if !ok {
+	if l.LibraryKind() != "podcasts" {
+		return look.check(ctx, pacedBooks{src, pace}, l, path, marker, func(id int64) bool { return listed[id] })
+	}
+	if marker == nil {
 		return link.LibraryStatus{LibraryID: l.ID, MountPath: path, Error: "the server link cannot check a library marker"}, nil
 	}
-	return look.checkPodcast(ctx, pacedMarkers{marker, pace}, l, path, func(id int64) bool { return listed[id] })
+	return look.checkPodcast(ctx, marker, l, path, func(id int64) bool { return listed[id] })
 }
 
 // pacer spaces a run's server reads at least spacing apart. Only a read waits:

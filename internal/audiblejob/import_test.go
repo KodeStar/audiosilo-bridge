@@ -155,6 +155,7 @@ func (s *stubImportAccounts) Download(ctx context.Context, _ string, url, dest s
 
 type stubImportServer struct {
 	mu        sync.Mutex
+	lists     int
 	books     []link.LibraryBook
 	rescanErr []error
 	rescanned []string
@@ -166,7 +167,26 @@ type stubImportServer struct {
 	bookOf func(p string) string
 }
 
+func (s *stubImportServer) Book(_ context.Context, libraryID int64, at string) (*link.Book, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, b := range s.books {
+		if b.Path == at {
+			return &link.Book{LibraryID: libraryID, Path: at, Info: &link.BookInfo{Title: b.Title}}, nil
+		}
+	}
+	for _, rel := range s.rescanned {
+		if path.Dir(rel) == at {
+			return &link.Book{LibraryID: libraryID, Path: at, Info: &link.BookInfo{Title: path.Base(at)}}, nil
+		}
+	}
+	return nil, link.ErrNoBook
+}
+
 func (s *stubImportServer) LibraryBooks(_ context.Context, _ int64, _ string, _ int) (*link.LibraryBooks, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lists++
 	return &link.LibraryBooks{Books: s.books}, nil
 }
 
@@ -990,7 +1010,7 @@ func TestImportStopKeepsThePartial(t *testing.T) {
 		t.Fatal("a stopped import succeeded")
 	}
 	part := filepath.Join(e.tmp, "acct0001-B0FAKE0002.aaxc.part")
-	if err := SweepTmp(e.tmp, time.Now()); err != nil {
+	if _, err := SweepTmp(e.tmp, time.Now(), "srv1"); err != nil {
 		t.Fatal(err)
 	}
 	for _, p := range []string{part, audible.StatePath(part)} {
@@ -1004,9 +1024,79 @@ func TestImportStopKeepsThePartial(t *testing.T) {
 	e.tmpEmpty(t)
 }
 
+func TestImportStopDuringPlaceResumesReadyBook(t *testing.T) {
+	for _, why := range []string{"stop", "lost", "cancel"} {
+		t.Run(why, func(t *testing.T) {
+			e := newImportEnv(t)
+			ctx, stop := context.WithCancel(context.Background())
+			end := func() { stop() }
+			defer stop()
+			switch why {
+			case "lost":
+				ctx, end = jobs.LoseContext(ctx)
+			case "cancel":
+				ctx, end = jobs.CancelContext(ctx)
+			}
+			progress := e.opts.onProgress
+			e.opts.onProgress = func(p jobs.Progress) {
+				progress(p)
+				if p.Step == StepPlace && p.Done > 0 {
+					end() // the transfer has staged the bytes, before publication
+				}
+			}
+			_, err := e.run(ctx, e.params(nil))
+			if err == nil || len(e.libraryFiles()) != 0 {
+				t.Fatal("interrupted publication", err, e.libraryFiles())
+			}
+			e.noSecrets(t, nil, err)
+			if why == "cancel" {
+				e.tmpEmpty(t)
+				return
+			}
+			if _, err := SweepTmp(e.tmp, time.Now(), "srv1"); err != nil {
+				t.Fatal(err)
+			}
+			e.opts.onProgress = progress
+			e.accts.titleErr = errors.New("Audible is offline")
+			res, err := e.resumed(context.Background(), e.params(nil), jobs.LocalReporter())
+			if err != nil || e.accts.licenses != 1 || e.accts.downloads != 1 || len(e.decrypted) != 1 {
+				t.Fatalf("restart = %v, %v; licensed %d, downloaded %d, decrypted %d", res, err, e.accts.licenses, e.accts.downloads, len(e.decrypted))
+			}
+			if b, _ := os.ReadFile(filepath.Join(e.root, copperGrove)); !bytes.Equal(b, e.accts.body) {
+				t.Fatal("restarted backup did not place the complete staged book")
+			}
+			e.tmpEmpty(t)
+		})
+	}
+}
+
+func TestStopDuringDecryptDoesNotKeepIncompleteAudio(t *testing.T) {
+	e := newImportEnv(t)
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	decrypt := e.opts.Decrypt
+	e.opts.Decrypt = func(ctx context.Context, _, _, out string, _ audible.License) error {
+		if err := os.WriteFile(out, []byte("incomplete"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		stop()
+		return ctx.Err()
+	}
+	if _, err := e.run(ctx, e.params(nil)); err == nil {
+		t.Fatal("interrupted decrypt succeeded")
+	}
+	e.opts.Decrypt = decrypt
+	if _, err := e.resumed(context.Background(), e.params(nil), jobs.LocalReporter()); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(e.root, copperGrove)); !bytes.Equal(b, e.accts.body) {
+		t.Fatal("incomplete decrypt was used")
+	}
+}
+
 func TestSweepTmp(t *testing.T) {
 	dir := t.TempDir()
-	now := time.Now()
+	now := time.Date(2026, 11, 22, 10, 0, 0, 0, time.UTC)
 	write := func(name string, age time.Duration) {
 		p := filepath.Join(dir, name)
 		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
@@ -1024,22 +1114,40 @@ func TestSweepTmp(t *testing.T) {
 	write("a-B0FAKE0001.m4b", time.Minute)           // a decrypted copy a crash left
 	write("a-B0FAKE0004.placed.json", time.Hour)
 	write("a-B0FAKE0005.placed.json", 8*24*time.Hour) // too old
+	write("young.ready.m4b", PartialMaxAge-time.Second)
+	write("young.ready.m4b.json", PartialMaxAge)
+	write("expired.ready.m4b", PartialMaxAge)
+	write("expired.ready.m4b.json", time.Second)
+	write("unfinished.ready.m4b.partial", time.Second)
 	write("stray.txt", time.Minute)
 	if err := os.MkdirAll(filepath.Join(dir, "audible-123"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := SweepTmp(dir, now); err != nil {
+	for name, body := range map[string]string{
+		"expired.ready.m4b.json": `{"server":"srv1","library_id":3,"path":"Author/Book/Audio.m4b"}`,
+		"other.ready.m4b.json":   `{"server":"srv2","library_id":3,"path":"Other/Book.m4b"}`,
+		"invalid.ready.m4b.json": `{"server":"srv1","library_id":3,"path":"../Outside/Book.m4b"}`,
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	folders, err := SweepTmp(dir, now, "srv1")
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !slices.Equal(folders, []PlacementFolder{{"srv1", 3, "Author/Book"}, {"srv2", 3, "Other"}}) {
+		t.Fatalf("placement folders: %v", folders)
 	}
 	entries, _ := os.ReadDir(dir)
 	var left []string
 	for _, e := range entries {
 		left = append(left, e.Name())
 	}
-	if strings.Join(left, ",") != "a-B0FAKE0001.aaxc.part,a-B0FAKE0001.aaxc.part.state,a-B0FAKE0004.placed.json" {
+	if strings.Join(left, ",") != "a-B0FAKE0001.aaxc.part,a-B0FAKE0001.aaxc.part.state,a-B0FAKE0004.placed.json,young.ready.m4b,young.ready.m4b.json" {
 		t.Fatalf("left %v", left)
 	}
-	if err := SweepTmp(filepath.Join(dir, "missing"), now); err != nil {
+	if _, err := SweepTmp(filepath.Join(dir, "missing"), now, "srv1"); err != nil {
 		t.Fatalf("a missing folder: %v", err)
 	}
 }
@@ -1156,7 +1264,7 @@ func TestImportRetryAfterTheInstallFinishes(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(e.tmp, "acct0001-B0FAKE0002"+placedSuffix)); err != nil {
 		t.Fatalf("no placement marker: %v", err)
 	}
-	if err := SweepTmp(e.tmp, time.Now()); err != nil {
+	if _, err := SweepTmp(e.tmp, time.Now(), "srv1"); err != nil {
 		t.Fatal(err)
 	}
 	e.steps = nil
@@ -1225,9 +1333,13 @@ func TestImportResumedParksUntilTheMappingIsBack(t *testing.T) {
 	part := e.keepPartial(t)
 	e.libs.status.Writable = false
 	looks := 0
+	rep := jobs.LocalReporter()
 	e.opts.Wait = func(ctx context.Context, d time.Duration) error {
 		if d == mappingPoll {
 			looks++
+			if !rep.Yielded() {
+				t.Fatal("parked import held its slot")
+			}
 			kept(t, part) // waiting keeps what it holds
 			if looks == 3 {
 				e.libs.status.Writable = true
@@ -1235,7 +1347,6 @@ func TestImportResumedParksUntilTheMappingIsBack(t *testing.T) {
 		}
 		return ctx.Err()
 	}
-	rep := jobs.LocalReporter()
 	res, err := e.resumed(context.Background(), e.params(nil), rep)
 	if err != nil {
 		t.Fatal(err)
@@ -1244,7 +1355,7 @@ func TestImportResumedParksUntilTheMappingIsBack(t *testing.T) {
 	if looks != 3 || len(parks) != 3 || slices.ContainsFunc(parks, func(p string) bool { return p != StepLicense+":"+CodeNotWritable }) {
 		t.Fatalf("looks %d, parks %v", looks, parks)
 	}
-	if park := rep.Last().Extra["park"]; park != nil {
+	if park := rep.Last().Extra["park"]; park != nil || rep.Yielded() {
 		t.Fatalf("the job is still parked: %v", park)
 	}
 	if b, _ := os.ReadFile(filepath.Join(e.root, filepath.FromSlash(copperGrove))); !bytes.Equal(b, e.accts.body) || e.accts.downloads != 1 {
@@ -1569,7 +1680,7 @@ func TestImportAbandonKeepsTheAccountGate(t *testing.T) {
 		}
 	}
 	h := NewImport(e.opts)
-	release, ok := h.tryGate("acct0001") // an import of the account runs
+	release, ok := h.tryGate("acct0001", nil) // an import of the account runs
 	if !ok {
 		t.Fatal("the gate was taken")
 	}
@@ -1579,9 +1690,280 @@ func TestImportAbandonKeepsTheAccountGate(t *testing.T) {
 	release()
 	h.Abandon(jobs.AbandonContext(context.Background(), false), job)
 	e.tmpEmpty(t)
-	if release, ok := h.tryGate("acct0001"); !ok {
+	if release, ok := h.tryGate("acct0001", nil); !ok {
 		t.Fatal("Abandon kept the account's gate")
 	} else {
 		release()
+	}
+}
+
+func TestImportExplicitPathsAvoidListingAndCheckNewConflicts(t *testing.T) {
+	e := newImportEnv(t)
+	h := NewImport(e.opts)
+	run := func(asin, dest string) error {
+		params := e.params(func(p *ImportParams) { p.ASIN, p.DestPath = asin, dest })
+		_, err := h.Run(context.Background(), jobs.Job{Kind: ImportKind, Params: params}, jobs.LocalReporter())
+		return err
+	}
+	if err := run("B0FAKE0001", "First"); err != nil {
+		t.Fatal(err)
+	}
+	if err := run("B0FAKE0002", "Second"); err != nil || e.srv.lists != 0 {
+		t.Fatalf("second import: %v, %d listings", err, e.srv.lists)
+	}
+	e.srv.books = append(e.srv.books, link.LibraryBook{Path: "New on server", Title: "Another book"})
+	if err := run("B0FAKE0003", "New on server"); conflictOf(err) != link.ConflictBook || e.accts.downloads != 2 {
+		t.Fatalf("new conflict: %v, %d downloads", err, e.accts.downloads)
+	}
+}
+
+func TestRestartAfterPublicationBeforeMarker(t *testing.T) {
+	for _, same := range []bool{true, false} {
+		e := newImportEnv(t)
+		ctx, stop := context.WithCancel(context.Background())
+		e.opts.onProgress = func(p jobs.Progress) {
+			if p.Step == StepPlace && p.Done > 0 {
+				stop()
+			}
+		}
+		_, err := e.run(ctx, e.params(nil))
+		stop()
+		if err == nil {
+			t.Fatal("first run did not stop")
+		}
+		// Model a crash immediately after publication, before writePlaced.
+		content := slices.Clone(e.accts.body)
+		if !same {
+			content[0]++
+		}
+		e.writeLibrary(copperGrove, string(content))
+		e.opts.onProgress = nil
+		e.accts.titleErr = errors.New("Audible offline")
+		_, err = e.resumed(context.Background(), e.params(nil), jobs.LocalReporter())
+		if same && err != nil || !same && conflictOf(err) != link.ConflictFile || e.accts.downloads != 1 {
+			t.Fatalf("same=%t: %v (downloads %d)", same, err, e.accts.downloads)
+		}
+		if b, _ := os.ReadFile(filepath.Join(e.root, copperGrove)); !bytes.Equal(b, content) {
+			t.Fatal("recovery changed the installed bytes")
+		}
+	}
+}
+
+type importPages struct {
+	*stubImportServer
+	pages map[string]*link.LibraryBooks
+	asked []string
+}
+
+func (s *importPages) LibraryBooks(_ context.Context, _ int64, after string, _ int) (*link.LibraryBooks, error) {
+	s.asked = append(s.asked, after)
+	return s.pages[after], nil
+}
+
+func TestImportBatchRefreshesOnlyTheRescannedBooksPage(t *testing.T) {
+	e := newImportEnv(t)
+	h := NewImport(e.opts)
+	srv := &importPages{stubImportServer: e.srv, pages: map[string]*link.LibraryBooks{
+		"":       {Books: []link.LibraryBook{{Path: "A"}}, Next: "first"},
+		"first":  {Books: []link.LibraryBook{{Path: "M"}}, Next: "second"},
+		"second": {Books: []link.LibraryBook{{Path: "Z"}}},
+	}}
+	ctx := context.Background()
+	key := importLibrary{server: "server", pairing: "pair", id: 1}
+	old, reused, err := h.booksFor(ctx, srv, key)
+	if err != nil || reused || len(old) != 3 {
+		t.Fatal("first listing", old, reused, err)
+	}
+	b := link.LibraryBook{Path: "X", Series: []link.SeriesRef{{Name: "Main"}, {Name: "Second series"}}}
+	srv.pages["second"].Books = []link.LibraryBook{b, {Path: "Z"}}
+	h.recordBook(key, b.Path)
+	srv.asked = nil
+	books, reused, err := h.booksFor(ctx, srv, key)
+	if err != nil || !reused || len(books) != 4 || !slices.Equal(books[2].Series, b.Series) || !slices.Equal(srv.asked, []string{"second"}) {
+		t.Fatal("incremental listing", books, reused, srv.asked, err)
+	}
+	if old[2].Path != "Z" {
+		t.Fatal("changed the snapshot of another running import")
+	}
+	key.pairing = "new"
+	srv.asked = nil
+	if _, reused, err := h.booksFor(ctx, srv, key); err != nil || reused || len(srv.asked) != 3 {
+		t.Fatal("listing crossed pairings", reused, srv.asked, err)
+	}
+}
+
+func TestReadyBookRequiresItsPairingTitleAndCompleteFile(t *testing.T) {
+	const asin = "B0FAKE0001"
+	file := filepath.Join(t.TempDir(), "book"+readySuffix)
+	if err := os.WriteFile(file, []byte("book"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	library := importLibrary{server: "srv", pairing: "original", id: 1}
+	m := stagedBook{Server: library.server, Pairing: library.pairing, Title: source.Record{ASIN: asin},
+		placedMarker: placedMarker{Size: st.Size(), ModTime: st.ModTime().UnixNano()}}
+	if err := m.save(file); err != nil {
+		t.Fatal(err)
+	}
+	if readStaged(file, library, asin) == nil || readStaged(file, library, "B0FAKE0002") != nil {
+		t.Fatal("stage did not require the original title")
+	}
+	if readStaged(file, importLibrary{server: "other", pairing: "original"}, asin) != nil ||
+		readStaged(file, importLibrary{server: "srv", pairing: "new"}, asin) != nil {
+		t.Fatal("stage crossed a pairing")
+	}
+	if err := os.Truncate(file, 2); err != nil {
+		t.Fatal(err)
+	}
+	if readStaged(file, library, asin) != nil {
+		t.Fatal("shortened stage accepted")
+	}
+}
+
+// stopAtPlace runs the import until the transfer has staged the bytes, then
+// stops it before publication (a restart's stop: the staged decrypt stays).
+func stopAtPlace(t *testing.T, e *importEnv) {
+	t.Helper()
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	progress := e.opts.onProgress
+	e.opts.onProgress = func(p jobs.Progress) {
+		progress(p)
+		if p.Step == StepPlace && p.Done > 0 {
+			stop()
+		}
+	}
+	if _, err := e.run(ctx, e.params(nil)); err == nil {
+		t.Fatal("the run did not stop")
+	}
+	e.opts.onProgress = progress
+}
+
+// A restart that adopts the book a crash published records it as an install
+// does: a failed rescan's retry finishes from the marker, the staged copy gone.
+func TestAdoptedBookKeepsItsMarkerForTheRetry(t *testing.T) {
+	e := newImportEnv(t)
+	stopAtPlace(t, e)
+	e.writeLibrary(copperGrove, string(e.accts.body)) // published, then the crash
+	e.accts.titleErr = errors.New("Audible offline")
+	e.srv.rescanErr = []error{errors.New("busy"), errors.New("busy"), errors.New("busy")}
+	if _, err := e.resumed(context.Background(), e.params(nil), jobs.LocalReporter()); err == nil {
+		t.Fatal("the rescan failing must fail the job")
+	}
+	res, err := e.run(context.Background(), e.params(nil))
+	if err != nil || e.accts.downloads != 1 || e.accts.licenses != 1 {
+		t.Fatalf("retry = %v, %v (downloads %d, licenses %d)", res, err, e.accts.downloads, e.accts.licenses)
+	}
+	e.tmpEmpty(t)
+}
+
+// A staged decrypt needs nothing more from Audible: a refusal since the stop
+// places it rather than failing and throwing it away.
+func TestRefusedAccountStillPlacesItsStagedBook(t *testing.T) {
+	e := newImportEnv(t)
+	stopAtPlace(t, e)
+	e.accts.acct.RefusedAt, e.accts.acct.LastError, e.accts.acct.RefusalKind = "2026-11-03T10:00:00Z", audibleacct.RefusedText, store.RefusalSignIn
+	if _, err := e.resumed(context.Background(), e.params(nil), jobs.LocalReporter()); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(e.root, copperGrove)); !bytes.Equal(b, e.accts.body) || e.accts.downloads != 1 {
+		t.Fatalf("placed %d bytes after %d downloads", len(b), e.accts.downloads)
+	}
+	e.tmpEmpty(t)
+}
+
+func TestRemovedAccountDiscardsStagedBook(t *testing.T) {
+	e := newImportEnv(t)
+	stopAtPlace(t, e)
+	e.accts.acctErr = audibleacct.ErrNotFound
+	_, err := e.run(t.Context(), e.params(nil))
+	var f *Failure
+	if !errors.As(err, &f) || f.Code != CodeUnknownAccount {
+		t.Fatalf("removed account: %v", err)
+	}
+	e.tmpEmpty(t)
+	if files := e.libraryFiles(); len(files) != 0 {
+		t.Fatalf("placed files for the removed account: %v", files)
+	}
+}
+
+// An import waiting for its account's gate keeps its lane slot while the
+// holder keeps its own (a free slot would have the lane claim the account's
+// whole queue), and gives it back once the holder gives its own back (a
+// parked holder needs one to resume).
+func TestImportGateYieldsOnlyForAHolderThatYielded(t *testing.T) {
+	e := newImportEnv(t)
+	started, release := make(chan struct{}), make(chan struct{})
+	var startOnce, releaseOnce sync.Once
+	releaseAll := func() { releaseOnce.Do(func() { close(release) }) }
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() { cancel(); releaseAll() })
+	e.accts.download = func(_ context.Context, _, dest string, _ audible.DownloadOptions) error {
+		first := false
+		startOnce.Do(func() { first = true; close(started) })
+		if first {
+			<-release
+		}
+		return os.WriteFile(dest, e.accts.body, 0o600)
+	}
+	waiting := make(chan struct{})
+	var waitOnce sync.Once
+	progress := e.opts.onProgress
+	e.opts.onProgress = func(p jobs.Progress) {
+		progress(p)
+		if strings.Contains(p.Message, "other backup") {
+			waitOnce.Do(func() { close(waiting) })
+		}
+	}
+	h := NewImport(e.opts)
+	holder, waiter := jobs.LocalReporter(), jobs.LocalReporter()
+	errs := make(chan error, 2)
+	for i, rep := range []*jobs.Reporter{holder, waiter} {
+		params := e.params(func(p *ImportParams) { p.ASIN = fmt.Sprintf("B0FAKE000%d", i+2); p.DestPath = "Imports/" + p.ASIN })
+		go func() {
+			_, err := h.Run(ctx, jobs.Job{Kind: ImportKind, Params: params}, rep)
+			errs <- err
+		}()
+		if i == 0 {
+			select {
+			case <-started:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the first import never started its download")
+			}
+		}
+	}
+	select {
+	case <-waiting:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the second import never waited for the first")
+	}
+	time.Sleep(gatePoll + gatePoll/2) // a look or two at the holder
+	if waiter.Yielded() {
+		t.Fatal("the waiting import gave its slot back while the holder kept its own")
+	}
+	holder.Yield() // the holder parks
+	deadline := time.Now().Add(3 * gatePoll)
+	for !waiter.Yielded() {
+		if time.Now().After(deadline) {
+			t.Fatal("the waiting import kept its slot from a parked holder")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	releaseAll()
+	for range 2 {
+		select {
+		case err := <-errs:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(30 * time.Second):
+			t.Fatal("an import never finished")
+		}
+	}
+	if waiter.Yielded() {
+		t.Fatal("the waiting import never reclaimed its slot")
 	}
 }

@@ -112,6 +112,9 @@ type Bridge struct {
 	// audiblePush the position sync's push loop (Phase 4c).
 	audible     *audibleacct.Manager
 	audiblePush *audiblesync.Pusher
+	// Placement folders known at startup, including records that have since expired.
+	audibleFolders []audiblejob.PlacementFolder
+	audibleSwept   sync.Map
 	// est caches the heartbeat's estimates (estimates.go of the engine wiring).
 	est estimatesCache
 	// bg runs the tasks a change starts in the background (the re-admits after a
@@ -630,6 +633,7 @@ func (b *Bridge) CheckMappings(ctx context.Context, ids ...int64) {
 					"err", why, "again_at", until.Format(time.RFC3339))
 			}
 			b.Kick()
+			go b.sweepAudible(ctx, cl)
 			b.sweepLibrivox(ctx)
 			b.sweepPodcasts(ctx)
 		}

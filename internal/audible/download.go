@@ -209,7 +209,11 @@ func (c *Client) Download(ctx context.Context, downloadURL, dest string, opts Do
 		held, total = have, size
 	case resp.StatusCode == http.StatusRequestedRangeNotSatisfiable && have > 0:
 		// dest may already be whole: the server says how long the file is.
-		if _, size, ok := parseContentRange(resp.Header.Get("Content-Range")); ok && size == have && (want <= 0 || want == have) {
+		contentRange := resp.Header.Get("Content-Range")
+		if contentRange == "" && want == have {
+			return nil // the recorded or licensed length confirms the partial is whole
+		}
+		if _, size, ok := parseContentRange(contentRange); ok && size == have && (want <= 0 || want == have) {
 			return nil
 		}
 		return restart()

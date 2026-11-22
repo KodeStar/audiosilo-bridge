@@ -47,7 +47,23 @@ func (h *Handler) enrich(ctx context.Context, srv Server, acct store.AudibleAcco
 	}
 	msg := "Adding the ASINs of the matched books"
 	rep.Progress(jobs.Progress{Step: "enriching", Message: msg, Total: len(hits)})
+	// Enrichment is the last network step. Leave the light lane available
+	// for polls and verify jobs throughout the backfill, including its waits.
+	// One backfill at a time keeps the combined PUT rate within the same pace.
+	rep.Yield()
 	deadline := h.now().Add(enrichBudget)
+	waitCtx, cancel := context.WithTimeout(ctx, enrichBudget)
+	defer cancel()
+	select {
+	case h.enriching <- struct{}{}:
+		defer func() { <-h.enriching }()
+	case <-waitCtx.Done():
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		res.EnrichDeferred = len(hits)
+		return nil
+	}
 	gap := enrichGap
 	for i, book := range hits {
 		if i > 0 {

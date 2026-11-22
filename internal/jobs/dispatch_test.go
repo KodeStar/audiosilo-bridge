@@ -2285,7 +2285,13 @@ func TestYieldedStrayFreesItsDispatcher(t *testing.T) {
 		t.Fatal("not admitted")
 	}
 	rep := &Reporter{r: r, ru: ru}
+	if !rep.HoldsSlot() {
+		t.Fatal("an admitted job holds no slot")
+	}
 	rep.Yield()
+	if rep.HoldsSlot() {
+		t.Fatal("a yielded job holds its slot")
+	}
 	r.mu.Lock()
 	held := r.strayWaitingLocked(true, false)
 	r.use[LaneDownload]++ // another download took the slot
@@ -2305,6 +2311,9 @@ func TestYieldedStrayFreesItsDispatcher(t *testing.T) {
 	if held {
 		t.Fatal("a reclaiming stray holds its dispatcher")
 	}
+	if rep.Yielded() || rep.HoldsSlot() {
+		t.Fatal("a job still waiting in Reclaim reads as holding a slot or as yielded")
+	}
 	cancel(errCancelRequested)
 	if err := await(t, reclaimed); err == nil {
 		t.Fatal("a cancelled reclaim succeeded")
@@ -2321,8 +2330,11 @@ func TestLocalReporterYield(t *testing.T) {
 	if rep.Yielded() {
 		t.Fatal("yielded before Yield")
 	}
+	if !rep.HoldsSlot() {
+		t.Fatal("no slot before Yield")
+	}
 	rep.Yield()
-	if !rep.Yielded() {
+	if !rep.Yielded() || rep.HoldsSlot() {
 		t.Fatal("Yield unrecorded")
 	}
 	if err := rep.Reclaim(context.Background()); err != nil || rep.Yielded() {

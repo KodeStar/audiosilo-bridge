@@ -300,3 +300,87 @@ func TestPodcastLookWaitsOnItsUndo(t *testing.T) {
 		return st.Mapped && st.Writable && unanswered == nil
 	})
 }
+
+type emptyBookLibrary struct {
+	books
+	markerSourceFunc
+}
+
+func (s emptyBookLibrary) Book(ctx context.Context, id int64, at string) (*link.Book, error) {
+	return s.books.Book(ctx, id, at)
+}
+
+// A new, empty books library maps once the server reads back the marker the
+// Bridge wrote there (nothing else writes one); a marker the server doesn't
+// read back is removed again, and a marker already there is kept as it is.
+func TestEmptyBooksLibraryRequiresServerMarker(t *testing.T) {
+	const nonce = "0123456789abcdef0123456789abcdef"
+	for _, tc := range []struct {
+		name       string
+		markerID   int64  // a marker already in the folder (0: none)
+		server     string // what the server reads: "back" (the folder's marker), or a nonce
+		bookErr    error
+		mapped     bool
+		asksMarker bool
+	}{
+		{"new empty library", 0, "back", link.ErrNoBook, true, true},
+		{"server reads another folder", 0, "another nonce", link.ErrNoBook, false, true},
+		{"matching marker", 3, "back", link.ErrNoBook, true, true},
+		{"different nonce", 3, "another nonce", link.ErrNoBook, false, true},
+		{"another current library", 4, "back", link.ErrNoBook, false, false},
+		{"book read failed", 3, "back", &link.APIError{Status: 503}, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			file := filepath.Join(dir, MarkerPath)
+			body := fmt.Sprintf(`{"version":1,"library_id":%d,"nonce":"%s"}`, tc.markerID, nonce)
+			if tc.markerID != 0 {
+				if err := os.Mkdir(filepath.Dir(file), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(file, []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			r := newRegistry()
+			r.SetLibraries([]link.Library{{ID: 3, Kind: "books", Root: dir}, {ID: 4, Kind: "books", Root: t.TempDir()}})
+			asked := false
+			source := emptyBookLibrary{books: books{err: tc.bookErr}, markerSourceFunc: func(_ context.Context, id int64) (string, error) {
+				if id != 3 {
+					return "", link.ErrNoMarker
+				}
+				asked = true
+				if tc.server != "back" {
+					return tc.server, nil
+				}
+				b, err := os.ReadFile(file)
+				var m libraryMarker
+				if err != nil || json.Unmarshal(b, &m) != nil || m.LibraryID != id {
+					return "", link.ErrNoMarker
+				}
+				return m.Nonce, nil
+			}}
+			r.Check(t.Context(), source, func(_ int64, root string) (string, bool) { return root, true }, time.Now)
+			st, _ := r.Status(3)
+			if st.Mapped != tc.mapped || st.Writable != tc.mapped || asked != tc.asksMarker {
+				t.Fatalf("status %+v, asked for marker %t", st, asked)
+			}
+			got, err := os.ReadFile(file)
+			switch {
+			case tc.markerID != 0:
+				if err != nil || string(got) != body {
+					t.Fatalf("existing marker changed: %q, %v", got, err)
+				}
+			case tc.mapped:
+				var m libraryMarker
+				if err != nil || json.Unmarshal(got, &m) != nil || m.LibraryID != 3 {
+					t.Fatalf("no marker of library 3 left for the next check: %q, %v", got, err)
+				}
+			default:
+				if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+					t.Fatalf("an unverified marker was left in the library: %v, %v", entries, err)
+				}
+			}
+		})
+	}
+}

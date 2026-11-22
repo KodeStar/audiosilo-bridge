@@ -2284,6 +2284,21 @@ func (p *Reporter) Yielded() bool {
 	return p.ru.yielded
 }
 
+// HoldsSlot reports whether the job holds its lane slot now: false while it
+// has given it back (Yield) and while Reclaim still waits for one, so a job
+// waiting on this one can tell it needs a slot to go on (a LocalReporter: no
+// Yield recorded since its last Reclaim).
+func (p *Reporter) HoldsSlot() bool {
+	if p.ru == nil {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return !p.localYielded
+	}
+	p.r.mu.Lock()
+	defer p.r.mu.Unlock()
+	return p.ru.admitted
+}
+
 // parkState reports whether the job is parked, and with what message.
 func (p *Reporter) parkState() (bool, string) {
 	p.mu.Lock()

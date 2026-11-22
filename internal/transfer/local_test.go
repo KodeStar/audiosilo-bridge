@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 )
@@ -216,8 +217,11 @@ func TestPlaceNoReplaceRace(t *testing.T) {
 			dst := filepath.Join(root, "A", "b.m4b")
 			l := NewLocal()
 			l.link = link
-			l.beforeInstall = func() { writeFile(t, dst, "an administrator's own file") }
-			_, err := l.Place(context.Background(), PlaceRequest{Root: root, RelPath: "A/b.m4b", SrcPath: source(t, "ours")})
+			race := func(dst, body string) func(context.Context) error {
+				return func(context.Context) error { writeFile(t, dst, body); return nil }
+			}
+			_, err := l.Place(context.Background(), PlaceRequest{Root: root, RelPath: "A/b.m4b", SrcPath: source(t, "ours"),
+				BeforeInstall: race(dst, "an administrator's own file")})
 			if !errors.Is(err, ErrExists) {
 				t.Fatalf("err = %v, want ErrExists", err)
 			}
@@ -229,8 +233,8 @@ func TestPlaceNoReplaceRace(t *testing.T) {
 			// The same bytes arriving meanwhile (another run of this job) are fine.
 			root2 := t.TempDir()
 			dst2 := filepath.Join(root2, "A", "b.m4b")
-			l.beforeInstall = func() { writeFile(t, dst2, "ours") }
-			res, err := l.Place(context.Background(), PlaceRequest{Root: root2, RelPath: "A/b.m4b", SrcPath: source(t, "ours")})
+			res, err := l.Place(context.Background(), PlaceRequest{Root: root2, RelPath: "A/b.m4b", SrcPath: source(t, "ours"),
+				BeforeInstall: race(dst2, "ours")})
 			if err != nil || !res.AlreadyPresent {
 				t.Fatalf("same bytes raced in: %+v, %v", res, err)
 			}
@@ -315,4 +319,204 @@ func TestOnDisk(t *testing.T) {
 	if _, err := OnDisk(RootFS(root), "Loose/Book/x.m4b"); err == nil {
 		t.Error("a file where a folder goes was accepted")
 	}
+}
+
+func TestPlaceLinksFinishedSourceAndConfirmsBeforePublication(t *testing.T) {
+	for _, fast := range []bool{true, false} {
+		for _, allowed := range []bool{true, false} {
+			root := t.TempDir()
+			src := source(t, "complete audio")
+			checks := 0
+			refused := errors.New("lease not held")
+			req := PlaceRequest{Root: root, RelPath: "Author/book.m4b", SrcPath: src, LinkSource: fast,
+				BeforeInstall: func(context.Context) error {
+					checks++
+					if _, err := os.Lstat(filepath.Join(root, "Author/book.m4b")); !errors.Is(err, os.ErrNotExist) {
+						t.Fatal("publication preceded lease confirmation")
+					}
+					if !allowed {
+						return refused
+					}
+					return nil
+				}}
+			_, err := NewLocal().Place(context.Background(), req)
+			dst, statErr := os.Stat(filepath.Join(root, "Author/book.m4b"))
+			if checks != 1 || !allowed && (!errors.Is(err, refused) || !errors.Is(statErr, os.ErrNotExist)) {
+				t.Fatalf("allowed=%t checks=%d result=%v stat=%v", allowed, checks, err, statErr)
+			}
+			if allowed {
+				original, _ := os.Stat(src)
+				if err != nil || statErr != nil || (runtime.GOOS == "linux" || runtime.GOOS == "darwin") && os.SameFile(original, dst) != fast {
+					t.Fatalf("fast=%t result=%v stat=%v", fast, err, statErr)
+				}
+			}
+			noTemps(t, root)
+		}
+	}
+}
+
+func TestSweepStagedOnlyRemovesOldPlaceFiles(t *testing.T) {
+	root, outside := t.TempDir(), t.TempDir()
+	const name = ".audiosilo-import-0123456789abcdef.part"
+	now := time.Date(2026, 11, 22, 8, 0, 0, 0, time.UTC)
+	cutoff := now.Add(-7 * 24 * time.Hour)
+	for _, dir := range []string{"Old", "Young", ".private"} {
+		p := filepath.Join(root, dir, name)
+		writeFile(t, p, "audio")
+		at := cutoff
+		if dir == "Young" {
+			at = cutoff.Add(time.Second)
+		}
+		if err := os.Chtimes(p, at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lookalike := filepath.Join(root, ".audiosilo-import-not-ours.part")
+	writeFile(t, lookalike, "mine")
+	if err := os.Chtimes(lookalike, cutoff, cutoff); err != nil {
+		t.Fatal(err)
+	}
+	external := filepath.Join(outside, name)
+	writeFile(t, external, "outside")
+	if err := os.Chtimes(external, cutoff, cutoff); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" {
+		if err := os.Symlink(outside, filepath.Join(root, "alias")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := SweepStaged(context.Background(), root, cutoff, func() bool { return false }); !errors.Is(err, context.Canceled) {
+		t.Fatal("sweep did not stop on remap", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "Old", name)); err != nil {
+		t.Fatal("sweep removed a file after a remap", err)
+	}
+	if err := SweepStaged(context.Background(), root, cutoff, func() bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "Old", name)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("old copy survived", err)
+	}
+	for _, p := range []string{filepath.Join(root, "Young", name), filepath.Join(root, ".private", name), lookalike, external} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatal("unrelated file removed", p, err)
+		}
+	}
+}
+
+func TestPlaceCopiesFinishedSourceAcrossDevices(t *testing.T) {
+	root := t.TempDir()
+	for _, base := range []string{".", "/dev/shm"} {
+		dir, err := os.MkdirTemp(base, ".transfer-test-")
+		if err != nil {
+			continue
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+		src := filepath.Join(dir, "source.m4b")
+		writeFile(t, src, "audio")
+		probe := filepath.Join(root, "probe")
+		err = os.Link(src, probe)
+		if !errors.Is(err, syscall.EXDEV) {
+			_ = os.Remove(probe)
+			continue
+		}
+		res, err := NewLocal().Place(context.Background(), PlaceRequest{Root: root, RelPath: "book.m4b", SrcPath: src, LinkSource: true})
+		if err != nil || res.Size != 5 || read(t, filepath.Join(root, "book.m4b")) != "audio" || read(t, src) != "audio" {
+			t.Fatal("cross-device install", res, err)
+		}
+		noTemps(t, root)
+		return
+	}
+	t.Skip("no second writable filesystem")
+}
+
+// A temp a Place here is still using is never swept, however old it looks: a
+// linked one carries its source's time, and a share's clock may run behind.
+func TestSweepStagedSparesAPlaceInFlight(t *testing.T) {
+	for _, link := range []bool{true, false} {
+		root := t.TempDir()
+		src := source(t, "complete audio")
+		old := time.Now().Add(-30 * 24 * time.Hour)
+		if err := os.Chtimes(src, old, old); err != nil {
+			t.Fatal(err)
+		}
+		swept := false
+		req := PlaceRequest{Root: root, RelPath: "Author/book.m4b", SrcPath: src, LinkSource: link,
+			BeforeInstall: func(ctx context.Context) error {
+				entries, err := os.ReadDir(filepath.Join(root, "Author"))
+				if err != nil {
+					return err
+				}
+				for _, e := range entries {
+					if strings.HasPrefix(e.Name(), tempPrefix) {
+						if err := os.Chtimes(filepath.Join(root, "Author", e.Name()), old, old); err != nil {
+							return err
+						}
+					}
+				}
+				swept = true
+				return SweepStaged(ctx, root, time.Now().Add(-7*24*time.Hour), func() bool { return true })
+			}}
+		if _, err := NewLocal().Place(context.Background(), req); err != nil || !swept {
+			t.Fatalf("link=%t: %v (swept %t)", link, err, swept)
+		}
+		if read(t, filepath.Join(root, "Author", "book.m4b")) != "complete audio" {
+			t.Fatalf("link=%t: the book was not installed", link)
+		}
+		noTemps(t, root)
+		if inUse(".audiosilo-import-0123456789abcdef.part") {
+			t.Fatal("a name nobody uses is in use")
+		}
+	}
+}
+
+// A link keeps its source's group, so a folder that gives a copy another group
+// (a set-group-ID library folder; any folder on macOS) gets the copy.
+func TestPlaceCopiesWhenALinkWouldKeepAnotherGroup(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("no hard-link install here")
+	}
+	src := source(t, "audio")
+	st, err := os.Stat(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srcGid := st.Sys().(*syscall.Stat_t).Gid
+	groups, err := os.Getgroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := -1
+	for _, g := range groups {
+		if g >= 0 && uint32(g) != srcGid {
+			other = g
+			break
+		}
+	}
+	if other < 0 {
+		t.Skip("the test user has no second group")
+	}
+	root := t.TempDir()
+	dir := filepath.Join(root, "Author")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(dir, -1, other); err != nil {
+		t.Skip("can't give the folder another group:", err)
+	}
+	if err := os.Chmod(dir, 0o755|os.ModeSetgid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewLocal().Place(context.Background(), PlaceRequest{Root: root, RelPath: "Author/book.m4b", SrcPath: src, LinkSource: true}); err != nil {
+		t.Fatal(err)
+	}
+	dst, err := os.Stat(filepath.Join(dir, "book.m4b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(st, dst) || dst.Sys().(*syscall.Stat_t).Gid != uint32(other) { //nolint:gosec // G115: a test gid
+		t.Fatalf("linked %t, group %d, want a copy in group %d", os.SameFile(st, dst), dst.Sys().(*syscall.Stat_t).Gid, other)
+	}
+	noTemps(t, root)
 }

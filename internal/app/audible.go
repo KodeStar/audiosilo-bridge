@@ -18,6 +18,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/secrets"
 	"github.com/kodestar/audiosilo-bridge/internal/setup"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
+	"github.com/kodestar/audiosilo-bridge/internal/transfer"
 )
 
 // The Accounts tab's Audible section (Phase 4a): the accounts (audibleacct),
@@ -40,7 +41,9 @@ func (b *Bridge) newAudible(vault secrets.Store, db *store.DB, log *slog.Logger,
 			return nil
 		}})
 	tmp := filepath.Join(b.dataDir, "audible", "tmp")
-	if err := audiblejob.SweepTmp(tmp, time.Now()); err != nil {
+	folders, err := audiblejob.SweepTmp(tmp, time.Now(), serverID())
+	b.audibleFolders = folders
+	if err != nil {
 		log.Warn("audible: sweeping the import's temp folder failed", "err", err)
 	}
 	imp := audiblejob.NewImport(audiblejob.ImportOptions{Accounts: m, ServerID: serverID, Libraries: b.libs, Mount: b.mount,
@@ -51,6 +54,56 @@ func (b *Bridge) newAudible(vault secrets.Store, db *store.DB, log *slog.Logger,
 			return nil
 		}})
 	return m, h, imp
+}
+
+// Sweep an account's library or a recorded placement after its writable check.
+func (b *Bridge) sweepAudible(ctx context.Context, cl *link.Client) {
+	accounts, err := b.audible.Accounts(ctx)
+	if err != nil {
+		b.log.Warn("audible: listing accounts for the library sweep failed", "err", err)
+	}
+	libraries := map[int64][]string{}
+	for _, a := range accounts {
+		if a.LibraryID > 0 && !a.OnOtherServer(cl.ServerID()) {
+			libraries[a.LibraryID] = nil
+		}
+	}
+	for _, f := range b.audibleFolders {
+		if f.Server == cl.ServerID() {
+			libraries[f.LibraryID] = append(libraries[f.LibraryID], f.Dir)
+		}
+	}
+	if len(libraries) == 0 {
+		return
+	}
+	for _, entry := range b.libs.Entries(b.mount) {
+		st := entry.Status
+		folders, wanted := libraries[entry.Library.ID]
+		if !wanted || ctx.Err() != nil || entry.Library.LibraryKind() != "books" || entry.Unknown || st == nil ||
+			!st.Mapped || !st.Writable || st.MountPath != entry.MountPath {
+			continue
+		}
+		// Two libraries mapped to one mount can have different recorded folders.
+		key := struct {
+			server, mount string
+			library       int64
+		}{cl.ServerID(), entry.MountPath, entry.Library.ID}
+		if _, swept := b.audibleSwept.LoadOrStore(key, true); swept {
+			continue
+		}
+		stillMapped := func() bool {
+			cur, known := b.libs.Status(entry.Library.ID)
+			mount, _ := b.mount(entry.Library.ID, entry.Library.Root)
+			return b.conn.Client() == cl && mount == entry.MountPath && known && cur.MountPath == mount && cur.Mapped && cur.Writable
+		}
+		if err := transfer.SweepStaged(ctx, entry.MountPath, time.Now().Add(-audiblejob.PartialMaxAge), stillMapped, folders...); err != nil {
+			if errors.Is(err, context.Canceled) {
+				b.audibleSwept.Delete(key)
+				continue
+			}
+			b.log.Warn("audible: sweeping staged library copies failed", "library", entry.Library.ID, "err", err)
+		}
+	}
 }
 
 // newAudibleSync builds the position sync (Phase 4c): the audible.sync job
