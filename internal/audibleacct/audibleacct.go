@@ -702,7 +702,7 @@ func (m *Manager) Remove(ctx context.Context, srv Server, id string) (warning st
 	switch {
 	case srv == nil:
 		warnings = append(warnings, "the Bridge isn't paired, so the server may still list the account")
-	case srv.ServerID() != a.ServerID:
+	case a.ServerID != "" && srv.ServerID() != a.ServerID:
 		warnings = append(warnings, "the account's server isn't paired with this Bridge, so it may still list the account")
 	default:
 		pairing = srv.PairingID()

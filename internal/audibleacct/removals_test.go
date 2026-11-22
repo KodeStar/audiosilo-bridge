@@ -244,3 +244,19 @@ func TestLocalRemovalFailureKeepsSignIn(t *testing.T) {
 		t.Fatal("removed on the server or Amazon after a local failure")
 	}
 }
+
+// An account recorded while the pairing's server id wasn't known yet (its
+// server_id empty) is still removed on the paired server, as before.
+func TestRemovalWithoutAServerIDGoesToThePairedServer(t *testing.T) {
+	e := newEnv(t)
+	ctx := t.Context()
+	a := e.signIn(t)
+	a.ServerID = ""
+	if err := e.db.MapAudibleAccount(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	if warning, err := e.m.Remove(ctx, e.srv, a.ID); err != nil || warning != "" || len(e.srv.deleted) != 1 {
+		t.Fatalf("remove = %q, %v, DELETEs %v", warning, err, e.srv.deleted)
+	}
+	e.noPendingRemoval(t)
+}
