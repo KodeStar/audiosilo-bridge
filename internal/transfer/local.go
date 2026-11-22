@@ -24,6 +24,7 @@ import (
 
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 	"github.com/kodestar/audiosilo-bridge/internal/mapping"
+	"github.com/kodestar/audiosilo-bridge/internal/progress"
 )
 
 // Errors Place answers (wrapped; test with errors.Is).
@@ -77,11 +78,10 @@ type PlaceResult struct {
 // Local installs into a directory on this machine (a local path or a mounted
 // SMB/NFS share).
 type Local struct {
-	// Seams for tests: the free-space reader, the hard link, and a hook run
-	// just before the install (a racing writer).
-	free          func(dir string) (int64, error)
-	link          fsutil.LinkFunc
-	beforeInstall func()
+	// Seams for tests: the free-space reader and the hard link. A racing
+	// writer is PlaceRequest.BeforeInstall.
+	free func(dir string) (int64, error)
+	link fsutil.LinkFunc
 }
 
 // NewLocal returns a Local transfer.
@@ -217,6 +217,8 @@ func (l *Local) Place(ctx context.Context, req PlaceRequest) (PlaceResult, error
 		res.AlreadyPresent = true
 		return res, nil
 	}
+	// A copy checks the room before creating folders; a link needs none
+	// unless it falls back to a copy (stage checks then).
 	if !req.LinkSource {
 		if err := l.checkFree(req.Root, rel, size); err != nil {
 			return PlaceResult{}, err
@@ -228,14 +230,12 @@ func (l *Local) Place(ctx context.Context, req PlaceRequest) (PlaceResult, error
 			return PlaceResult{}, noSpace(fmt.Errorf("creating the book's folder: %w", err))
 		}
 	}
-	temp, err := l.stage(ctx, root, dir, src, size, req)
+	req.RelPath = rel
+	temp, err := l.stage(ctx, root, src, size, req)
 	if err != nil {
 		return PlaceResult{}, err
 	}
 	defer func() { _ = root.Remove(temp) }() // gone already when the install renamed it
-	if l.beforeInstall != nil {
-		l.beforeInstall()
-	}
 	if req.BeforeInstall != nil {
 		if err := req.BeforeInstall(ctx); err != nil {
 			return PlaceResult{}, fmt.Errorf("confirming the lease before installing the book: %w", err)
@@ -383,9 +383,11 @@ func NearestDir(rootDir, rel string) string {
 	return rootDir
 }
 
-// stage copies src into a new temp file in dir, synced and size-checked, and
-// returns its root-relative name. A failure removes it.
-func (l *Local) stage(ctx context.Context, root *os.Root, dir string, src *os.File, size int64, req PlaceRequest) (string, error) {
+// stage links (req.LinkSource) or copies src into a new temp file beside the
+// cleaned req.RelPath, a copy synced and size-checked, and returns its
+// root-relative name. A failure removes it.
+func (l *Local) stage(ctx context.Context, root *os.Root, src *os.File, size int64, req PlaceRequest) (string, error) {
+	dir := path.Dir(req.RelPath)
 	if _, err := src.Seek(0, io.SeekStart); err != nil {
 		return "", err
 	}
@@ -424,7 +426,7 @@ func (l *Local) stage(ctx context.Context, root *os.Root, dir string, src *os.Fi
 		if err := ctx.Err(); err != nil {
 			return fail(err)
 		}
-		n, err := io.CopyN(f, src, min(1<<20, size-copied))
+		n, err := io.CopyN(f, src, min(progress.EmitEvery, size-copied))
 		if err != nil {
 			return fail(err)
 		}

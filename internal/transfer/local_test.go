@@ -217,8 +217,11 @@ func TestPlaceNoReplaceRace(t *testing.T) {
 			dst := filepath.Join(root, "A", "b.m4b")
 			l := NewLocal()
 			l.link = link
-			l.beforeInstall = func() { writeFile(t, dst, "an administrator's own file") }
-			_, err := l.Place(context.Background(), PlaceRequest{Root: root, RelPath: "A/b.m4b", SrcPath: source(t, "ours")})
+			race := func(dst, body string) func(context.Context) error {
+				return func(context.Context) error { writeFile(t, dst, body); return nil }
+			}
+			_, err := l.Place(context.Background(), PlaceRequest{Root: root, RelPath: "A/b.m4b", SrcPath: source(t, "ours"),
+				BeforeInstall: race(dst, "an administrator's own file")})
 			if !errors.Is(err, ErrExists) {
 				t.Fatalf("err = %v, want ErrExists", err)
 			}
@@ -230,8 +233,8 @@ func TestPlaceNoReplaceRace(t *testing.T) {
 			// The same bytes arriving meanwhile (another run of this job) are fine.
 			root2 := t.TempDir()
 			dst2 := filepath.Join(root2, "A", "b.m4b")
-			l.beforeInstall = func() { writeFile(t, dst2, "ours") }
-			res, err := l.Place(context.Background(), PlaceRequest{Root: root2, RelPath: "A/b.m4b", SrcPath: source(t, "ours")})
+			res, err := l.Place(context.Background(), PlaceRequest{Root: root2, RelPath: "A/b.m4b", SrcPath: source(t, "ours"),
+				BeforeInstall: race(dst2, "ours")})
 			if err != nil || !res.AlreadyPresent {
 				t.Fatalf("same bytes raced in: %+v, %v", res, err)
 			}
