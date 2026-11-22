@@ -324,3 +324,15 @@ func TestRetryCutShortByAStopStaysDue(t *testing.T) {
 		t.Fatalf("after a stopped retry = %+v, %v", r, err)
 	}
 }
+
+// A link that doesn't know its server's id yet can't tell another server's
+// account from its own: the removal goes to the paired server, as before.
+func TestRemovalWhileTheServerIDIsUnknownGoesToThePairedServer(t *testing.T) {
+	e := newEnv(t)
+	a := e.signIn(t)
+	e.srv.noServerID = true
+	if warning, err := e.m.Remove(t.Context(), e.srv, a.ID); err != nil || warning != "" || len(e.srv.deleted) != 1 {
+		t.Fatalf("remove = %q, %v, DELETEs %v", warning, err, e.srv.deleted)
+	}
+	e.noPendingRemoval(t)
+}
