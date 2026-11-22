@@ -64,9 +64,10 @@ func (m *Manager) setSending(account string, on bool) bool {
 }
 
 // removeOnServer sends r's DELETE once. An answer clears r: any 2xx or a 404
-// (the server never knew it), or a refusal (an ended token, a 4xx), which is
-// returned and logged. A failure with no such answer (the network, a 5xx, a
-// 408, a 429) leaves r pending (true) and due again after a backoff: a minute,
+// (the server never knew it), or a refusal (a 4xx), which is returned and
+// logged. Anything else (the network, a 5xx, a 408, a 429, a refused token:
+// the pairing, and its removals, outlive a refusal until an unpair ends it)
+// leaves r pending (true) and due again after a backoff: a minute,
 // doubling to an hour, or the answer's longer Retry-After (at most a day). One
 // cut short by ctx's end (the Bridge stopping) is left as it was: due again at
 // once, at the next start's first heartbeat.
@@ -80,7 +81,7 @@ func (m *Manager) removeOnServer(ctx context.Context, srv Server, r store.Audibl
 	case err == nil, hasStatus && apiErr.Status == http.StatusNotFound:
 		m.clearRemoval(dbCtx, r.Account)
 		return false, nil
-	case errors.Is(err, link.ErrUnauthorized), hasStatus && !apiErr.Transient():
+	case hasStatus && !apiErr.Transient():
 		m.o.Log.Warn("audible: server refused account removal, dropping pending removal", "account", r.Account, "err", err)
 		m.clearRemoval(dbCtx, r.Account)
 		return false, err

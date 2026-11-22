@@ -3406,9 +3406,10 @@ internal/
             recorded it): a heartbeat the server answered sends one that is due,
             in the background (RetryRemoval, no lock; never one already on its
             way, Remove's own included: sending); a 2xx or 404 clears it, a
-            refusal (401, a non-transient 4xx) drops it with a warning, anything
-            else backs off a minute doubling to an hour (a longer Retry-After, at
-            most a day, wins), and one cut short by a stop stays due; another
+            refusal (a non-transient 4xx) drops it with a warning, anything
+            else (a 401 too: a refused token outlives no pairing) backs off a
+            minute doubling to an hour (a longer Retry-After, at most a day,
+            wins), and one cut short by a stop stays due; another
             pairing's are dropped unsent. An account mapped on another server
             (both server ids known) is removed here only. A sign-in again after
             a removal always gets a fresh id, so a late DELETE never reaches it.

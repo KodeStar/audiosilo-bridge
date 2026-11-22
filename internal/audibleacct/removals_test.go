@@ -91,7 +91,6 @@ func TestRemovalTerminalAnswers(t *testing.T) {
 		refused bool
 	}{
 		{"missing", &link.APIError{Status: http.StatusNotFound}, false},
-		{"unauthorized", link.ErrUnauthorized, true},
 		{"forbidden", &link.APIError{Status: http.StatusForbidden}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -292,6 +291,18 @@ func TestRetryRemovalSkipsADeleteOnItsWay(t *testing.T) {
 	e.noPendingRemoval(t)
 }
 
+// A link that doesn't know its server's id yet can't tell another server's
+// account from its own: the removal goes to the paired server, as before.
+func TestRemovalWhileTheServerIDIsUnknownGoesToThePairedServer(t *testing.T) {
+	e := newEnv(t)
+	a := e.signIn(t)
+	e.srv.noServerID = true
+	if warning, err := e.m.Remove(t.Context(), e.srv, a.ID); err != nil || warning != "" || len(e.srv.deleted) != 1 {
+		t.Fatalf("remove = %q, %v, DELETEs %v", warning, err, e.srv.deleted)
+	}
+	e.noPendingRemoval(t)
+}
+
 // A refusal ends the removal, and the page hears the server may still list
 // the account (it isn't tried again).
 func TestRefusedRemovalSaysTheServerMayStillListIt(t *testing.T) {
@@ -325,14 +336,21 @@ func TestRetryCutShortByAStopStaysDue(t *testing.T) {
 	}
 }
 
-// A link that doesn't know its server's id yet can't tell another server's
-// account from its own: the removal goes to the paired server, as before.
-func TestRemovalWhileTheServerIDIsUnknownGoesToThePairedServer(t *testing.T) {
+// A refused token doesn't end the pairing (the Bridge tries it again until an
+// unpair), so the removal stays owed and goes once the token works again.
+func TestRemovalOutlivesARefusedToken(t *testing.T) {
 	e := newEnv(t)
+	ctx := t.Context()
 	a := e.signIn(t)
-	e.srv.noServerID = true
-	if warning, err := e.m.Remove(t.Context(), e.srv, a.ID); err != nil || warning != "" || len(e.srv.deleted) != 1 {
-		t.Fatalf("remove = %q, %v, DELETEs %v", warning, err, e.srv.deleted)
+	e.srv.delErr = link.ErrUnauthorized
+	if warning, err := e.m.Remove(ctx, e.srv, a.ID); err != nil || !strings.Contains(warning, "try again") {
+		t.Fatalf("remove = %q, %v", warning, err)
+	}
+	e.srv.delErr = nil
+	e.m.o.Now = func() time.Time { return time.Now().Add(time.Hour) }
+	e.retry()
+	if len(e.srv.deleted) != 2 || e.srv.deleted[1] != a.ID {
+		t.Fatalf("DELETEs %v", e.srv.deleted)
 	}
 	e.noPendingRemoval(t)
 }
