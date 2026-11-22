@@ -20,6 +20,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -274,8 +275,24 @@ func (l *Local) Place(ctx context.Context, req PlaceRequest) (PlaceResult, error
 			return PlaceResult{}, fmt.Errorf("%w: %s", ErrExists, rel)
 		}
 		res.AlreadyPresent = true
+		return res, nil
 	}
+	syncFolder(root, dir)
 	return res, nil
+}
+
+// syncFolder flushes dir's entries, so the book just installed there outlives
+// a power cut before its caller unlinks the staged source (a linked install
+// shares that file's data). Best effort: Windows can't flush a folder opened
+// read-only, and some network filesystems refuse to.
+func syncFolder(root *os.Root, dir string) {
+	if runtime.GOOS == "windows" {
+		return
+	}
+	if f, err := root.Open(dir); err == nil {
+		_ = f.Sync()
+		_ = f.Close()
+	}
 }
 
 // Matches checks the bytes at a previous placement destination during crash
