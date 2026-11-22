@@ -120,7 +120,9 @@ func TestImportLeaseRefusalFailsWithoutPublishing(t *testing.T) {
 		{"rate limited", &link.APIError{Status: http.StatusTooManyRequests, RetryAfter: time.Hour}, true},
 		{"server unavailable", &link.APIError{Status: http.StatusServiceUnavailable}, true},
 		{"network error", errors.New("connection reset"), true},
-		{"job removed", &link.APIError{Status: http.StatusNotFound}, false},
+		// A proxy's bare 404 while the server restarts reads the same as a
+		// removed job: the decrypt is kept for the next claim either way.
+		{"job not found", &link.APIError{Status: http.StatusNotFound}, true},
 		{"title refused", &link.APIError{Status: http.StatusForbidden, Code: CodeNoRights}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) { testImportLeaseRefusal(t, tc.err, tc.retry) })

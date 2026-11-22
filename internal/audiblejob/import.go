@@ -397,14 +397,16 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 	}
 	defer release()
 	part, decrypted := h.partPaths(p.Account, p.ASIN)
-	var jobGone bool
 	defer func() {
 		if err != nil && ctx.Err() != nil && (jobs.Resumes(ctx) || jobs.Lost(ctx)) {
 			return
 		}
 		// A failure placing the book can be retried with the same decrypt.
 		// Cancellation, a dropped pairing or a definitive refusal ends its use.
-		if err == nil || ctx.Err() != nil || jobGone || bookRefused(err) {
+		// A 404 for the job is no refusal: a proxy in front of a restarting
+		// server answers one too, and a title queued again (by this account)
+		// reuses the decrypt. The start-up sweep bounds what a removed job leaves.
+		if err == nil || ctx.Err() != nil || bookRefused(err) {
 			removeStaged(decrypted)
 		}
 		audible.RemovePartial(part)
@@ -560,12 +562,7 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 		return nil, err
 	}
 	placed, err := h.local.Place(ctx, transfer.PlaceRequest{Root: mount, RelPath: rel, SrcPath: decrypted, LinkSource: true,
-		BeforeInstall: func(ctx context.Context) error {
-			err := rep.ConfirmLease(ctx)
-			var api *link.APIError
-			jobGone = errors.As(err, &api) && (api.Status == http.StatusNotFound || api.Status == http.StatusGone)
-			return err
-		},
+		BeforeInstall: rep.ConfirmLease,
 		Progress: func(copied, total int64) {
 			h.report(rep, jobs.Progress{Step: StepPlace, Message: "Copying the book into the library", Done: int(copied), Total: int(total)})
 		}})

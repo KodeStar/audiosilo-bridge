@@ -3622,7 +3622,9 @@ internal/
             ffmpeg keeps its 0644 mode) and becomes .ready.m4b, with a .json beside
             it (server, pairing, the title, the planned placement, size, mtime_ns),
             only once ffmpeg succeeded and it is synced. A stop, a lost claim
-            or a temporary placement failure keeps that pair. Cancellation,
+            or a temporary placement failure keeps that pair, and so does a 404
+            for the job at the lease check (a proxy answers one while the server
+            restarts; the start-up sweep bounds a removed job's). Cancellation,
             a permanent refusal of the book or a recorded install clears it.
             The next run with a staged book (readStaged: the same server,
             pairing, ASIN, size and mtime) skips the title read, the license, the
