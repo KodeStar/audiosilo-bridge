@@ -761,9 +761,21 @@ func TestContributeLocalModeUnresolvedSlugUsesPlaceholder(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := json.Unmarshal(raw, &side); err != nil || side.Work != slug || len(side.Sources) != 0 {
+		// The bare community source: no ref naming the placeholder, and still the
+		// one entry meta's schemas ask for.
+		if err := json.Unmarshal(raw, &side); err != nil || side.Work != slug ||
+			len(side.Sources) != 1 || side.Sources[0].Type != sourceTypeCommunity || side.Sources[0].Ref != "" {
 			t.Fatalf("%s: work %q, sources %+v, err %v", name, side.Work, side.Sources, err)
 		}
+	}
+	// The done pass re-composes the description with these sidecars' work and
+	// sources: they must still carry one.
+	chars, err := describeBasis(b.WorkDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkComposable(chars); err != nil {
+		t.Fatalf("an unmatched local book's sidecars can't carry a description: %v", err)
 	}
 	rows := rowsByKind(t, db, b.ID)
 	if note := rows[store.ContribKindCharacters].Note; note == "" {

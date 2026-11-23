@@ -710,8 +710,10 @@ internal/
             Config.ExportRoot, never set by the Bridge, also copies them to
             <export>/<slug>/<kind>.json, the zip layout). A title-derived placeholder
             names a local sidecar's work, but its sources cite only a recorded or
-            resolved work id (or a local ASIN/ISBN), never the placeholder, and no
-            coverage is asked for it. resolveWorkSlug adopts a 301 survivor
+            resolved work id (or a local ASIN/ISBN), never the placeholder (with
+            none, the bare community source: the schemas need one, and the done
+            pass re-composes the description with it), and no coverage is asked
+            for it. resolveWorkSlug adopts a 301 survivor
             (contrib.AdoptLiveWork) and parks core_pending with contrib.ReleaseWaitMsg
             while a merged core row's work is unreleased (issue mode only: a local
             book files nothing and keeps the merged slug); a duplicate-answered core

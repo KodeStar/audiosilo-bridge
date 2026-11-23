@@ -882,10 +882,13 @@ func reconcileSidecar(path, slug, sourceRef string) error {
 }
 
 // contributionSources returns the one community provenance entry permitted by the
-// sidecar contract. The ref names the actual audiobook edition, not this tool.
+// sidecar contract. The ref names the actual audiobook edition, not this tool; with
+// none known (an unmatched local book) the entry stays the bare community source:
+// meta's schemas need one (sources minItems 1), and a description composed from
+// these sidecars carries their sources.
 func contributionSources(sourceRef string) []model.Source {
 	if sourceRef == "" {
-		return []model.Source{}
+		return []model.Source{{Type: sourceTypeCommunity}}
 	}
 	return []model.Source{{Type: sourceTypeCommunity, Ref: sourceRef}}
 }
