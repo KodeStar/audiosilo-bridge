@@ -146,6 +146,10 @@ func (h *Handler) fromKeptTranscript(ctx context.Context, eng Engine, r *run, ol
 	}
 	defer release()
 	old, err = h.o.DB.GetBook(ctx, old.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		// Gone while the job waited: nothing to reuse (create goes on without it).
+		return false, nil
+	}
 	if err != nil {
 		return false, err
 	}
@@ -156,9 +160,11 @@ func (h *Handler) fromKeptTranscript(ctx context.Context, eng Engine, r *run, ol
 	if kept, err := h.o.DB.TranscriptRetained(ctx, old.ID, cutoff); err != nil || !kept {
 		return false, err
 	}
+	// A run whose folder lies outside the work root (a data folder moved since)
+	// is never reused nor removed here: the job clears it and starts over.
 	wd, ok := scratch.Confined(h.o.WorkRoot, old.WorkDir)
 	if !ok {
-		return false, errors.New("the earlier run's work folder is outside the work root")
+		return false, nil
 	}
 	m, err := audio.ReadManifest(wd)
 	if err != nil {
@@ -207,6 +213,11 @@ func (h *Handler) fromKeptTranscript(ctx context.Context, eng Engine, r *run, ol
 		return false, err
 	}
 	b, err := h.o.DB.ReplaceMappedBook(ctx, &old, nb, r.generateBook())
+	if errors.Is(err, store.ErrNotContinuable) {
+		// Another job follows the earlier run now (or another book shares its
+		// folder): it isn't this job's to replace.
+		return false, errEarlierRunBusy
+	}
 	if err != nil {
 		return false, err
 	}

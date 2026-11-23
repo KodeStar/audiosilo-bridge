@@ -1927,3 +1927,36 @@ func TestTranscriptCleanupWithARelativeWorkRoot(t *testing.T) {
 		t.Fatalf("cleanup key kept: %v %v", found, err)
 	}
 }
+
+// An earlier run the job can't reuse is no reason to fail it: one whose folder
+// lies outside the work root (a data folder moved since), or one gone while the
+// job waited for the engine's hold, leaves create to clear it and start over.
+func TestKeptTranscriptNotReusableFallsThrough(t *testing.T) {
+	ctx := t.Context()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	h := New(Options{DB: db, WorkRoot: filepath.Join(t.TempDir(), "work"), RetentionDays: 30})
+	r := &run{rep: jobs.LocalReporter()}
+	outside, err := db.CreateBook(ctx, store.NewBook{SourcePath: "/Moved", WorkDir: filepath.Join(t.TempDir(), "old-data", "work", "x"),
+		Title: "Moved", Kind: "audio", State: "done"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := h.fromKeptTranscript(ctx, nil, r, outside, store.NewBook{}); ok || err != nil {
+		t.Fatalf("outside the work root: %v %v", ok, err)
+	}
+	gone, err := db.CreateBook(ctx, store.NewBook{SourcePath: "/Gone", WorkDir: filepath.Join(h.o.WorkRoot, "gone"),
+		Title: "Gone", Kind: "audio", State: "done"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteBook(ctx, gone.ID); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := h.fromKeptTranscript(ctx, nil, r, gone, store.NewBook{}); ok || err != nil {
+		t.Fatalf("gone meanwhile: %v %v", ok, err)
+	}
+}
