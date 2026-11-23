@@ -14,8 +14,9 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/transcript"
 )
 
-// manifestAtBook resolves source reads against the engine book. The stored
-// manifest stays exactly as ASR fingerprinted it, including across a move.
+// manifestAtBook resolves source reads against the engine book. It never writes
+// the manifest: the stored one stays as ASR fingerprinted it across a move, until
+// chapter detection writes its detected manifest (made at the book's place now).
 func manifestAtBook(m audio.Manifest, source string) (audio.Manifest, error) {
 	if source == "" || source == m.Source || (m.Style != audio.StyleFiles && source == filepath.Dir(m.Source)) {
 		return m, nil

@@ -278,7 +278,7 @@ func (e *Executor) chapterDetect(ctx context.Context, book store.Book, r schedul
 	}
 	manifest, err := manifestAtBook(detectedManifest(layer.manifest, det.Chapters), book.AudioSource())
 	if err != nil {
-		return scheduler.StageResult{}, err
+		return scheduler.StageResult{}, fmt.Errorf("chapter_detecting: find the book's audio: %w", err)
 	}
 	docs := tl.split(manifest.Chapters)
 	fp, err := e.remapTranscripts(book.WorkDir, manifest, docs)
