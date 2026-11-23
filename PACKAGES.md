@@ -2223,6 +2223,8 @@ internal/
             and the link takes any 2xx or a 404 as done, a cut-short body too,
             and keeps any other answer's HTTP status as an APIError, bridge#40;
             AudibleAccountInput sends no sync, the console's alone since 4c, bridge#50),
+            RejectedAudibleTitles (GET .../titles, the account's titles marked
+            Not this book as {asin, rejected}, paged by ASIN before matching),
             PutAudibleTitles (<= MaxAudibleTitles 500 per call, poll_id + final; a
             nil list sent as []; 404 unknown_account -> ErrUnknownAccount; each
             AudibleTitle also carries contested_path (omitempty) and planned
@@ -3508,8 +3510,9 @@ internal/
             back-up-everything skips them) and ContestedPath (the book's path,
             contested_path, omitted otherwise), except a title whose number
             DISAGREES with the book's (another volume: plainly not here, no
-            reason). Each unmatched title (contested included; never a matched
-            one) carries Planned (plan.go, titlePlanner): where a backup would go,
+            reason). A title marked Not this book makes no claim and gets its
+            own backup plan. Each named, unmatched title (contested included)
+            carries Planned (plan.go, titlePlanner): where a backup would go,
             the import's own destination() for the same record, books and the
             params' template (no dest_path: the console's override is checked
             when the backup starts), {library_id, path (after spelled), file, kind
@@ -3627,9 +3630,10 @@ internal/
             verdict, the BookMatcher picking that book for the title, not
             SpanMismatch and not a twin (importjob.Twins, bridge#64); the book the rescan answers decides: one of those takes
             the ASIN only on its verdict, any other is new (the title's own, a pack
-            placed as a pack included) and takes it; since a destination in a
-            listed book's folder is exists, the one join left is a dest_path into
-            a new disc folder of a disc set, which never takes it. Result
+            placed as a pack included) and takes it. A destination in a disc
+            folder also checks for indexed sibling discs. When a rescan joins one
+            at their parent, the parent keeps its ASIN. A matching existing book
+            can take the ASIN only while the title is unmarked. Result
             {library_id, path (the book's, from the rescan), files [{path, size}],
             bytes, enriched}; a failure is Failure {code, message} as both result
             and error. The license's key and iv live in memory and ffmpeg's argv

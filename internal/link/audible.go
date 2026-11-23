@@ -241,6 +241,48 @@ func (c *Client) PutAudibleTitles(ctx context.Context, account string, t Audible
 	return out.Stored, nil
 }
 
+// RejectedAudibleTitles reads the account's "Not this book" decisions before matching.
+// Older servers have only the PUT on this path. A missing decision defaults to false.
+func (c *Client) RejectedAudibleTitles(ctx context.Context, account string) (map[string]bool, error) {
+	rejected := map[string]bool{}
+	q := url.Values{}
+	for {
+		var page struct {
+			Titles []struct {
+				ASIN     string `json:"asin"`
+				Rejected bool   `json:"rejected"`
+			} `json:"titles"`
+			Next string `json:"next"`
+		}
+		err := c.do(ctx, http.MethodGet, audiblePath(account)+"/titles", q, nil, &page)
+		if err != nil {
+			var e *APIError
+			if errors.As(err, &e) {
+				switch {
+				case e.Status == http.StatusNotFound && e.Code == "unknown_account":
+					return nil, fmt.Errorf("%w: %w", ErrUnknownAccount, err)
+				case q.Get("after") == "" && (e.Status == http.StatusMethodNotAllowed ||
+					(e.Status == http.StatusNotFound && (e.Code == "not_found" || e.Code == ""))):
+					return nil, nil
+				}
+			}
+			return nil, err
+		}
+		for _, t := range page.Titles {
+			if t.Rejected {
+				rejected[t.ASIN] = true
+			}
+		}
+		if page.Next == "" {
+			return rejected, nil
+		}
+		if page.Next <= q.Get("after") {
+			return nil, errors.New("the server repeated an Audible title decisions page")
+		}
+		q.Set("after", page.Next)
+	}
+}
+
 // LibraryBooks reads one page of a books library's indexed books, by path:
 // after is the previous page's Next ("" for the first), limit at most
 // MaxLibraryBooks (0 for the server's default). Next is "" on the last page.

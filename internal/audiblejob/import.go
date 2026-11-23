@@ -215,6 +215,7 @@ type ImportAccounts interface {
 
 // ImportServer is the part of the server link an import calls (*link.Client).
 type ImportServer interface {
+	RejectedAudibleTitles(ctx context.Context, account string) (map[string]bool, error)
 	Book(ctx context.Context, libraryID int64, path string) (*link.Book, error)
 	LibraryBooks(ctx context.Context, libraryID int64, after string, limit int) (*link.LibraryBooks, error)
 	Rescan(ctx context.Context, libraryID int64, path string) (string, error)
@@ -723,6 +724,19 @@ func (h *Importer) prepare(ctx context.Context, p ImportParams, part, decrypted,
 	return os.Rename(work, decrypted)
 }
 
+// isDiscFolder mirrors the server's metadata.IsDiscFolder for the rescan join.
+func isDiscFolder(name string) bool {
+	name = discSeparators.Replace(strings.ToLower(strings.TrimSpace(name)))
+	for _, prefix := range []string{"cd", "disc", "disk"} {
+		if number, ok := strings.CutPrefix(name, prefix); ok && strings.Trim(number, "0123456789") == "" {
+			return true
+		}
+	}
+	return false
+}
+
+var discSeparators = strings.NewReplacer(" ", "", "-", "", ".", "", "_", "")
+
 // joinedBooks is, for each book of the library the file at rel could join (the
 // paths the server's rescan can answer for a book it already had: the file's
 // own, its folder's, or a disc set's above it), whether that book may take the
@@ -735,27 +749,32 @@ func (h *Importer) prepare(ctx context.Context, p ImportParams, part, decrypted,
 // one not listed here is new, the title itself (a pack placed as a pack
 // included), and takes the ASIN.
 func joinedBooks(rec source.Record, books []link.LibraryBook, rel string) map[string]bool {
-	var joins, twins map[string]bool
+	joins := map[string]bool{}
+	var twins map[string]bool
 	var match link.LibraryBook
 	matched, looked := false, false
-	for _, at := range []string{rel, path.Dir(rel), path.Dir(path.Dir(rel))} {
-		if at == "." {
+	dir := path.Dir(rel)
+	parent := path.Dir(dir)
+	disc := isDiscFolder(path.Base(dir))
+	sibling := false
+	for _, b := range books {
+		if disc && b.Path != dir && path.Dir(b.Path) == parent && isDiscFolder(path.Base(b.Path)) {
+			sibling = true
+		}
+		if b.Path == "." || (b.Path != rel && b.Path != dir && b.Path != parent) {
 			continue
 		}
-		for _, b := range books {
-			if b.Path != at {
-				continue
-			}
-			if !looked {
-				match, matched = importjob.MatchInBooks(books, rec)
-				twins = importjob.Twins(books)
-				looked = true
-			}
-			if joins == nil {
-				joins = map[string]bool{}
-			}
-			joins[b.Path] = matched && match.Path == b.Path && !importjob.SpanMismatch(rec, b) && !twins[b.Path]
+		if !looked {
+			match, matched = importjob.MatchInBooks(books, rec)
+			twins = importjob.Twins(books)
+			looked = true
 		}
+		joins[b.Path] = matched && match.Path == b.Path && !importjob.SpanMismatch(rec, b) && !twins[b.Path]
+	}
+	if sibling {
+		// A book override can join the new disc and the indexed sibling
+		// under their parent, even when the parent had no index entry.
+		joins[parent] = false
 	}
 	return joins
 }
@@ -785,8 +804,19 @@ func (h *Importer) finish(ctx context.Context, rep *jobs.Reporter, srv ImportSer
 
 	h.recordBook(library, bookPath)
 	enrich, joined := in.joins[bookPath]
-	if !joined {
-		enrich = true // a new book: the title's own
+	switch {
+	case !joined:
+		// Older placement markers may predate the sibling-disc check. If the
+		// rescan joined this disc at its parent it contains another disc.
+		dir := path.Dir(rel)
+		enrich = bookPath != path.Dir(dir) || !isDiscFolder(path.Base(dir))
+	case enrich:
+		// A previous attempt's marker may also predate the admin's rejection.
+		rejected, err := srv.RejectedAudibleTitles(ctx, account)
+		if err != nil {
+			return nil, fmt.Errorf("checking the title before enriching a joined book: %w", err)
+		}
+		enrich = !rejected[asin]
 	}
 	enriched := false
 	if enrich {

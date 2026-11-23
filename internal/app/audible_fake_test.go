@@ -58,7 +58,9 @@ func (s *audibleServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"books": []link.LibraryBook{
 			{Path: "Quill/The Glass Orchard", Title: "The Glass Orchard", Authors: []string{"Mara Quill"}, ASIN: "B0FAKE0001"},
 		}, "next": nil})
-	case strings.HasSuffix(p, "/titles"):
+	case r.Method == http.MethodGet && strings.HasSuffix(p, "/titles"):
+		_, _ = io.WriteString(w, `{"titles":[],"next":""}`)
+	case r.Method == http.MethodPut && strings.HasSuffix(p, "/titles"):
 		var t link.AudibleTitles
 		_ = json.NewDecoder(r.Body).Decode(&t)
 		s.titles = append(s.titles, t)
