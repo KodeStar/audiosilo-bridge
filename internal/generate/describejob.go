@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/agent"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
@@ -313,6 +314,14 @@ func (h *Handler) describeParked(ctx context.Context, r *run, d Describer, bookI
 		if !parked {
 			r.rep.Progress(jobs.Progress{Step: pipeline.DescribeStage, Message: "Writing a description", Total: 1,
 				Extra: r.describeExtra(spent)})
+		} else {
+			// The park let go of the book: another job may have replaced, removed or
+			// begun its run since.
+			b, err := h.recheckNotes(ctx, r)
+			if err != nil {
+				return described{}, spent, err
+			}
+			bookID, r.bookID = b.ID, b.ID
 		}
 		mark := h.wakeMark()
 		got, err := h.describeHeld(ctx, d, bookID)
@@ -347,6 +356,41 @@ func (h *Handler) describeParked(ctx context.Context, r *run, d Describer, bookI
 			}
 		default:
 			return described{}, spent, fmt.Errorf("could not write a description: %w", err)
+		}
+	}
+}
+
+// recheckNotes runs a start's checks again before a try after a park: the
+// library mapped and writable and the book's folder writable where the book is
+// now (parking until they are, as a resumed job does), and its notes still there
+// with no other job making them again (notesBook, which fails the job as at the
+// start). It returns the engine book whose notes describe the book now.
+func (h *Handler) recheckNotes(ctx context.Context, r *run) (store.Book, error) {
+	for {
+		if err := h.waitMapped(ctx, r, false); err != nil {
+			return store.Book{}, err
+		}
+		err := h.adoptMove(ctx, r, false)
+		if errors.Is(err, errMoveUnconfirmed) {
+			err = nil // the move stays pending; the save adopts it
+		}
+		if err == nil {
+			err = r.relocate()
+		}
+		if err == nil {
+			err = h.waitWritable(ctx, r)
+		}
+		switch {
+		case err == nil:
+			return h.notesBook(ctx, r)
+		case ctx.Err() != nil:
+			return store.Book{}, ctx.Err()
+		case errors.Is(err, errRemapped):
+			continue
+		}
+		h.park(r, parkBookNotWritable, "the Bridge can't find the book's folder: "+err.Error())
+		if err := h.recheckWait(ctx, r, time.Now().Add(h.o.Recheck)); err != nil {
+			return store.Book{}, err
 		}
 	}
 }

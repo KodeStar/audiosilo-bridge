@@ -400,6 +400,45 @@ func TestDescribeJobParks(t *testing.T) {
 	}
 }
 
+// A try after a rate limit's park (which let go of the book) runs the start's
+// checks again: a run the engine began on the book meanwhile refuses the job as
+// at the start, and nothing is described mid-run.
+func TestDescribeJobRetryChecksTheBookAgain(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.generated(66)
+	d := &fakeDescriber{db: hr.db, freeFail: true, fail: func(call int) error {
+		if call == 1 {
+			return scheduler.ParkWithCodeAfter(state.ParkAgentRateLimited, "rate limited", time.Now().Add(time.Hour))
+		}
+		return nil
+	}}
+	h := hr.describeHandler(d)
+	stop := hr.runAll(h)
+	defer stop()
+	hr.srv.addDescribe(67, "Author/Book")
+	hr.waitFor("the rate limit's park", func() bool {
+		return hr.srv.saw(67, func(u link.Update, p map[string]any) bool {
+			park, _ := p["park"].(map[string]any)
+			return u.State != nil && *u.State == link.StateNeedsAttention && park["code"] == "agent_rate_limited"
+		})
+	})
+	b := hr.engineBook(66)
+	if err := hr.db.SetBookState(context.Background(), b.ID, "asr", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Retry(context.Background(), 67); err != nil {
+		t.Fatal(err)
+	}
+	hr.waitFor("the refusal", func() bool { s, _ := hr.srv.final(67); return s == link.StateFailed })
+	if _, u := hr.srv.final(67); u.Error == nil || *u.Error != string(errDescribeGenerating) {
+		t.Fatalf("failed with %v, want %q", u.Error, errDescribeGenerating)
+	}
+	if calls := d.calls(); calls != 1 {
+		t.Fatalf("describe calls = %d, want 1 (none on a book mid-run)", calls)
+	}
+}
+
 // A describe job parked on the monthly budget (retry_at the 1st) tries again
 // when the budget is raised on the page (WakeParked), not before; a wake for
 // another park leaves it.
