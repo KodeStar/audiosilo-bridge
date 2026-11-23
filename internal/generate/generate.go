@@ -2282,27 +2282,13 @@ func (h *Handler) adoptMove(ctx context.Context, r *run, record bool) error {
 }
 
 func (h *Handler) recordMove(ctx context.Context, r *run, p place, rel string) error {
-	source, ok, err := metaops.AllowedPath(p.full, []string{r.mount})
-	if err != nil || !ok {
-		return errors.New("the moved book leaves the library's folder")
-	}
 	b, err := h.o.DB.GetBook(ctx, r.bookID)
 	if err != nil {
 		return err
 	}
-	ebook := b.EbookPath
-	if ebook != "" {
-		moved := filepath.Join(p.dir, filepath.Base(ebook))
-		if p.single {
-			moved = singleEpub(p)
-		}
-		ebook, ok, err = metaops.AllowedPath(moved, []string{r.mount})
-		if err != nil || !ok {
-			return errors.New("the moved ebook leaves the library's folder")
-		}
-	}
-	if b.IsAudioRun() {
-		source = store.AudioRunKey(source)
+	source, ebook, err := movedSources(r.mount, p, b)
+	if err != nil {
+		return err
 	}
 	err = h.o.DB.MoveGenerateBook(ctx, r.job.ID, b.ID, rel, source, ebook)
 	if errors.Is(err, store.ErrDuplicate) {
@@ -2319,6 +2305,29 @@ func (h *Handler) recordMove(ctx context.Context, r *run, p place, rel string) e
 	}
 	r.epub = ebook
 	return nil
+}
+
+// movedSources are engine book b's source path key and .epub at place p, the
+// book's place now, each refused when it leaves the library's folder (mount).
+func movedSources(mount string, p place, b store.Book) (source, ebook string, err error) {
+	source, ok, err := metaops.AllowedPath(p.full, []string{mount})
+	if err != nil || !ok {
+		return "", "", errors.New("the moved book leaves the library's folder")
+	}
+	if ebook = b.EbookPath; ebook != "" {
+		moved := filepath.Join(p.dir, filepath.Base(ebook))
+		if p.single {
+			moved = singleEpub(p)
+		}
+		ebook, ok, err = metaops.AllowedPath(moved, []string{mount})
+		if err != nil || !ok {
+			return "", "", errors.New("the moved ebook leaves the library's folder")
+		}
+	}
+	if b.IsAudioRun() {
+		source = store.AudioRunKey(source)
+	}
+	return source, ebook, nil
 }
 
 // clearEndedRunAt deletes the engine book at source path key when its run has

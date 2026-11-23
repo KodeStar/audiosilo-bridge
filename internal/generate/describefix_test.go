@@ -481,7 +481,8 @@ func TestDescribeJobResumedOntoAnUnmappedLibrary(t *testing.T) {
 
 // A book that moved after its generate job ended: the Bridge's records stayed at
 // the old place, but the book's bridge.json moved with it and names the run, whose
-// notes the description-only job reads; the job's mapping follows the book.
+// notes the description-only job reads; the job's mapping and the run's source
+// follow the book.
 func TestDescribeJobFindsARunThatMovedAfterItsJob(t *testing.T) {
 	t.Parallel()
 	hr := newHarness(t)
@@ -504,6 +505,15 @@ func TestDescribeJobFindsARunThatMovedAfterItsJob(t *testing.T) {
 	}
 	if m, err := hr.db.GetGenerateBook(context.Background(), 93); err != nil || m.RelPath != "Author/Book (2026)" {
 		t.Fatalf("the run's mapping = %+v, %v", m, err)
+	}
+	// Its source path followed too, so a regenerate at the new place finds the
+	// run (and its kept transcript).
+	moved, err := filepath.EvalSymlinks(filepath.Join(hr.root, "Author", "Book (2026)"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b := hr.engineBook(93); b.SourcePath != moved {
+		t.Fatalf("the run's source = %q, want %q", b.SourcePath, moved)
 	}
 }
 

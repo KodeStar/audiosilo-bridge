@@ -217,7 +217,7 @@ func (h *Handler) latestGenerated(ctx context.Context, r *run) (store.Book, erro
 // names (store.ErrNotFound for none): a book that moved after its job ended took
 // that file along, while the Bridge's records (the book's source path, the job's
 // mapping) stayed at the old place. Only this library's run, at a source inside its
-// folder, counts; the job's mapping follows the book from then on.
+// folder, counts; its source path and the job's mapping follow the book from then on.
 func (h *Handler) namedRun(ctx context.Context, r *run) (store.Book, error) {
 	prov := readProvenance(filepath.Join(r.place.dir, AttachDir), r.place.prefix+provenanceName)
 	var kind string
@@ -240,10 +240,17 @@ func (h *Handler) namedRun(ctx context.Context, r *run) (store.Book, error) {
 	if _, ok, err := metaops.AllowedPath(b.SourcePath, []string{r.mount}); err != nil || !ok {
 		return store.Book{}, store.ErrNotFound
 	}
-	if err := h.o.DB.SetGenerateBookPath(ctx, jobID, r.rel); err != nil {
-		h.o.Log.Warn("generate: recording the book's new path failed", "job", jobID, "err", err)
+	// The run's source moves with its mapping, so a later regenerate finds it
+	// (and its kept transcript) at the book's place.
+	source, ebook, err := movedSources(r.mount, r.place, b)
+	if err == nil {
+		err = h.o.DB.MoveGenerateBook(ctx, jobID, b.ID, r.rel, source, ebook)
 	}
-	return b, nil
+	if err != nil {
+		h.o.Log.Warn("generate: recording the book's new path failed", "job", jobID, "err", err)
+		return b, nil
+	}
+	return h.o.DB.GetBook(ctx, b.ID)
 }
 
 // described is a description the step wrote (or reused), read back from the
