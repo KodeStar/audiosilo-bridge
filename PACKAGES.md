@@ -705,8 +705,13 @@ internal/
             covered -> submit per contribution.mode, resume-idempotent via the
             contributions rows; export.go composes the download zip + core-proposal
             JSON injected into api) - EVERY stage is now real. Sidecars go to
-            Config.ContribCommunityRepo (issue mode) or <export>/<slug>/<kind>.json
-            (local mode, also the zip layout). resolveWorkSlug adopts a 301 survivor
+            Config.ContribCommunityRepo (issue mode) or stay in the work dir (local
+            mode: the generate job publishes them beside the book; only an explicit
+            Config.ExportRoot, never set by the Bridge, also copies them to
+            <export>/<slug>/<kind>.json, the zip layout). A title-derived placeholder
+            names a local sidecar's work, but its sources cite only a recorded or
+            resolved work id (or a local ASIN/ISBN), never the placeholder, and no
+            coverage is asked for it. resolveWorkSlug adopts a 301 survivor
             (contrib.AdoptLiveWork) and parks core_pending with contrib.ReleaseWaitMsg
             while a merged core row's work is unreleased (issue mode only: a local
             book files nothing and keeps the merged slug); a duplicate-answered core
@@ -1230,8 +1235,11 @@ internal/
             (a call that works with one moves the sign-in's last_ok_at: NewClientFor
             wires both hooks) - the token NEVER enters argv/logs/
             errors, leak-canary tested). NewClientFor records where the token came
-            from: AppFiled() (a device token) skips the labels check, since meta's
-            routing workflow labels an issue the App filed. corrections.go (Phase
+            from (CredentialSource; CreateIssue stamps it on Issue.FiledWith, and the
+            filing markers keep it): a device token skips the labels check, since
+            meta's routing workflow labels an issue the App filed; an env or gh
+            filing carries ManualIntakeNote (IntakeNote, AddIntakeNote: the jobs'
+            intake_notes / intake_note). corrections.go (Phase
             2b): CorrectionBatchIssue composes meta's correction-batch issue
             ([corrections] <title>; labels data + data:correction-batch; Record,
             Changes as fenced JSON {v:1, source, changes}, Evidence / source, the CC0
@@ -4337,8 +4345,8 @@ internal/
             acts on the book meanwhile (a new generate job waits giveWayTries polls for
             a held earlier run, deleteEarlier: the server asks a describe job to give
             way to it, which it does at its next report; then "try again in a
-            minute"); a park waits with the hold let go (the job's in-process
-            rate-limit backoff, noWait false, does not). The job sets r.bookID once
+            minute"); a park waits with the hold let go (a rate limit parks at once,
+            never waited out under the hold). The job sets r.bookID once
             it has its engine book, so its own parks are lifted by the save that
             clears them, never between two tries. describeParked runs it: an agent park
             (rate limit, budget, credential, unavailable) is the job's park (code,
