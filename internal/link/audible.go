@@ -242,7 +242,11 @@ func (c *Client) PutAudibleTitles(ctx context.Context, account string, t Audible
 }
 
 // RejectedAudibleTitles reads the account's "Not this book" decisions before matching.
-// Older servers have only the PUT on this path. A missing decision defaults to false.
+// Older servers have only the PUT on this path: their API catch-all answers the
+// GET 405 (every server with the Audible routes has it), which reads as no
+// decisions. A 404 is no such answer (a proxy in front of a restarting server
+// says it too), so it fails rather than let a rejected title match again.
+// A missing decision defaults to false.
 func (c *Client) RejectedAudibleTitles(ctx context.Context, account string) (map[string]bool, error) {
 	rejected := map[string]bool{}
 	q := url.Values{}
@@ -261,8 +265,7 @@ func (c *Client) RejectedAudibleTitles(ctx context.Context, account string) (map
 				switch {
 				case e.Status == http.StatusNotFound && e.Code == "unknown_account":
 					return nil, ErrUnknownAccount
-				case q.Get("after") == "" && (e.Status == http.StatusMethodNotAllowed ||
-					(e.Status == http.StatusNotFound && (e.Code == "not_found" || e.Code == ""))):
+				case q.Get("after") == "" && e.Status == http.StatusMethodNotAllowed:
 					return nil, nil
 				}
 			}

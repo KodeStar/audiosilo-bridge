@@ -120,7 +120,8 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			next = strconv.Itoa(end)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"books": f.books[from:end], "next": next})
-	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/bridge/audible/accounts/acct0001/titles":
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/bridge/audible/accounts/") &&
+		strings.HasSuffix(r.URL.Path, "/titles"):
 		if f.rejected == "" {
 			_ = json.NewEncoder(w).Encode(map[string]any{"titles": []any{}})
 			return

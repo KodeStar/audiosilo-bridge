@@ -21,8 +21,9 @@ func TestRejectedAudibleTitles(t *testing.T) {
 		wantErr bool
 	}{
 		{"paged decisions", 200, `{"titles":[{"asin":"B000000001","rejected":true},{"asin":"B000000002","rejected":false},{"asin":"B000000003"}],"next":"B000000003"}`, false},
-		{"older server with only PUT", 405, "", false},
-		{"older server with route fallback", 404, `{"code":"not_found"}`, false},
+		{"older server with only PUT", 405, `{"error":"method not allowed","code":"method_not_allowed"}`, false},
+		{"proxy not found", 404, "404 page not found", true},
+		{"no such route", 404, `{"code":"not_found"}`, true},
 		{"unknown account", 404, `{"code":"unknown_account"}`, true},
 		{"rate limit", 429, "", true},
 	} {
