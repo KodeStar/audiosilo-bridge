@@ -183,7 +183,7 @@ Dockerfile    slim | cuda | agent | full; compose.example.yaml: server, bridge, 
 agentbox, workers, accounts, setup, correct, store, secrets, config, auth, logring,
 web, netguard, podcast, podcastjob, audibleacct, audiblejob, audiblesync, librivoxjob,
 endpoint}` plus the engine it wires; `accounts -> {agent, agentproto, ghauth, secrets, store}`; `correct ->
-{contrib, jobs, metaops}`; `setup -> link`;
+{contrib, jobs, metaops, store}`; `setup -> link`;
 `api` calls the injected Backend and the injected `auth.Manager` (login, sessions,
 the password), with types from jobs/link/mapping/store/logring/endpoint; `verify -> {fsutil,
 jobs, link, mapping}`; `generate -> {jobs, link, mapping, store, scheduler, pipeline, ...}`
