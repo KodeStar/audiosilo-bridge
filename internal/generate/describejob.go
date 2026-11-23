@@ -263,7 +263,7 @@ func (h *Handler) describeHeld(ctx context.Context, d Describer, bookID int64) (
 		return described{}, err
 	}
 	defer release()
-	res, err := d.Describe(ctx, bookID, true)
+	res, err := d.Describe(ctx, bookID)
 	if err != nil {
 		return described{res: res}, err
 	}
@@ -277,12 +277,21 @@ func (h *Handler) describeHeld(ctx context.Context, d Describer, bookID int64) (
 // holdBook takes the engine's hold on an engine book, trying again every poll
 // for holdTries polls before giving up (errBookBusy).
 func (h *Handler) holdBook(ctx context.Context, bookID int64) (func(), error) {
+	return h.holdWithin(ctx, bookID, holdTries, nil)
+}
+
+// holdWithin is holdBook with its own number of tries, calling waiting (when
+// set) before each poll it sleeps.
+func (h *Handler) holdWithin(ctx context.Context, bookID int64, tries int, waiting func()) (func(), error) {
 	for i := 1; ; i++ {
 		if release, ok := h.hold(bookID); ok {
 			return release, nil
 		}
-		if i == holdTries {
+		if i == tries {
 			return nil, errBookBusy
+		}
+		if waiting != nil {
+			waiting()
 		}
 		if err := agent.SleepCtx(ctx, h.o.Poll); err != nil {
 			return nil, err

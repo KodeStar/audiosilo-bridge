@@ -67,7 +67,7 @@ type Engine interface {
 // Describer writes a finished engine book's own-words description
 // (*pipeline.Executor's Describe, Phase 1c).
 type Describer interface {
-	Describe(ctx context.Context, bookID int64, noWait bool) (pipeline.DescribeResult, error)
+	Describe(ctx context.Context, bookID int64) (pipeline.DescribeResult, error)
 }
 
 // Server is the part of the server link the job calls.
@@ -1695,17 +1695,26 @@ func (h *Handler) clearEbookRun(ctx context.Context, eng Engine, r *run, id int6
 	return h.clearEarlier(ctx, eng, r, id)
 }
 
-// queueBook makes the job's engine book nb in a batch of its own, mapped to the
-// job in the same write (a crash between the two would leave a book running
-// that no job follows), and wakes the engine.
-func (h *Handler) queueBook(ctx context.Context, eng Engine, r *run, nb store.NewBook) error {
+// newBatch puts nb in a batch of its own, in the work folder that batch owns: a
+// move can free the old source path for another book, so the folder is never
+// named for the source.
+func (h *Handler) newBatch(ctx context.Context, nb *store.NewBook) error {
 	batch, err := h.o.DB.CreateBatch(ctx)
 	if err != nil {
 		return err
 	}
 	nb.BatchID = batch.ID
-	// A move can free the old source path for another book. Each batch owns its folder.
 	nb.WorkDir = filepath.Join(h.o.WorkRoot, batch.ID)
+	return nil
+}
+
+// queueBook makes the job's engine book nb in a batch of its own, mapped to the
+// job in the same write (a crash between the two would leave a book running
+// that no job follows), and wakes the engine.
+func (h *Handler) queueBook(ctx context.Context, eng Engine, r *run, nb store.NewBook) error {
+	if err := h.newBatch(ctx, &nb); err != nil {
+		return err
+	}
 	if r.kind == ReadalongKind {
 		if err := h.writeReadalongRequest(r, nb.WorkDir); err != nil {
 			return err
@@ -2248,11 +2257,11 @@ func (h *Handler) recordMove(ctx context.Context, r *run, p place, rel string) e
 	}
 	ebook := b.EbookPath
 	if ebook != "" {
-		name := filepath.Base(ebook)
+		moved := filepath.Join(p.dir, filepath.Base(ebook))
 		if p.single {
-			name = strings.TrimSuffix(p.prefix, ".") + ".epub"
+			moved = singleEpub(p)
 		}
-		ebook, ok, err = metaops.AllowedPath(filepath.Join(p.dir, name), []string{r.mount})
+		ebook, ok, err = metaops.AllowedPath(moved, []string{r.mount})
 		if err != nil || !ok {
 			return errors.New("the moved ebook leaves the library's folder")
 		}

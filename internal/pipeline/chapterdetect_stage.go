@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -332,18 +333,16 @@ func (e *Executor) detection(ctx context.Context, book store.Book, layer windowL
 		return chapterdetect.Result{}, errors.New("the windows were moved aside without their detection; cancel the job and generate the book again")
 	}
 	dir := filepath.Join(workDir, audio.ChaptersDir)
-	for _, w := range layer.manifest.Chapters {
-		if !audio.WindowHeard(dir, w) {
-			if _, err := splitWithRetries(ctx, layer.manifest, book, ffmpeg, r, nil); err != nil {
-				return chapterdetect.Result{}, err
-			}
-			break
+	unheard := func(w audio.Chapter) bool { return !audio.WindowHeard(dir, w) }
+	if slices.ContainsFunc(layer.manifest.Chapters, unheard) {
+		if _, err := splitWithRetries(ctx, layer.manifest, book, ffmpeg, r, nil); err != nil {
+			return chapterdetect.Result{}, err
 		}
 	}
 	var sil []audio.Silence
 	for _, w := range layer.manifest.Chapters {
 		bound := max(silenceDetectFloor, time.Duration(silenceDetectPerAudioSec*w.Duration*float64(time.Second)))
-		got, err := audio.WindowSilences(ctx, ffmpeg, filepath.Join(workDir, audio.ChaptersDir), w, bound)
+		got, err := audio.WindowSilences(ctx, ffmpeg, dir, w, bound)
 		if err != nil {
 			return chapterdetect.Result{}, fmt.Errorf("window %d silences: %w", w.Chapter, err)
 		}

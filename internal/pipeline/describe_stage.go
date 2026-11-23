@@ -120,9 +120,10 @@ type descriptionPromptData struct {
 // It is not an engine stage: it opens its own stage_run (DescribeStage) on the
 // book so the spend counts, and runs through the shared agent driver, whose parks
 // (rate limit, budget, credential, unavailable, validation exhausted) come back as
-// *scheduler.ParkError for the caller to handle. noWait parks a rate limit at once
-// so a describe job releases the book before waiting for a retry.
-func (e *Executor) Describe(ctx context.Context, bookID int64, noWait bool) (DescribeResult, error) {
+// *scheduler.ParkError for the caller to handle. A rate limit
+// parks at once, never waited out here, so a describe job releases the book
+// before waiting for a retry.
+func (e *Executor) Describe(ctx context.Context, bookID int64) (DescribeResult, error) {
 	if e.db == nil {
 		return DescribeResult{}, errors.New("describe: no store")
 	}
@@ -236,12 +237,8 @@ func (e *Executor) Describe(ctx context.Context, bookID int64, noWait bool) (Des
 		Title: book.Title, Authors: authors(book), Series: book.Series, SeriesPos: book.SeriesPos,
 		Chapters: sel.K, ChapterCount: sel.Logical, IsEbook: state.ParseKind(book.Kind) == state.KindEbook,
 	}
-	backoff := e.backoff
-	if noWait {
-		backoff = []time.Duration{}
-	}
 	usage, err := e.runAgentWith(ctx, book, state.State(DescribeStage), scheduler.StageReport{}, st,
-		"description.md", data, false, validate, backoff)
+		"description.md", data, false, validate, []time.Duration{})
 	usageMetrics := usage.metricsMap()
 	if err == nil && checkErr != nil {
 		err = fmt.Errorf("describe: the no-verbatim check could not run: %w", checkErr)
@@ -288,7 +285,7 @@ func (e *Executor) describeAtContributing(ctx context.Context, book store.Book, 
 	var res DescribeResult
 	err = runWithStageHeartbeat(ctx, r, nil, func() error {
 		var derr error
-		res, derr = e.Describe(ctx, book.ID, true)
+		res, derr = e.Describe(ctx, book.ID)
 		return derr
 	})
 	if err != nil {

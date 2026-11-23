@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/kodestar/audiosilo-bridge/internal/agent"
 	"github.com/kodestar/audiosilo-bridge/internal/audio"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/pipeline"
@@ -136,19 +135,17 @@ func (h *Handler) fromKeptTranscript(ctx context.Context, eng Engine, r *run, ol
 	if h.o.RetentionDays == 0 || !eligible(old) {
 		return false, nil
 	}
-	release, ok := h.hold(old.ID)
-	for i := 1; !ok; i++ {
-		if i == giveWayTries {
-			return false, errEarlierRunBusy
-		}
+	release, err := h.holdWithin(ctx, old.ID, giveWayTries, func() {
 		r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Waiting for the engine to let go of the book's earlier run"})
-		if err := agent.SleepCtx(ctx, h.o.Poll); err != nil {
-			return false, err
-		}
-		release, ok = h.hold(old.ID)
+	})
+	if errors.Is(err, errBookBusy) {
+		return false, errEarlierRunBusy
+	}
+	if err != nil {
+		return false, err
 	}
 	defer release()
-	old, err := h.o.DB.GetBook(ctx, old.ID)
+	old, err = h.o.DB.GetBook(ctx, old.ID)
 	if err != nil {
 		return false, err
 	}
@@ -189,21 +186,18 @@ func (h *Handler) fromKeptTranscript(ctx context.Context, eng Engine, r *run, ol
 	if kept, err := pipeline.KeptTranscription(ctx, old.WorkDir, m); err != nil || !kept {
 		return false, err
 	}
-	batch, err := h.o.DB.CreateBatch(ctx)
-	if err != nil {
+	if err := h.newBatch(ctx, &nb); err != nil {
 		return false, err
 	}
-	nb.BatchID = batch.ID
-	nb.WorkDir = filepath.Join(h.o.WorkRoot, batch.ID)
 	// Before the transaction the staged folder is disposable. The same
 	// transaction that admits the new book switches cleanup to the old one.
-	key := store.TranscriptCleanupPrefix + batch.ID
+	key := store.TranscriptCleanupPrefix + nb.BatchID
 	if err := h.o.DB.SetSetting(ctx, key, nb.WorkDir); err != nil {
 		return false, err
 	}
 	defer func() {
 		if err := h.cleanTranscriptDir(context.WithoutCancel(ctx), key); err != nil {
-			h.o.Log.Warn("generate: transcript cleanup needs another attempt", "batch", batch.ID, "err", err)
+			h.o.Log.Warn("generate: transcript cleanup needs another attempt", "batch", nb.BatchID, "err", err)
 		}
 	}()
 	if err := pipeline.SeedTranscription(ctx, wd, nb.WorkDir, m); err != nil {

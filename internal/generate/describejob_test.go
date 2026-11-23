@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -33,16 +32,16 @@ const testDescription = `{"license":"CC-BY-SA-4.0","sources":[{"type":"community
 type fakeDescriber struct {
 	db       *store.DB
 	mu       sync.Mutex
-	runs     []bool // each call's noWait
+	runs     int
 	fail     func(call int) error
 	freeFail bool
 	fromWork bool
 }
 
-func (f *fakeDescriber) Describe(ctx context.Context, bookID int64, noWait bool) (pipeline.DescribeResult, error) {
+func (f *fakeDescriber) Describe(ctx context.Context, bookID int64) (pipeline.DescribeResult, error) {
 	f.mu.Lock()
-	f.runs = append(f.runs, noWait)
-	call := len(f.runs)
+	f.runs++
+	call := f.runs
 	fail, freeFail, fromWork := f.fail, f.freeFail, f.fromWork
 	f.mu.Unlock()
 	if fail != nil {
@@ -75,11 +74,11 @@ func (f *fakeDescriber) Describe(ctx context.Context, bookID int64, noWait bool)
 		CostUSD: 0.25, GeneratedAt: time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)}, nil
 }
 
-// calls is each call's noWait.
-func (f *fakeDescriber) calls() []bool {
+// calls is how many times Describe ran.
+func (f *fakeDescriber) calls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return slices.Clone(f.runs)
+	return f.runs
 }
 
 // describeHandler is a handler whose engine writes descriptions with d.
@@ -147,8 +146,8 @@ func TestGenerateWritesTheDescription(t *testing.T) {
 	}
 	// Asked at the park, and again at done (to re-compose it with the work the
 	// contributing stage resolved), never waiting out a rate limit.
-	if calls := d.calls(); len(calls) != 2 || !calls[0] || !calls[1] {
-		t.Fatalf("describe calls = %+v, want two with noWait", calls)
+	if calls := d.calls(); calls != 2 {
+		t.Fatalf("describe calls = %d, want two", calls)
 	}
 	adir := filepath.Join(hr.root, "Author", "Book", AttachDir)
 	if raw, err := os.ReadFile(filepath.Join(adir, "description.json")); err != nil || string(raw) != testDescription {
@@ -237,8 +236,8 @@ func TestDescribeJob(t *testing.T) {
 		strings.Join(res.Files, ",") != "description.json,bridge.json" {
 		t.Fatalf("result = %+v", res)
 	}
-	if calls := d.calls(); len(calls) != 1 || !calls[0] {
-		t.Fatalf("describe calls = %+v", calls)
+	if calls := d.calls(); calls != 1 {
+		t.Fatalf("describe calls = %d", calls)
 	}
 	adir := filepath.Join(hr.root, "Author", "Book", AttachDir)
 	if raw, err := os.ReadFile(filepath.Join(adir, "description.json")); err != nil || string(raw) != testDescription {
@@ -321,7 +320,7 @@ func TestDescribeJobRefusals(t *testing.T) {
 		}
 	}
 	close(gate)
-	if len(d.calls()) != 0 {
+	if d.calls() != 0 {
 		t.Fatal("a refused job described")
 	}
 }
@@ -378,8 +377,8 @@ func TestDescribeJobParks(t *testing.T) {
 	}
 	hr.srv.addDescribe(63, "Author/Book")
 	hr.waitFor("the rate limit's park", func() bool { return hr.srv.saw(63, rateLimited) })
-	if calls := d.calls(); len(calls) != 3 || !calls[2] {
-		t.Fatalf("rate-limited describe calls = %v, want noWait", calls)
+	if calls := d.calls(); calls != 3 {
+		t.Fatalf("rate-limited describe calls = %d, want 3", calls)
 	}
 	release, ok := hr.sched.Hold(hr.engineBook(61).ID)
 	if !ok {
@@ -531,8 +530,8 @@ func TestDescriptionNeedsTheHold(t *testing.T) {
 	if res.Description || res.DescriptionError != "the engine was busy with this book" {
 		t.Fatalf("result = %+v", res)
 	}
-	if len(d.calls()) != 0 {
-		t.Fatalf("described %d times without the hold", len(d.calls()))
+	if d.calls() != 0 {
+		t.Fatalf("described %d times without the hold", d.calls())
 	}
 }
 
@@ -675,7 +674,7 @@ func (hr *harness) contributingSettled(id int64, d *fakeDescriber) func() bool {
 		hr.srv.mu.Lock()
 		defer hr.srv.mu.Unlock()
 		ups := hr.srv.updates[id]
-		if len(ups) == 0 || len(d.calls()) == 0 {
+		if len(ups) == 0 || d.calls() == 0 {
 			return false
 		}
 		var p map[string]any
@@ -719,7 +718,7 @@ func TestDescribeWaitsForTheEnginesCancel(t *testing.T) {
 	// Parked and quiet (as in TestDescribeRightAfterACancelRuns): the cancel is
 	// heard only through the description's Refresh.
 	hr.waitFor("the contributing park, settled", hr.contributingSettled(311, d))
-	calls := len(d.calls())
+	calls := d.calls()
 	hr.srv.set(func() { hr.srv.cancel[311] = true })
 	hr.srv.addDescribe(312, "Author/Book")
 	select {
@@ -728,9 +727,9 @@ func TestDescribeWaitsForTheEnginesCancel(t *testing.T) {
 		t.Fatal("the engine was never asked to cancel the book")
 	}
 	time.Sleep(testwait.Scaled(100 * time.Millisecond)) // ten polls of the description's wait (Scaled: still ten under -race)
-	if s, u := hr.srv.final(312); s != "" || len(d.calls()) != calls {
+	if s, u := hr.srv.final(312); s != "" || d.calls() != calls {
 		t.Fatalf("while the engine cancels the book: the description ended %q (%q), describe calls %d (was %d)",
-			s, errOf(u), len(d.calls()), calls)
+			s, errOf(u), d.calls(), calls)
 	}
 	eng.open()
 	hr.waitFor("the description ended", func() bool { s, _ := hr.srv.final(312); return s != "" })
@@ -753,7 +752,7 @@ func TestDescribeRetriesWhenRateLimitEnds(t *testing.T) {
 	defer stop()
 	hr.srv.addDescribe(302, "Author/Book")
 	waitDone(hr, 302)
-	if calls := d.calls(); len(calls) != 2 || !calls[0] || !calls[1] {
-		t.Fatalf("describe attempts at the rate limit and after it: %v", calls)
+	if calls := d.calls(); calls != 2 {
+		t.Fatalf("describe attempts at the rate limit and after it: %d", calls)
 	}
 }

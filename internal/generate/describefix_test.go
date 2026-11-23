@@ -109,7 +109,7 @@ func TestTheParkDescriptionFollowsTheResolvedWork(t *testing.T) {
 			t.Fatalf("%s = %s, %v", name, raw, err)
 		}
 	}
-	if calls := d.calls(); len(calls) != 2 {
+	if calls := d.calls(); calls != 2 {
 		t.Fatalf("describe calls = %v, want the park's and done's", calls)
 	}
 }
@@ -175,7 +175,7 @@ func TestTheParkDescriptionFailureAtDone(t *testing.T) {
 			stop := hr.runAll(h)
 			defer stop()
 			hr.waitFor("the park's try", func() bool {
-				return len(d.calls()) == 1 && hr.srv.saw(34, func(u link.Update, p map[string]any) bool {
+				return d.calls() == 1 && hr.srv.saw(34, func(u link.Update, p map[string]any) bool {
 					park, _ := p["park"].(map[string]any)
 					return park["code"] == "core_needed"
 				})
@@ -186,7 +186,7 @@ func TestTheParkDescriptionFailureAtDone(t *testing.T) {
 			hr.waitFor("done", func() bool { s, _ := hr.srv.final(34); return s == link.StateDone })
 			var res Result
 			hr.result(34, &res)
-			if calls := d.calls(); len(calls) != tc.calls || res.Description != tc.desc {
+			if calls := d.calls(); calls != tc.calls || res.Description != tc.desc {
 				t.Fatalf("calls %v, result %+v", calls, res)
 			}
 		})
@@ -208,7 +208,7 @@ func TestTheParkDescriptionStandsWhenDoneCantRecompose(t *testing.T) {
 	hr.srv.add(37, "Author/Book", `{}`)
 	stop := hr.runAll(h)
 	defer stop()
-	hr.waitFor("the park's description", func() bool { return len(d.calls()) == 1 })
+	hr.waitFor("the park's description", func() bool { return d.calls() == 1 })
 	hr.waitFor("the park", func() bool { return hr.srv.newParks(37, string(state.ParkCoreNeeded)) > 0 })
 	if err := h.Retry(context.Background(), 37); err != nil {
 		t.Fatal(err)
@@ -217,7 +217,7 @@ func TestTheParkDescriptionStandsWhenDoneCantRecompose(t *testing.T) {
 	var res Result
 	hr.result(37, &res)
 	raw, err := os.ReadFile(filepath.Join(hr.root, "Author", "Book", AttachDir, "bridge.json"))
-	if len(d.calls()) != 2 || !res.Description || err != nil || !strings.Contains(string(raw), `"description"`) {
+	if d.calls() != 2 || !res.Description || err != nil || !strings.Contains(string(raw), `"description"`) {
 		t.Fatalf("calls %v, result %+v, bridge.json %s", d.calls(), res, raw)
 	}
 }
@@ -244,7 +244,7 @@ func TestGenerateCostCountsAFailedDescription(t *testing.T) {
 // tries at 0.05), then fails its checks.
 type spendingDescriber struct{ db *store.DB }
 
-func (s *spendingDescriber) Describe(ctx context.Context, bookID int64, _ bool) (pipeline.DescribeResult, error) {
+func (s *spendingDescriber) Describe(ctx context.Context, bookID int64) (pipeline.DescribeResult, error) {
 	attempt, err := s.db.NextStageAttempt(ctx, bookID, pipeline.DescribeStage)
 	if err != nil {
 		return pipeline.DescribeResult{}, err
@@ -409,7 +409,7 @@ func TestDescribeJobRetryDuringATry(t *testing.T) {
 	}
 	close(gate)
 	time.Sleep(200 * time.Millisecond)
-	if n := len(d.calls()); n != 2 {
+	if n := d.calls(); n != 2 {
 		t.Fatalf("describe calls = %d after the press during a try", n)
 	}
 	if err := h.Retry(context.Background(), 42); err != nil {
@@ -499,7 +499,7 @@ func TestDescribeJobFindsARunThatMovedAfterItsJob(t *testing.T) {
 	defer stop()
 	hr.srv.addDescribe(94, "Author/Book (2026)")
 	hr.waitFor("done", func() bool { s, _ := hr.srv.final(94); return s == link.StateDone })
-	if len(d.calls()) != 1 {
+	if d.calls() != 1 {
 		t.Fatalf("describe calls = %v", d.calls())
 	}
 	if m, err := hr.db.GetGenerateBook(context.Background(), 93); err != nil || m.RelPath != "Author/Book (2026)" {
@@ -528,7 +528,7 @@ func TestDescribeJobIgnoresAnotherServersRun(t *testing.T) {
 	defer stop()
 	hr.srv.addDescribe(42, "Author/Book")
 	hr.waitFor("the refusal", func() bool { s, _ := hr.srv.final(42); return s == link.StateFailed })
-	if _, u := hr.srv.final(42); u.Error == nil || *u.Error != string(errDescribeNoNotes) || len(d.calls()) != 0 {
+	if _, u := hr.srv.final(42); u.Error == nil || *u.Error != string(errDescribeNoNotes) || d.calls() != 0 {
 		t.Fatalf("failed with %v, calls %v", u.Error, d.calls())
 	}
 }
@@ -556,7 +556,7 @@ func TestARegenerateKeepsTheKeptDescriptionVouchedFor(t *testing.T) {
 	hr.waitFor("the regenerate", func() bool { s, _ := hr.srv.final(46); return s == link.StateDone })
 	var res Result
 	hr.result(46, &res)
-	if res.Description || len(failing.calls()) != 1 {
+	if res.Description || failing.calls() != 1 {
 		t.Fatalf("result %+v, calls %v", res, failing.calls())
 	}
 	if raw, err := os.ReadFile(filepath.Join(adir, "description.json")); err != nil || string(raw) != testDescription {
@@ -617,14 +617,14 @@ func TestGenerateDoesNotPayTwiceForADescription(t *testing.T) {
 	})
 	// The engine's own try, as the real step records one that failed its checks.
 	var park *scheduler.ParkError
-	if _, err := (&spendingDescriber{db: hr.db}).Describe(context.Background(), hr.engineBook(47).ID, true); !errors.As(err, &park) {
+	if _, err := (&spendingDescriber{db: hr.db}).Describe(context.Background(), hr.engineBook(47).ID); !errors.As(err, &park) {
 		t.Fatalf("the engine's try = %v", err)
 	}
 	close(gate)
 	hr.waitFor("done", func() bool { s, _ := hr.srv.final(47); return s == link.StateDone })
 	var res Result
 	hr.result(47, &res)
-	if len(d.calls()) != 0 || res.Description || !strings.Contains(res.DescriptionError, "an earlier try") || res.CostUSD != 3.65 {
+	if d.calls() != 0 || res.Description || !strings.Contains(res.DescriptionError, "an earlier try") || res.CostUSD != 3.65 {
 		t.Fatalf("calls %v, result %+v", d.calls(), res)
 	}
 }
