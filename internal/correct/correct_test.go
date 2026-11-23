@@ -906,3 +906,52 @@ func TestCorrectRetryAfterPartOfBatchApplied(t *testing.T) {
 		})
 	}
 }
+
+// A smaller retry adopts an earlier batch's lost issue only as a new job adopts
+// its own request's: a day after the lost answer it is no retry of it, so the
+// admin is told once and the next suggestion files.
+func TestCorrectSmallerRetryLeavesAStaleBatch(t *testing.T) {
+	ctx := context.Background()
+	g, kv := &gh{drop: true}, &memKV{m: map[string]string{}}
+	h := newHandler(t, g, &tokens{token: "t", from: contrib.FromEnv}, kv, fakeMeta{cov: cov()})
+	lib, path := int64(3), "Book"
+	if _, err := h.Run(ctx, jobs.Job{ID: 30, LibraryID: &lib, Path: &path, Params: json.RawMessage(params)}, jobs.LocalReporter()); !errors.Is(err, errNoAnswer) {
+		t.Fatalf("lost answer: %v", err)
+	}
+	g.setDrop(false)
+	g.mu.Lock()
+	g.date = fakeNow.Add(contrib.FilingStale + time.Hour)
+	g.mu.Unlock()
+	p, _ := ParseParams(json.RawMessage(params))
+	p.Changes = p.Changes[1:]
+	smaller, _ := json.Marshal(p)
+	if _, err := h.Run(ctx, jobs.Job{ID: 31, LibraryID: &lib, Path: &path, Params: smaller}, jobs.LocalReporter()); !errors.Is(err, errFiledBefore) || g.count() != 1 {
+		t.Fatalf("a smaller batch a day later: %v, issues %d", err, g.count())
+	}
+	out, err := h.Run(ctx, jobs.Job{ID: 32, LibraryID: &lib, Path: &path, Params: smaller}, jobs.LocalReporter())
+	if err != nil || g.count() != 2 || out.(Result).IssueNumber != 43 || out.(Result).Changes != 2 {
+		t.Fatalf("the next suggestion: %+v %v, issues %d", out, err, g.count())
+	}
+}
+
+// A smaller retry whose lookup proves the earlier batch filed nothing drops
+// that batch's marker with its own filing.
+func TestCorrectSmallerRetryClearsAnEmptyBatchMarker(t *testing.T) {
+	ctx := context.Background()
+	g, kv := &gh{status: http.StatusBadGateway}, &memKV{m: map[string]string{}}
+	h := newHandler(t, g, &tokens{token: "t", from: contrib.FromEnv}, kv, fakeMeta{cov: cov()})
+	lib, path := int64(3), "Book"
+	if _, err := h.Run(ctx, jobs.Job{ID: 40, LibraryID: &lib, Path: &path, Params: json.RawMessage(params)}, jobs.LocalReporter()); !errors.Is(err, errNoAnswer) {
+		t.Fatalf("lost answer: %v", err)
+	}
+	g.mu.Lock()
+	g.status, g.date = 0, fakeNow.Add(2*contrib.FilingSettle)
+	g.mu.Unlock()
+	p, _ := ParseParams(json.RawMessage(params))
+	p.Changes = p.Changes[1:]
+	smaller, _ := json.Marshal(p)
+	out, err := h.Run(ctx, jobs.Job{ID: 41, LibraryID: &lib, Path: &path, Params: smaller}, jobs.LocalReporter())
+	if err != nil || g.count() != 1 || out.(Result).Changes != 2 || len(kv.markers()) != 0 {
+		t.Fatalf("smaller retry: %+v %v, issues %d, markers %v", out, err, g.count(), kv.markers())
+	}
+}

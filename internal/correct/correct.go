@@ -452,24 +452,23 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	cli := contrib.NewClientFor(h.o.BaseURL, token, from, h.o.Tokens)
 	rep.Progress(jobs.Progress{Step: "filing", Message: "Filing the corrections", Done: 1, Total: 2})
 	sum := contrib.IssueSum(title, body)
-	filedChanges := mapped
-	lookupSum := sum
-	if prior.key != "" {
-		// Only the earlier batch can confirm its original number of changes.
-		lookupSum = marker.Sum
-		original := batch
-		original.Changes = prior.changes
-		filedChanges, err = contrib.MapCorrections(original)
-		if err != nil {
-			return nil, err
-		}
-	}
 	if interrupted {
-		filed, err := h.filedSince(ctx, cli, marker, job.ID, lookupSum, body)
+		// The request's own sum: filedSince adopts the marker's (an earlier, larger
+		// batch's too) only while that marker is this job's or under a day old.
+		filed, err := h.filedSince(ctx, cli, marker, job.ID, sum, body)
 		var other otherBatch
 		var rateErr *contrib.RateLimitError
 		switch {
 		case filed.Number != 0:
+			filedChanges := mapped
+			if prior.key != "" && contrib.IssueSum(filed.Title, filed.Body) == marker.Sum {
+				// Only the earlier batch can confirm its original number of changes.
+				original := batch
+				original.Changes = prior.changes
+				if filedChanges, err = contrib.MapCorrections(original); err != nil {
+					return nil, err
+				}
+			}
 			h.o.Log.Info("correct: an interrupted filing had filed these corrections", "job", job.ID,
 				"issue", filed.Number, "by_job", marker.Job)
 			return h.done(ctx, job, lookupKey, marker, contrib.Issue{Number: filed.Number, URL: filed.URL}, filedChanges, rep), nil
@@ -495,6 +494,11 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 			// fail for good; meta's intake catches a batch it has applied.
 			h.o.Log.Warn("correct: an interrupted filing's issue can't be found or ruled out, and its marker is "+
 				"over a day old: filing again", "job", job.ID, "err", err)
+		case lookupKey != fkey:
+			// The list reached back to the earlier batch's marker and holds nothing
+			// it made: that marker goes, so a later retry of that batch files it
+			// rather than being told this one's issue was filed before.
+			h.clearFiling(ctx, lookupKey, marker)
 		}
 	}
 	// GitHub's time, which the issues' created_at is compared with later.
