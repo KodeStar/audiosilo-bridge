@@ -78,6 +78,9 @@ func AddIntakeNote(notes map[string]string, kind, note string) map[string]string
 	return notes
 }
 
+// IntakeNote is the note a filing made with the credential from carries: the
+// environment token and the gh CLI file outside the App, whose route workflow
+// is what sends an issue to intake.
 func IntakeNote(from string) string {
 	if from == FromEnv || from == FromGH {
 		return ManualIntakeNote

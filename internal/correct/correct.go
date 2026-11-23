@@ -197,10 +197,10 @@ func (h *Handler) Lane() string { return jobs.LaneLight }
 // sum (contrib.IssueSum of the title and body sent) and the job. Absent (or "")
 // is none.
 type filing struct {
-	Since      time.Time `json:"since"`
-	Sum        string    `json:"sum"`
-	Job        int64     `json:"job"`
-	IntakeNote string    `json:"intake_note,omitempty"`
+	Since     time.Time `json:"since"`
+	Sum       string    `json:"sum"`
+	Job       int64     `json:"job"`
+	FiledWith string    `json:"filed_with,omitempty"` // the credential source (contrib.From*)
 }
 
 // same reports whether two markers are one (a JSON round trip keeps the time to
@@ -343,12 +343,8 @@ func (h *Handler) smallerRetry(ctx context.Context, job jobs.Job, p Params) (pri
 		}
 		previous := job
 		previous.ID = row.ID
-		raw, _, err := h.o.KV.GetSetting(ctx, h.resultKey(previous))
-		if err != nil {
-			return priorRequest{}, err
-		}
-		if json.Unmarshal([]byte(raw), &out) == nil && out.IssueNumber > 0 {
-			return priorRequest{result: out}, nil
+		if out, ok, err := h.savedResult(ctx, previous); err != nil || ok {
+			return priorRequest{result: out}, err
 		}
 		key := h.filingKey(job, old)
 		m, found, err := h.readFiling(ctx, key)
@@ -373,21 +369,30 @@ func containsChanges(all, remaining []contrib.Correction) bool {
 	return true
 }
 
+// savedResult is the issue a run of job confirmed, kept under its resultKey.
+func (h *Handler) savedResult(ctx context.Context, job jobs.Job) (Result, bool, error) {
+	raw, ok, err := h.o.KV.GetSetting(ctx, h.resultKey(job))
+	if err != nil || !ok {
+		return Result{}, false, err
+	}
+	var r Result
+	if json.Unmarshal([]byte(raw), &r) != nil || r.IssueNumber <= 0 {
+		return Result{}, false, nil
+	}
+	return r, true, nil
+}
+
 // Run files the corrections, or reports the issue an earlier run filed.
 func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (any, error) {
 	p, err := ParseParams(job.Params)
 	if err != nil {
 		return nil, err
 	}
-	prev, ok, err := h.o.KV.GetSetting(ctx, h.resultKey(job))
-	if err != nil {
-		return nil, err
-	}
-	if ok {
-		var r Result
-		if err := json.Unmarshal([]byte(prev), &r); err == nil && r.IssueNumber > 0 {
-			return r, nil
+	if r, ok, err := h.savedResult(ctx, job); err != nil || ok {
+		if err != nil {
+			return nil, err
 		}
+		return r, nil
 	}
 	fkey := h.filingKey(job, p)
 	marker, interrupted, err := h.readFiling(ctx, fkey)
@@ -400,6 +405,10 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		prior, err = h.smallerRetry(ctx, job, p)
 		if err != nil {
 			return nil, err
+		}
+		if prior.result.IssueNumber > 0 {
+			h.saveResult(ctx, job, prior.result)
+			return prior.result, nil
 		}
 		if prior.key != "" {
 			lookupKey, marker, interrupted = prior.key, prior.marker, true
@@ -439,10 +448,6 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	title, body, labels, mapped, err := contrib.CorrectionBatchIssue(batch)
 	if err != nil {
 		return nil, failure("The corrections can't be filed: " + err.Error() + ".")
-	}
-	if prior.result.IssueNumber > 0 {
-		h.saveResult(ctx, job, prior.result)
-		return prior.result, nil
 	}
 	cli := contrib.NewClientFor(h.o.BaseURL, token, from, h.o.Tokens)
 	rep.Progress(jobs.Progress{Step: "filing", Message: "Filing the corrections", Done: 1, Total: 2})
@@ -493,7 +498,7 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		}
 	}
 	// GitHub's time, which the issues' created_at is compared with later.
-	mine := filing{Since: cli.Now(ctx), Sum: sum, Job: job.ID, IntakeNote: contrib.IntakeNote(from)}
+	mine := filing{Since: cli.Now(ctx), Sum: sum, Job: job.ID, FiledWith: from}
 	raw, err := json.Marshal(mine)
 	if err != nil {
 		return nil, err
@@ -591,7 +596,7 @@ func (h *Handler) filedSince(ctx context.Context, cli *contrib.Client, m filing,
 // after a failed write still looks, and adopts the issue.
 func (h *Handler) done(ctx context.Context, job jobs.Job, fkey string, f filing, issue contrib.Issue,
 	mapped []contrib.MappedChange, rep *jobs.Reporter) Result {
-	out := Result{IssueURL: issue.URL, IntakeNote: f.IntakeNote, IssueNumber: issue.Number, Changes: len(mapped), Auto: []string{}, Maintainer: []string{}}
+	out := Result{IssueURL: issue.URL, IntakeNote: contrib.IntakeNote(f.FiledWith), IssueNumber: issue.Number, Changes: len(mapped), Auto: []string{}, Maintainer: []string{}}
 	for _, m := range mapped {
 		if m.Auto {
 			out.Auto = append(out.Auto, m.ServerField)
