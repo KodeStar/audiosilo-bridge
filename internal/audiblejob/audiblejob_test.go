@@ -78,6 +78,7 @@ type fakeServer struct {
 	enriched map[string]string // path -> asin
 	asinSet  map[string]bool   // paths answering 409 asin_set
 	titleErr int
+	rejected string // the ASIN this account marked "Not this book"
 	// limit answers the n-th enrichment call (from 1) 429 with that
 	// Retry-After ("-" for none) when it returns ok.
 	limit   func(n int) (retryAfter string, ok bool)
@@ -119,6 +120,13 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			next = strconv.Itoa(end)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"books": f.books[from:end], "next": next})
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/bridge/audible/accounts/") &&
+		strings.HasSuffix(r.URL.Path, "/titles"):
+		if f.rejected == "" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"titles": []any{}})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"titles": []any{map[string]any{"asin": f.rejected, "rejected": true}}})
 	case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/api/v1/bridge/audible/accounts/") &&
 		strings.HasSuffix(r.URL.Path, "/titles"):
 		if f.titleErr != 0 {
@@ -307,6 +315,44 @@ func TestPollMatchesReportsAndEnriches(t *testing.T) {
 	raw, _ := json.Marshal(res)
 	if strings.Contains(string(raw), "Orchard") {
 		t.Fatalf("the result carries titles: %s", raw)
+	}
+}
+
+func TestPollRejectedTitleLeavesContestAndGetsBackupPlan(t *testing.T) {
+	t.Parallel()
+	const book = "Aar/Lantern Street/LS02 - Moon over Tidewater"
+	first := rec("B0FAKE0001", "Lanterns of London", "Ben Aar", "Lanterns of London", 1)
+	other := rec("B0FAKE0002", "Moon over Tidewater", "Ben Aar", "Lanterns of London", 2)
+	fs := &fakeServer{pageSize: 1, books: []link.LibraryBook{
+		{Path: book, Title: "Moon over Tidewater: Lanterns of London, Book 2", Authors: []string{"Ben Aar"},
+			Series: []link.SeriesRef{{Name: "Lantern Street"}}},
+	}}
+	h := setup(t, fs, &stubAccounts{acct: account(), recs: []source.Record{first, other}})
+	res, err := run(t, h, "acct0001")
+	if err != nil || res.Contested != 1 || res.Matched != 0 || res.Enriched != 0 {
+		t.Fatalf("before rejection = %+v, %v", res, err)
+	}
+	fs.mu.Lock()
+	fs.rejected = first.ASIN
+	fs.mu.Unlock()
+	res, err = run(t, h, "acct0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Titles != 2 || res.Matched != 1 || res.Contested != 0 || res.Enriched != 1 || fs.enrichedNow()[book] != other.ASIN {
+		t.Fatalf("poll = %+v, enriched = %v", res, fs.enrichedNow())
+	}
+	rejected, winner := fs.calls[1].Titles[0], fs.calls[1].Titles[1]
+	wantPath, err := Destination(ImportParams{}, first, fs.books)
+	if err != nil || !strings.HasSuffix(wantPath, "/Lanterns of London.m4b") || strings.HasPrefix(wantPath, book+"/") {
+		t.Fatalf("separate backup destination = %q, %v", wantPath, err)
+	}
+	if rejected.Match != nil || rejected.Reason != "" || rejected.ContestedPath != "" ||
+		rejected.Planned == nil || rejected.Planned.Path != wantPath || rejected.Planned.Conflict != "" {
+		t.Fatalf("rejected title = %+v, plan = %+v", rejected, rejected.Planned)
+	}
+	if winner.Match == nil || winner.Match.Path != book || winner.Planned != nil {
+		t.Fatalf("remaining claimant = %+v", winner)
 	}
 }
 

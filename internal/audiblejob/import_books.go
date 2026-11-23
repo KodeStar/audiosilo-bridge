@@ -68,7 +68,9 @@ func (h *Importer) booksFor(ctx context.Context, srv ImportServer, library impor
 
 // On a reused plan, ask about the destination and its possible book folders
 // by path. A listed book needs the full, current matching and twin checks.
-// A no-book answer for each path leaves only the ordinary on-disk checks.
+// A no-book answer for each path leaves only the ordinary on-disk checks (a
+// disc folder's sibling discs need no asking: finish never gives the parent
+// the ASIN unless it is listed, discParent).
 func booksAt(ctx context.Context, srv ImportServer, libraryID int64, mount, rel string) ([]link.LibraryBook, error) {
 	root, err := os.OpenRoot(mount)
 	if err != nil {

@@ -215,6 +215,7 @@ type ImportAccounts interface {
 
 // ImportServer is the part of the server link an import calls (*link.Client).
 type ImportServer interface {
+	RejectedAudibleTitles(ctx context.Context, account string) (map[string]bool, error)
 	Book(ctx context.Context, libraryID int64, path string) (*link.Book, error)
 	LibraryBooks(ctx context.Context, libraryID int64, after string, limit int) (*link.LibraryBooks, error)
 	Rescan(ctx context.Context, libraryID int64, path string) (string, error)
@@ -723,6 +724,27 @@ func (h *Importer) prepare(ctx context.Context, p ImportParams, part, decrypted,
 	return os.Rename(work, decrypted)
 }
 
+// isDiscFolder mirrors the server's metadata.IsDiscFolder for the rescan join.
+func isDiscFolder(name string) bool {
+	name = discSeparators.Replace(strings.ToLower(strings.TrimSpace(name)))
+	for _, prefix := range []string{"cd", "disc", "disk"} {
+		if number, ok := strings.CutPrefix(name, prefix); ok && strings.Trim(number, "0123456789") == "" {
+			return true
+		}
+	}
+	return false
+}
+
+var discSeparators = strings.NewReplacer(" ", "", "-", "", ".", "", "_", "")
+
+// discParent is the folder above rel's disc folder (rel in "<parent>/CD2"),
+// where a rescan can join the disc with its siblings; ok is false when rel's
+// folder isn't a disc folder.
+func discParent(rel string) (parent string, ok bool) {
+	dir := path.Dir(rel)
+	return path.Dir(dir), isDiscFolder(path.Base(dir))
+}
+
 // joinedBooks is, for each book of the library the file at rel could join (the
 // paths the server's rescan can answer for a book it already had: the file's
 // own, its folder's, or a disc set's above it), whether that book may take the
@@ -733,29 +755,26 @@ func (h *Importer) prepare(ctx context.Context, p ImportParams, part, decrypted,
 // holds twice (importjob.Twins: the title's words can't tell the copies
 // apart, bridge#64). The book the rescan answers decides:
 // one not listed here is new, the title itself (a pack placed as a pack
-// included), and takes the ASIN.
+// included), and takes the ASIN, unless it is the disc folder's parent
+// (finish: the server joins a disc there only beside another, indexed or
+// not, so the join is never the title's own).
 func joinedBooks(rec source.Record, books []link.LibraryBook, rel string) map[string]bool {
-	var joins, twins map[string]bool
+	joins := map[string]bool{}
+	var twins map[string]bool
 	var match link.LibraryBook
 	matched, looked := false, false
-	for _, at := range []string{rel, path.Dir(rel), path.Dir(path.Dir(rel))} {
-		if at == "." {
+	dir := path.Dir(rel)
+	parent := path.Dir(dir)
+	for _, b := range books {
+		if b.Path == "." || (b.Path != rel && b.Path != dir && b.Path != parent) {
 			continue
 		}
-		for _, b := range books {
-			if b.Path != at {
-				continue
-			}
-			if !looked {
-				match, matched = importjob.MatchInBooks(books, rec)
-				twins = importjob.Twins(books)
-				looked = true
-			}
-			if joins == nil {
-				joins = map[string]bool{}
-			}
-			joins[b.Path] = matched && match.Path == b.Path && !importjob.SpanMismatch(rec, b) && !twins[b.Path]
+		if !looked {
+			match, matched = importjob.MatchInBooks(books, rec)
+			twins = importjob.Twins(books)
+			looked = true
 		}
+		joins[b.Path] = matched && match.Path == b.Path && !importjob.SpanMismatch(rec, b) && !twins[b.Path]
 	}
 	return joins
 }
@@ -771,8 +790,10 @@ type installed struct {
 }
 
 // finish is the steps after the install: the rescan, the ASIN (unless the
-// book it answers is one the file joined that may not take it) and the result.
-// The placement marker goes once the result is made.
+// book it answers is one the file joined that may not take it, a disc
+// folder's parent not listed, or a joined book while the title is marked Not
+// this book) and the result. The placement marker goes once the result is
+// made.
 func (h *Importer) finish(ctx context.Context, rep *jobs.Reporter, srv ImportServer, account, asin string, library importLibrary,
 	in installed, marker string) (*ImportResult, error) {
 	libraryID := library.id
@@ -785,8 +806,23 @@ func (h *Importer) finish(ctx context.Context, rep *jobs.Reporter, srv ImportSer
 
 	h.recordBook(library, bookPath)
 	enrich, joined := in.joins[bookPath]
-	if !joined {
-		enrich = true // a new book: the title's own
+	switch {
+	case !joined:
+		// A rescan joins a disc at its parent only beside another disc (one
+		// indexed or not at placement): that book isn't the title's own.
+		parent, disc := discParent(rel)
+		enrich = !disc || bookPath != parent
+	case enrich:
+		// The admin may have marked the title since the placement (or a
+		// previous attempt's marker) gave the joined book its verdict.
+		rejected, err := srv.RejectedAudibleTitles(ctx, account)
+		if errors.Is(err, link.ErrUnknownAccount) {
+			return nil, fail(CodeUnknownAccount, "The book is in the library at %s, but the server has no such Audible account: map the account again on the Bridge's Accounts tab.", rel)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("checking the title before enriching a joined book: %w", err)
+		}
+		enrich = !rejected[asin]
 	}
 	enriched := false
 	if enrich {

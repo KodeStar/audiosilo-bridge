@@ -160,11 +160,23 @@ type stubImportServer struct {
 	rescanErr []error
 	rescanned []string
 	enriched  []string
-	enrichErr error
+	rejected  map[string]bool
+	// rejectedErr answers the "Not this book" read.
+	rejectedErr error
+	enrichErr   error
 	// enrichErrs answer the enrichment PUTs in turn before enrichErr does.
 	enrichErrs []error
 	// bookOf is the book the rescan answers for a file (nil: its folder).
 	bookOf func(p string) string
+}
+
+func (s *stubImportServer) RejectedAudibleTitles(context.Context, string) (map[string]bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.rejectedErr != nil {
+		return nil, s.rejectedErr
+	}
+	return s.rejected, nil
 }
 
 func (s *stubImportServer) Book(_ context.Context, libraryID int64, at string) (*link.Book, error) {

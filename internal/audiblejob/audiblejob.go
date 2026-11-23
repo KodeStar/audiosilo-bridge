@@ -66,6 +66,7 @@ type Accounts interface {
 
 // Server is the part of the server link a poll calls (*link.Client).
 type Server interface {
+	RejectedAudibleTitles(ctx context.Context, account string) (map[string]bool, error)
 	LibraryBooks(ctx context.Context, libraryID int64, after string, limit int) (*link.LibraryBooks, error)
 	PutAudibleTitles(ctx context.Context, account string, t link.AudibleTitles) (int, error)
 	Enrich(ctx context.Context, libraryID int64, path, asin string) error
@@ -237,6 +238,10 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	if err != nil {
 		return nil, h.serverFailure(ctx, acct.ID, "could not read the library's books on the server", err)
 	}
+	rejected, err := srv.RejectedAudibleTitles(ctx, acct.ID)
+	if err != nil {
+		return nil, h.serverFailure(ctx, acct.ID, "could not read the account's rejected titles", err)
+	}
 
 	rep.Progress(jobs.Progress{Step: "matching", Message: "Matching the titles to the library", Total: len(recs)})
 	res := Result{Account: acct.ID, PollID: pollID(job), Books: len(books)}
@@ -261,8 +266,7 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 			res.Unavailable++
 		}
 		var c importjob.Claim
-		// A preorder the catalog hasn't described yet matches by its ASIN only.
-		if b, score, ok := matchTitled(matcher, rec); ok && matchable(b.Path) {
+		if b, score, ok := pollMatch(matcher, rec, rejected[rec.ASIN]); ok && matchable(b.Path) {
 			agrees, disagrees := importjob.PositionAgrees(rec, b)
 			c = importjob.Claim{Path: b.Path, Score: score, Work: importjob.WorkKey(rec), Agrees: agrees, Disagrees: disagrees}
 			matchedBook[b.Path] = b
@@ -354,9 +358,6 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		end := min(start+link.MaxAudibleTitles, len(titles))
 		final := end == len(titles)
 		if _, err := srv.PutAudibleTitles(ctx, acct.ID, link.AudibleTitles{PollID: res.PollID, Final: final, Titles: titles[start:end]}); err != nil {
-			if errors.Is(err, link.ErrUnknownAccount) {
-				return nil, h.fail(ctx, acct.ID, "the server has no such Audible account: sign in or map the account again on the Bridge's Accounts tab")
-			}
 			return nil, h.serverFailure(ctx, acct.ID, "could not report the titles to the server", err)
 		}
 		rep.Progress(jobs.Progress{Step: "reporting", Message: "Reporting the titles to the server", Done: end, Total: len(titles)})
@@ -377,10 +378,14 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	return res, nil
 }
 
-// matchTitled is the matcher's book for rec. A record with no title (a
+// pollMatch leaves a rejected title unmatched so it gets a backup plan
+// and makes no claim on an indexed book. A record with no title (a
 // preorder the catalog hasn't described yet) matches by its ASIN only: the
 // fuzzy pass would go on its author or series alone.
-func matchTitled(m *importjob.BookMatcher, rec source.Record) (link.LibraryBook, float64, bool) {
+func pollMatch(m *importjob.BookMatcher, rec source.Record, rejected bool) (link.LibraryBook, float64, bool) {
+	if rejected {
+		return link.LibraryBook{}, 0, false
+	}
 	b, score, ok := m.MatchScored(rec)
 	if ok && strings.TrimSpace(rec.Title) == "" && !strings.EqualFold(b.ASIN, rec.ASIN) {
 		return link.LibraryBook{}, 0, false
@@ -442,6 +447,9 @@ func (h *Handler) mappedMount(id int64) string {
 
 // A server rate limit fails this poll without marking the Audible account unhealthy.
 func (h *Handler) serverFailure(ctx context.Context, account, operation string, err error) error {
+	if errors.Is(err, link.ErrUnknownAccount) {
+		return h.fail(ctx, account, "the server has no such Audible account: sign in or map the account again on the Bridge's Accounts tab")
+	}
 	if busy, ok := link.RateLimited(err); ok {
 		return fmt.Errorf("%s: %w", operation, busy)
 	}

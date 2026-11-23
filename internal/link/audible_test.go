@@ -12,6 +12,57 @@ import (
 	"time"
 )
 
+func TestRejectedAudibleTitles(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		status  int
+		body    string
+		wantErr bool
+	}{
+		{"paged decisions", 200, `{"titles":[{"asin":"B000000001","rejected":true},{"asin":"B000000002","rejected":false},{"asin":"B000000003"}],"next":"B000000003"}`, false},
+		{"older server with only PUT", 405, `{"error":"method not allowed","code":"method_not_allowed"}`, false},
+		{"proxy not found", 404, "404 page not found", true},
+		{"no such route", 404, `{"code":"not_found"}`, true},
+		{"unknown account", 404, `{"code":"unknown_account"}`, true},
+		{"rate limit", 429, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/api/v1/bridge/audible/accounts/acct0001/titles" ||
+					r.Header.Get("Authorization") != "Bearer tok" {
+					t.Errorf("unexpected request %s %s", r.Method, r.URL)
+				}
+				switch after := r.URL.Query().Get("after"); after {
+				case "":
+					w.WriteHeader(tc.status)
+					_, _ = io.WriteString(w, tc.body)
+				case "B000000003":
+					_, _ = io.WriteString(w, `{"titles":[{"asin":"B000000004","rejected":true}],"next":""}`)
+				default:
+					t.Errorf("unexpected cursor %q", after)
+				}
+			}))
+			defer server.Close()
+			c, _ := New(server.URL, "tok", "test")
+			got, err := c.RejectedAudibleTitles(t.Context(), "acct0001")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("decisions: %v", err)
+			}
+			if tc.name == "unknown account" && !errors.Is(err, ErrUnknownAccount) {
+				t.Fatalf("account refusal = %v", err)
+			}
+			if tc.status == http.StatusOK {
+				if len(got) != 2 || !got["B000000001"] || !got["B000000004"] {
+					t.Fatalf("rejected = %v", got)
+				}
+			} else if len(got) != 0 {
+				t.Fatalf("unexpected decisions: %v", got)
+			}
+		})
+	}
+}
+
 // The Audible routes as the server's handlers_audible.go answers them: methods,
 // paths, the bridge token in the header only, the bodies' field names, and the
 // error codes each maps.
