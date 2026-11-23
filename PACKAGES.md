@@ -2224,7 +2224,10 @@ internal/
             and keeps any other answer's HTTP status as an APIError, bridge#40;
             AudibleAccountInput sends no sync, the console's alone since 4c, bridge#50),
             RejectedAudibleTitles (GET .../titles, the account's titles marked
-            Not this book as {asin, rejected}, paged by ASIN before matching),
+            Not this book as {asin, rejected}, paged by ASIN before matching;
+            an older server's 405 on the first page reads as none, 404
+            unknown_account -> ErrUnknownAccount, any other 404 an error: a
+            proxy before a restarting server says it too),
             PutAudibleTitles (<= MaxAudibleTitles 500 per call, poll_id + final; a
             nil list sent as []; 404 unknown_account -> ErrUnknownAccount; each
             AudibleTitle also carries contested_path (omitempty) and planned
@@ -3510,8 +3513,9 @@ internal/
             back-up-everything skips them) and ContestedPath (the book's path,
             contested_path, omitted otherwise), except a title whose number
             DISAGREES with the book's (another volume: plainly not here, no
-            reason). A title marked Not this book makes no claim and gets its
-            own backup plan. Each named, unmatched title (contested included)
+            reason). A title marked Not this book (link.RejectedAudibleTitles,
+            read after the books; a failure fails the poll, as the books'
+            does) makes no claim and gets its own backup plan. Each named, unmatched title (contested included)
             carries Planned (plan.go, titlePlanner): where a backup would go,
             the import's own destination() for the same record, books and the
             params' template (no dest_path: the console's override is checked
@@ -3630,10 +3634,14 @@ internal/
             verdict, the BookMatcher picking that book for the title, not
             SpanMismatch and not a twin (importjob.Twins, bridge#64); the book the rescan answers decides: one of those takes
             the ASIN only on its verdict, any other is new (the title's own, a pack
-            placed as a pack included) and takes it. A destination in a disc
-            folder also checks for indexed sibling discs. When a rescan joins one
-            at their parent, the parent keeps its ASIN. A matching existing book
-            can take the ASIN only while the title is unmarked. Result
+            placed as a pack included) and takes it, except the parent of a disc
+            folder destination: the server joins a disc there only beside another
+            disc, so that parent takes it only on its own listed verdict, never
+            beside an indexed sibling disc nor unlisted (an older marker's
+            included). A joined book
+            whose verdict lets it take the ASIN is read again for the title's
+            Not this book mark first (unknown_account there fails the import
+            as unknown_account). Result
             {library_id, path (the book's, from the rescan), files [{path, size}],
             bytes, enriched}; a failure is Failure {code, message} as both result
             and error. The license's key and iv live in memory and ffmpeg's argv
@@ -3666,7 +3674,9 @@ internal/
             dest_path, imports of one pairing and library share a books listing for
             15 minutes (booksFor, the rescanned books refreshed by their page:
             importjob.Listing.BookAt), checking the destination's paths on the
-            server before vacant (booksAt: a book there reads the whole listing).
+            server before vacant (booksAt: a book there reads the whole listing;
+            a disc folder destination asks about the parent's other disc folders
+            on disk too).
             After the install a placement marker
             (<tmp>/<acct>-<asin>.placed.json: library_id, the request's dest_path
             and template, path, size, mtime_ns, the joins' verdicts) is written:

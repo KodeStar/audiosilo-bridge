@@ -183,6 +183,21 @@ func TestImportLoneDiscFolder(t *testing.T) {
 	}
 }
 
+// The account gone on the server when a joined book's verdict is read again
+// is the import's unknown_account, the book placed but given no ASIN.
+func TestImportJoinedBookUnknownAccount(t *testing.T) {
+	e := newImportEnv(t)
+	const book = "Other Tapes"
+	e.srv.books = []link.LibraryBook{{Path: book, Title: e.accts.title.Title, Authors: []string{e.accts.title.Author}}}
+	e.srv.rejectedErr = link.ErrUnknownAccount
+	e.srv.bookOf = func(string) string { return book }
+	_, err := e.run(context.Background(), e.params(func(p *ImportParams) { p.DestPath = book + "/CD2" }))
+	var f *Failure
+	if !errors.As(err, &f) || f.Code != CodeUnknownAccount || len(e.srv.enriched) != 0 {
+		t.Fatalf("err %v, enriched %v", err, e.srv.enriched)
+	}
+}
+
 func TestImportRetryWithOldDiscMarker(t *testing.T) {
 	e := newImportEnv(t)
 	const parent = "Other Tapes"

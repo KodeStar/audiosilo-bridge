@@ -824,6 +824,9 @@ func (h *Importer) finish(ctx context.Context, rep *jobs.Reporter, srv ImportSer
 		// The admin may have marked the title since the placement (or a
 		// previous attempt's marker) gave the joined book its verdict.
 		rejected, err := srv.RejectedAudibleTitles(ctx, account)
+		if errors.Is(err, link.ErrUnknownAccount) {
+			return nil, fail(CodeUnknownAccount, "The book is in the library at %s, but the server has no such Audible account: map the account again on the Bridge's Accounts tab.", rel)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("checking the title before enriching a joined book: %w", err)
 		}
