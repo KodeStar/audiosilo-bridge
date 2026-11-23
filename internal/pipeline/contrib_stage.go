@@ -702,14 +702,17 @@ func (e *Executor) submitIssueWith(ctx context.Context, book store.Book, slug st
 			return ierr
 		}
 		note := ""
+		// The credential that filed it: the marker's for an adopted issue, else
+		// (a marker from before it was recorded) the one signed in now.
+		from := cmp.Or(issue.FiledWith, cli.CredentialSource())
 		// An issue filed through the GitHub App is labelled by the meta repo's
 		// route workflow once it is open (D3), so a label missing now says nothing.
-		if cmp.Or(issue.FiledWith, cli.CredentialSource()) != contrib.FromDevice {
+		if from != contrib.FromDevice {
 			if got, gerr := cli.GetIssue(ctx, e.contribCommunityRepo, issue.Number); gerr == nil && !labelStuck(got.Labels, routingLabel(a.kind)) {
 				note = fmt.Sprintf("%s - a maintainer must apply %s for intake to run", store.ContribNoteLabelsMissingPrefix, routingLabel(a.kind))
 			}
 		}
-		if err := e.upsertRow(ctx, book.ID, a.kind, store.ContribModeIssue, issue.Number, issue.URL, store.ContribStatusSubmitted, contrib.JoinNotes(note, contrib.IntakeNote(issue.FiledWith), auditNote)); err != nil {
+		if err := e.upsertRow(ctx, book.ID, a.kind, store.ContribModeIssue, issue.Number, issue.URL, store.ContribStatusSubmitted, contrib.JoinNotes(note, contrib.IntakeNote(from), auditNote)); err != nil {
 			return err
 		}
 		e.clearFiling(ctx, book.ID, a.kind)
