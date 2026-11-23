@@ -1482,7 +1482,8 @@ internal/
             store.ServerJob rows through KV.EarlierBookJobs) is a retry of it:
             its confirmed issue is the result only while GitHub has it open (a
             closed one files afresh), its interrupted filing's marker is looked
-            up as the request's own. A 401 (contrib.Unauthorized), on
+            up as the request's own (an issue of the subset's own changes found
+            that way is the subset's result alone, the batch's marker kept). A 401 (contrib.Unauthorized), on
             the lookup (even past a same-record batch on a page read before) or
             the filing, is errRefused; a rate limit on either errRateLimited (a
             lookup's keeps the marker); a lost or 5xx answer errNoAnswer

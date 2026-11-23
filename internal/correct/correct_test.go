@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -972,6 +973,39 @@ func TestCorrectSmallerRetryLeavesAStaleBatch(t *testing.T) {
 	out, err := h.Run(ctx, jobs.Job{ID: 32, LibraryID: &lib, Path: &path, Params: smaller}, jobs.LocalReporter())
 	if err != nil || g.count() != 2 || out.(Result).IssueNumber != 43 || out.(Result).Changes != 2 {
 		t.Fatalf("the next suggestion: %+v %v, issues %d", out, err, g.count())
+	}
+}
+
+// A smaller retry whose lookup through the earlier batch's marker finds an
+// issue of its own request (filed by another job) keeps it as its own result
+// only: the earlier batch's marker stays, and that batch gets no result.
+func TestCorrectSmallerRetryKeepsItsOwnIssueToItself(t *testing.T) {
+	ctx := context.Background()
+	g, kv := &gh{status: http.StatusBadGateway}, &memKV{m: map[string]string{}}
+	h := newHandler(t, g, &tokens{token: "t", from: contrib.FromEnv}, kv, fakeMeta{cov: cov()})
+	lib, path, other := int64(3), "Book", "Book (copy)"
+	if _, err := h.Run(ctx, jobs.Job{ID: 70, LibraryID: &lib, Path: &path, Params: json.RawMessage(params)}, jobs.LocalReporter()); !errors.Is(err, errNoAnswer) {
+		t.Fatalf("lost answer: %v", err)
+	}
+	batchMarkers := kv.markers()
+	g.mu.Lock()
+	g.status = 0
+	g.mu.Unlock()
+	p, _ := ParseParams(json.RawMessage(params))
+	p.Changes = p.Changes[1:]
+	smaller, _ := json.Marshal(p)
+	if out, err := h.Run(ctx, jobs.Job{ID: 71, LibraryID: &lib, Path: &other, Params: smaller}, jobs.LocalReporter()); err != nil || out.(Result).IssueNumber != 42 {
+		t.Fatalf("the same changes for another book: %+v %v", out, err)
+	}
+	out, err := h.Run(ctx, jobs.Job{ID: 72, LibraryID: &lib, Path: &path, Params: smaller}, jobs.LocalReporter())
+	if err != nil || out.(Result).IssueNumber != 42 || out.(Result).Changes != 2 || g.count() != 1 {
+		t.Fatalf("smaller retry: %+v %v, issues %d", out, err, g.count())
+	}
+	if r, ok, err := h.savedResult(ctx, jobs.Job{ID: 70}); err != nil || ok {
+		t.Fatalf("the earlier batch's result = %+v, %v, %v; want none", r, ok, err)
+	}
+	if got := kv.markers(); !maps.Equal(got, batchMarkers) {
+		t.Fatalf("markers = %v, want the earlier batch's %v", got, batchMarkers)
 	}
 }
 
