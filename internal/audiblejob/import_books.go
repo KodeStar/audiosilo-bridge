@@ -67,23 +67,29 @@ func (h *Importer) booksFor(ctx context.Context, srv ImportServer, library impor
 }
 
 // On a reused plan, ask about the destination and its possible book folders
-// by path. A listed book needs the full, current matching and twin checks.
+// by path: in a disc folder, the parent's other disc folders on disk too (a
+// rescan can join the disc with an indexed sibling at the parent, joinedBooks).
+// A listed book needs the full, current matching and twin checks.
 // A no-book answer for each path leaves only the ordinary on-disk checks.
 func booksAt(ctx context.Context, srv ImportServer, libraryID int64, mount, rel string) ([]link.LibraryBook, error) {
-	if _, disc := discParent(rel); disc {
-		// A rescan can join a sibling disc into the parent. None of the
-		// destination's own paths need be indexed before the placement.
-		return allBooks(ctx, srv, libraryID)
-	}
 	root, err := os.OpenRoot(mount)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = root.Close() }()
+	fsys := transfer.RootFS(root)
 	dir := path.Dir(rel)
 	paths := []string{rel, dir, path.Dir(dir)}
-	for _, former := range formerDirs(transfer.RootFS(root), dir) {
+	for _, former := range formerDirs(fsys, dir) {
 		paths = append(paths, former, path.Join(former, path.Base(rel)))
+	}
+	if parent, disc := discParent(rel); disc {
+		entries, _ := fsys.ReadDir(parent) // a parent not there yet holds no sibling
+		for _, e := range entries {
+			if at := path.Join(parent, e.Name()); e.IsDir() && at != dir && isDiscFolder(e.Name()) {
+				paths = append(paths, at)
+			}
+		}
 	}
 	for _, at := range paths {
 		if at == "." {

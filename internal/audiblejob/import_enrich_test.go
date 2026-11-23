@@ -169,6 +169,20 @@ func TestImportRejectedTitleDoesNotEnrichItsOldMatch(t *testing.T) {
 	}
 }
 
+// A lone new disc folder is the title's own book: nothing indexed beside it,
+// so the library isn't listed, and the rescan answering the disc takes the ASIN.
+func TestImportLoneDiscFolder(t *testing.T) {
+	e := newImportEnv(t)
+	const dest = "New Tapes/CD1"
+	out, err := e.run(context.Background(), e.params(func(p *ImportParams) { p.DestPath = dest }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := out.(*ImportResult); got.Path != dest || !got.Enriched || e.srv.lists != 0 {
+		t.Fatalf("placed %+v, library listings %d", got, e.srv.lists)
+	}
+}
+
 func TestImportRetryWithOldDiscMarker(t *testing.T) {
 	e := newImportEnv(t)
 	const parent = "Other Tapes"

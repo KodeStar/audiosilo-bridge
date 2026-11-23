@@ -758,7 +758,8 @@ func discParent(rel string) (parent string, ok bool) {
 // the rescan can join the discs there (a book override on the parent
 // included). The book the rescan answers decides:
 // one not listed here is new, the title itself (a pack placed as a pack
-// included), and takes the ASIN.
+// included), and takes the ASIN, unless it is the disc folder's parent
+// (finish: the server joins a disc there only beside another).
 func joinedBooks(rec source.Record, books []link.LibraryBook, rel string) map[string]bool {
 	joins := map[string]bool{}
 	var twins map[string]bool
@@ -814,12 +815,14 @@ func (h *Importer) finish(ctx context.Context, rep *jobs.Reporter, srv ImportSer
 	enrich, joined := in.joins[bookPath]
 	switch {
 	case !joined:
-		// Older placement markers may predate the sibling-disc check. If the
-		// rescan joined this disc at its parent it contains another disc.
+		// A rescan joins a disc at its parent only beside another disc: one
+		// not indexed at placement, or an older marker's, which predates the
+		// sibling-disc check. That book isn't the title's own.
 		parent, disc := discParent(rel)
 		enrich = !disc || bookPath != parent
 	case enrich:
-		// A previous attempt's marker may also predate the admin's rejection.
+		// The admin may have marked the title since the placement (or a
+		// previous attempt's marker) gave the joined book its verdict.
 		rejected, err := srv.RejectedAudibleTitles(ctx, account)
 		if err != nil {
 			return nil, fmt.Errorf("checking the title before enriching a joined book: %w", err)
