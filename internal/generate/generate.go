@@ -1808,8 +1808,17 @@ func (h *Handler) attach(ctx context.Context, eng Engine, r *run, m store.Genera
 			return errors.New("the book's path leaves the library's folder")
 		}
 		if m.RelPath != r.rel || source != b.AudioSource() {
-			if err := h.recordMove(ctx, r, r.place, r.rel); err != nil {
-				return err
+			// A move the Bridge can't record parks the job until it can (another
+			// run at the new path ended, say), as a move a running job hears of does.
+			for {
+				err := h.recordMove(ctx, r, r.place, r.rel)
+				if err == nil {
+					break
+				}
+				h.park(r, parkBookNotWritable, "the Bridge can't follow the book to its new path: "+err.Error())
+				if err := h.recheckWait(ctx, r, time.Now().Add(h.o.Recheck)); err != nil {
+					return err
+				}
 			}
 			b, err = h.o.DB.GetBook(ctx, b.ID)
 			if err != nil {
@@ -2290,7 +2299,9 @@ func (h *Handler) recordMove(ctx context.Context, r *run, p place, rel string) e
 	if b.IsAudioRun() {
 		source = store.AudioRunKey(source)
 	}
-	if err := h.o.DB.MoveGenerateBook(ctx, r.job.ID, b.ID, rel, source, ebook); err != nil {
+	if err := h.o.DB.MoveGenerateBook(ctx, r.job.ID, b.ID, rel, source, ebook); errors.Is(err, store.ErrDuplicate) {
+		return errors.New("another of the Bridge's runs is at the new path")
+	} else if err != nil {
 		return err
 	}
 	r.epub = ebook

@@ -1904,3 +1904,65 @@ func TestMovePreservesAudioRunAndRefusesUnsafeDestinations(t *testing.T) {
 		t.Fatalf("mapping after moves: %+v, %v", g, err)
 	}
 }
+
+// A resumed job whose book moved onto a path another engine book holds parks
+// book_not_writable (a running job's park for the same move) and follows the
+// book once that path is free, rather than failing.
+func TestAttachParksOnAnOccupiedMove(t *testing.T) {
+	hr := newHarness(t)
+	ctx := t.Context()
+	old := filepath.Join(hr.root, "Loose.m4b")
+	b, err := hr.db.CreateMappedBook(ctx, store.NewBook{SourcePath: old, Title: "Loose", WorkDir: filepath.Join(hr.work, "loose"), State: "done"},
+		store.GenerateBook{ServerJobID: 510, LibraryID: 1, RelPath: "Loose.m4b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	taken := filepath.Join(hr.root, "Taken.m4b")
+	if err := os.Rename(old, taken); err != nil {
+		t.Fatal(err)
+	}
+	realTaken, err := filepath.EvalSymlinks(taken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := hr.db.CreateBook(ctx, store.NewBook{SourcePath: realTaken, Title: "Taken", WorkDir: filepath.Join(hr.work, "taken"), State: "done"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := locate(hr.root, "Taken.m4b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := New(Options{DB: hr.db, RetentionDays: 30, Poll: time.Millisecond, Recheck: time.Hour})
+	r := &run{job: jobs.Job{ID: 510, Kind: Kind, Attempt: 2}, bookID: b.ID, rep: jobs.LocalReporter(),
+		poke: make(chan struct{}, 1), mount: hr.root, place: p, rel: "Taken.m4b", resuming: true}
+	done := make(chan error, 1)
+	go func() {
+		done <- h.attach(ctx, nil, r, store.GenerateBook{ServerJobID: 510, LibraryID: 1, RelPath: "Loose.m4b", BookID: &b.ID})
+	}()
+	parked := func() bool {
+		park, _ := r.rep.Last().Extra["park"].(map[string]any)
+		return park["code"] == parkBookNotWritable
+	}
+	hr.waitFor("the park", func() bool {
+		select {
+		case err := <-done:
+			t.Fatalf("attach ended before the path was free: %v", err)
+		default:
+		}
+		return parked()
+	})
+	if err := hr.db.DeleteBook(ctx, other.ID); err != nil {
+		t.Fatal(err)
+	}
+	r.poke <- struct{}{}
+	if err := <-done; err != nil {
+		t.Fatalf("attach = %v, want the moved book followed", err)
+	}
+	if now, err := hr.db.GetBook(ctx, b.ID); err != nil || now.SourcePath != realTaken {
+		t.Fatalf("book after the move: %+v, %v", now, err)
+	}
+	if g, err := hr.db.GetGenerateBook(ctx, 510); err != nil || g.RelPath != "Taken.m4b" {
+		t.Fatalf("mapping after the move: %+v, %v", g, err)
+	}
+}

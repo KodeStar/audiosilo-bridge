@@ -178,7 +178,8 @@ func (db *DB) SetGenerateBookPath(ctx context.Context, serverJobID int64, relPat
 
 // MoveGenerateBook changes the active mapping and its engine input together.
 // The audio run beside an ebook keeps its separate key. WorkDir holds the
-// retained artifacts and stays at its original location.
+// retained artifacts and stays at its original location. Another engine book at
+// source is ErrDuplicate.
 func (db *DB) MoveGenerateBook(ctx context.Context, jobID, bookID int64, rel, source, ebook string) error {
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {
@@ -190,6 +191,9 @@ func (db *DB) MoveGenerateBook(ctx context.Context, jobID, bookID int64, rel, so
 		return err
 	}
 	res, err = tx.ExecContext(ctx, `UPDATE books SET source_path=?, ebook_path=? WHERE id=?`, source, ebook, bookID)
+	if isUniqueViolation(err) {
+		return ErrDuplicate
+	}
 	if err := checkAffected(res, err); err != nil {
 		return err
 	}
