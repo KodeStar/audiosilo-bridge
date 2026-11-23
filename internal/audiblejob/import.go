@@ -737,6 +737,14 @@ func isDiscFolder(name string) bool {
 
 var discSeparators = strings.NewReplacer(" ", "", "-", "", ".", "", "_", "")
 
+// discParent is the folder above rel's disc folder (rel in "<parent>/CD2"),
+// where a rescan can join the disc with its siblings; ok is false when rel's
+// folder isn't a disc folder.
+func discParent(rel string) (parent string, ok bool) {
+	dir := path.Dir(rel)
+	return path.Dir(dir), isDiscFolder(path.Base(dir))
+}
+
 // joinedBooks is, for each book of the library the file at rel could join (the
 // paths the server's rescan can answer for a book it already had: the file's
 // own, its folder's, or a disc set's above it), whether that book may take the
@@ -745,7 +753,10 @@ var discSeparators = strings.NewReplacer(" ", "", "-", "", ".", "", "_", "")
 // doesn't (importjob.SpanMismatch), so an omnibus never names a single volume
 // and a title never names another book, and the book not one the library
 // holds twice (importjob.Twins: the title's words can't tell the copies
-// apart, bridge#64). The book the rescan answers decides:
+// apart, bridge#64). A disc folder beside an indexed sibling disc also lists
+// their parent, which may not take the ASIN even when it had no index entry:
+// the rescan can join the discs there (a book override on the parent
+// included). The book the rescan answers decides:
 // one not listed here is new, the title itself (a pack placed as a pack
 // included), and takes the ASIN.
 func joinedBooks(rec source.Record, books []link.LibraryBook, rel string) map[string]bool {
@@ -754,8 +765,7 @@ func joinedBooks(rec source.Record, books []link.LibraryBook, rel string) map[st
 	var match link.LibraryBook
 	matched, looked := false, false
 	dir := path.Dir(rel)
-	parent := path.Dir(dir)
-	disc := isDiscFolder(path.Base(dir))
+	parent, disc := discParent(rel)
 	sibling := false
 	for _, b := range books {
 		if disc && b.Path != dir && path.Dir(b.Path) == parent && isDiscFolder(path.Base(b.Path)) {
@@ -772,8 +782,6 @@ func joinedBooks(rec source.Record, books []link.LibraryBook, rel string) map[st
 		joins[b.Path] = matched && match.Path == b.Path && !importjob.SpanMismatch(rec, b) && !twins[b.Path]
 	}
 	if sibling {
-		// A book override can join the new disc and the indexed sibling
-		// under their parent, even when the parent had no index entry.
 		joins[parent] = false
 	}
 	return joins
@@ -808,8 +816,8 @@ func (h *Importer) finish(ctx context.Context, rep *jobs.Reporter, srv ImportSer
 	case !joined:
 		// Older placement markers may predate the sibling-disc check. If the
 		// rescan joined this disc at its parent it contains another disc.
-		dir := path.Dir(rel)
-		enrich = bookPath != path.Dir(dir) || !isDiscFolder(path.Base(dir))
+		parent, disc := discParent(rel)
+		enrich = !disc || bookPath != parent
 	case enrich:
 		// A previous attempt's marker may also predate the admin's rejection.
 		rejected, err := srv.RejectedAudibleTitles(ctx, account)

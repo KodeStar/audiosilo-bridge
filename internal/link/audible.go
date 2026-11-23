@@ -260,7 +260,7 @@ func (c *Client) RejectedAudibleTitles(ctx context.Context, account string) (map
 			if errors.As(err, &e) {
 				switch {
 				case e.Status == http.StatusNotFound && e.Code == "unknown_account":
-					return nil, fmt.Errorf("%w: %w", ErrUnknownAccount, err)
+					return nil, ErrUnknownAccount
 				case q.Get("after") == "" && (e.Status == http.StatusMethodNotAllowed ||
 					(e.Status == http.StatusNotFound && (e.Code == "not_found" || e.Code == ""))):
 					return nil, nil

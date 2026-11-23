@@ -70,8 +70,7 @@ func (h *Importer) booksFor(ctx context.Context, srv ImportServer, library impor
 // by path. A listed book needs the full, current matching and twin checks.
 // A no-book answer for each path leaves only the ordinary on-disk checks.
 func booksAt(ctx context.Context, srv ImportServer, libraryID int64, mount, rel string) ([]link.LibraryBook, error) {
-	dir := path.Dir(rel)
-	if isDiscFolder(path.Base(dir)) {
+	if _, disc := discParent(rel); disc {
 		// A rescan can join a sibling disc into the parent. None of the
 		// destination's own paths need be indexed before the placement.
 		return allBooks(ctx, srv, libraryID)
@@ -81,6 +80,7 @@ func booksAt(ctx context.Context, srv ImportServer, libraryID int64, mount, rel 
 		return nil, err
 	}
 	defer func() { _ = root.Close() }()
+	dir := path.Dir(rel)
 	paths := []string{rel, dir, path.Dir(dir)}
 	for _, former := range formerDirs(transfer.RootFS(root), dir) {
 		paths = append(paths, former, path.Join(former, path.Base(rel)))
