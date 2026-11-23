@@ -4218,7 +4218,8 @@ internal/
             work_id, inputs [{path, size, mod_time}] relative to the library) are
             written 0644 through fsutil.WriteFileAtomic, ONLY those names, once per
             content hash, at the path the book is at NOW (Reporter.Path: the server
-            moves the job with its book; the move is recorded in generate_books). The
+            moves the job with its book; the move is recorded in generate_books, an
+            ended run at the new path replaced, a live one parking book_not_writable). The
             mapping is checked again before each write; a failed write on a done book
             parks book_not_writable and tries again every minute or on Retry (the
             sidecars stay in the work dir, never lost to a failed job). Then

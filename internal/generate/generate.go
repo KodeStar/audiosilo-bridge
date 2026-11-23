@@ -1812,8 +1812,9 @@ func (h *Handler) attach(ctx context.Context, eng Engine, r *run, m store.Genera
 			return errors.New("the book's path leaves the library's folder")
 		}
 		if m.RelPath != r.rel || source != b.AudioSource() {
-			// A move the Bridge can't record parks the job until it can (another
-			// run at the new path ended, say), as a move a running job hears of does.
+			// A move the Bridge can't record parks the job until it can (a live
+			// run at the new path, say; an ended one is replaced), as a move a
+			// running job hears of does.
 			for {
 				err := h.recordMove(ctx, r, r.place, r.rel)
 				if err == nil {
@@ -2303,13 +2304,56 @@ func (h *Handler) recordMove(ctx context.Context, r *run, p place, rel string) e
 	if b.IsAudioRun() {
 		source = store.AudioRunKey(source)
 	}
-	if err := h.o.DB.MoveGenerateBook(ctx, r.job.ID, b.ID, rel, source, ebook); errors.Is(err, store.ErrDuplicate) {
+	err = h.o.DB.MoveGenerateBook(ctx, r.job.ID, b.ID, rel, source, ebook)
+	if errors.Is(err, store.ErrDuplicate) {
+		if free, cerr := h.clearEndedRunAt(ctx, r, source); cerr != nil {
+			return cerr
+		} else if free {
+			err = h.o.DB.MoveGenerateBook(ctx, r.job.ID, b.ID, rel, source, ebook)
+		}
+	}
+	if errors.Is(err, store.ErrDuplicate) {
 		return errors.New("another of the Bridge's runs is at the new path")
 	} else if err != nil {
 		return err
 	}
 	r.epub = ebook
 	return nil
+}
+
+// clearEndedRunAt deletes the engine book at source path key when its run has
+// ended (done, failed or cancelled) and no other open job follows it, as create
+// clears a book's earlier run: the moved book replaces it. It reports whether
+// the path may be free now; a live run there keeps it (the caller parks).
+func (h *Handler) clearEndedRunAt(ctx context.Context, r *run, source string) (bool, error) {
+	occ, err := h.o.DB.GetBookBySourcePath(ctx, source)
+	if errors.Is(err, store.ErrNotFound) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	ended := state.IsTerminal(state.State(occ.State)) || state.Status(occ.Status) == state.StatusFailed
+	if occ.ID == r.bookID || !ended {
+		return false, nil
+	}
+	if open, err := h.o.DB.OpenGenerateJobsForBook(ctx, occ.ID, r.job.ID); err != nil || len(open) > 0 {
+		return false, err
+	}
+	var eng Engine
+	if h.o.Engine != nil {
+		eng = h.o.Engine()
+	}
+	if eng == nil {
+		return false, nil
+	}
+	if err := h.deleteEarlier(ctx, eng, r, occ.ID); errors.Is(err, scheduler.ErrBusy) {
+		return false, nil
+	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return false, err
+	}
+	h.o.Log.Info("generate: an ended run at the book's new path was cleared", "job", r.job.ID, "old_book", occ.ID)
+	return true, nil
 }
 
 // loadSidecars reads the engine's sidecars, unless their files are unchanged

@@ -1889,7 +1889,12 @@ func TestMovePreservesAudioRunAndRefusesUnsafeDestinations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := hr.db.CreateBook(ctx, store.NewBook{SourcePath: store.AudioRunKey(realOccupied), Title: "Taken", WorkDir: filepath.Join(hr.work, "taken"), State: "done"}); err != nil {
+	taken, err := hr.db.CreateBook(ctx, store.NewBook{SourcePath: store.AudioRunKey(realOccupied), Title: "Taken", WorkDir: filepath.Join(hr.work, "taken"), State: "done"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A live run (paused mid-pipeline) keeps its path.
+	if err := hr.db.SetBookState(ctx, taken.ID, string(state.ASR), string(state.StatusPaused), "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := move("Taken.m4b"); err == nil {
@@ -1902,6 +1907,67 @@ func TestMovePreservesAudioRunAndRefusesUnsafeDestinations(t *testing.T) {
 	}
 	if g, err := hr.db.GetGenerateBook(ctx, 500); err != nil || g.RelPath != "Moved.m4b" {
 		t.Fatalf("mapping after moves: %+v, %v", g, err)
+	}
+}
+
+// A move onto the path of a run that has ended (done, failed or cancelled)
+// replaces that run, as create clears a book's earlier run; a live one parks.
+func TestMoveReplacesAnEndedRunAtTheNewPath(t *testing.T) {
+	for _, tc := range []struct {
+		name, state, status, err string
+		replaced                 bool
+	}{
+		{name: "done", state: string(state.Done), replaced: true},
+		{name: "failed", state: string(state.ASR), status: string(state.StatusFailed), err: "boom", replaced: true},
+		{name: "cancelled", state: string(state.ASR), status: string(state.StatusFailed), err: "cancelled", replaced: true},
+		{name: "paused", state: string(state.ASR), status: string(state.StatusPaused)},
+		{name: "needs attention", state: string(state.ASR), status: string(state.StatusNeedsAttention), err: "parked"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hr := newHarness(t)
+			ctx := t.Context()
+			old := filepath.Join(hr.root, "Loose.m4b")
+			b, err := hr.db.CreateMappedBook(ctx, store.NewBook{SourcePath: old, Title: "Loose", WorkDir: filepath.Join(hr.work, "loose"), State: "done"},
+				store.GenerateBook{ServerJobID: 520, LibraryID: 1, RelPath: "Loose.m4b"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			taken := filepath.Join(hr.root, "Taken.m4b")
+			if err := os.Rename(old, taken); err != nil {
+				t.Fatal(err)
+			}
+			realTaken, err := filepath.EvalSymlinks(taken)
+			if err != nil {
+				t.Fatal(err)
+			}
+			other, err := hr.db.CreateBook(ctx, store.NewBook{SourcePath: realTaken, Title: "Taken", WorkDir: filepath.Join(hr.work, "taken"), State: "done"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := hr.db.SetBookState(ctx, other.ID, tc.state, tc.status, tc.err, ""); err != nil {
+				t.Fatal(err)
+			}
+			p, err := locate(hr.root, "Taken.m4b")
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := &run{bookID: b.ID, job: jobs.Job{ID: 520}, mount: hr.root, rep: jobs.LocalReporter()}
+			err = hr.h.recordMove(ctx, r, p, "Taken.m4b")
+			_, gone := hr.db.GetBook(ctx, other.ID)
+			now, nowErr := hr.db.GetBook(ctx, b.ID)
+			if nowErr != nil {
+				t.Fatal(nowErr)
+			}
+			if tc.replaced {
+				if err != nil || !errors.Is(gone, store.ErrNotFound) || now.SourcePath != realTaken {
+					t.Fatalf("move = %v, the ended run %v, the book at %q", err, gone, now.SourcePath)
+				}
+				return
+			}
+			if err == nil || gone != nil || now.SourcePath != old {
+				t.Fatalf("move = %v over a live run (%v), the book at %q", err, gone, now.SourcePath)
+			}
+		})
 	}
 }
 
@@ -1927,6 +1993,9 @@ func TestAttachParksOnAnOccupiedMove(t *testing.T) {
 	}
 	other, err := hr.db.CreateBook(ctx, store.NewBook{SourcePath: realTaken, Title: "Taken", WorkDir: filepath.Join(hr.work, "taken"), State: "done"})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hr.db.SetBookState(ctx, other.ID, string(state.ASR), string(state.StatusPaused), "", ""); err != nil {
 		t.Fatal(err)
 	}
 	p, err := locate(hr.root, "Taken.m4b")
