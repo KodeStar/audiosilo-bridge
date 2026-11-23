@@ -6,7 +6,6 @@ import (
 	"errors"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -861,38 +860,6 @@ func TestTimestampFixedWidthLexicographic(t *testing.T) {
 	half := base.Add(500 * time.Millisecond)
 	if timestamp(base) >= timestamp(half) {
 		t.Fatalf("fixed-width timestamps not chronological: %q vs %q", timestamp(base), timestamp(half))
-	}
-}
-
-func TestDeriveWorkDir(t *testing.T) {
-	root := filepath.Join("data", "work")
-
-	// Distinct source paths yield distinct dirs even when the title is identical.
-	a := DeriveWorkDir(root, "/books/one", "Same Title")
-	b := DeriveWorkDir(root, "/books/two", "Same Title")
-	if a == b {
-		t.Fatalf("distinct sources collided: %q == %q", a, b)
-	}
-
-	// An all-symbol/empty title falls back to the "book" slug.
-	sym := filepath.Base(DeriveWorkDir(root, "/x", "!!!@@@###"))
-	if !strings.HasPrefix(sym, "book-") {
-		t.Errorf("all-symbol title fallback = %q, want book- prefix", sym)
-	}
-	empty := filepath.Base(DeriveWorkDir(root, "/y", "   "))
-	if !strings.HasPrefix(empty, "book-") {
-		t.Errorf("empty title fallback = %q, want book- prefix", empty)
-	}
-
-	// A very long title is truncated to a bounded path component.
-	long := filepath.Base(DeriveWorkDir(root, "/z", strings.Repeat("abcd ", 60)))
-	if len(long) > 60 {
-		t.Errorf("long title not truncated: %d chars (%q)", len(long), long)
-	}
-
-	// Same input is deterministic.
-	if DeriveWorkDir(root, "/books/one", "Same Title") != a {
-		t.Error("DeriveWorkDir is not deterministic")
 	}
 }
 

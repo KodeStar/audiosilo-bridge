@@ -403,7 +403,7 @@ func bookSource(hr *harness) string {
 func seedEarlierAt(hr *harness, key, goal string, st state.State, status string) store.Book {
 	hr.t.Helper()
 	ctx := context.Background()
-	b, err := hr.db.CreateBook(ctx, store.NewBook{SourcePath: key, WorkDir: store.DeriveWorkDir(hr.work, key, "The Book"), Title: "The Book",
+	b, err := hr.db.CreateBook(ctx, store.NewBook{SourcePath: key, WorkDir: filepath.Join(hr.work, strings.ReplaceAll(key, "/", "_")), Title: "The Book",
 		Goal: goal, Kind: string(state.KindAudio), State: string(state.Done)}) // never queued: the engine would run it
 	if err != nil {
 		hr.t.Fatal(err)
@@ -639,7 +639,7 @@ func seedEbookRun(hr *harness) store.Book {
 	hr.t.Helper()
 	ctx := context.Background()
 	sp := bookSource(hr)
-	b, err := hr.db.CreateBook(ctx, store.NewBook{SourcePath: sp, WorkDir: store.DeriveWorkDir(hr.work, sp, "The Book"), Title: "The Book",
+	b, err := hr.db.CreateBook(ctx, store.NewBook{SourcePath: sp, WorkDir: filepath.Join(hr.work, strings.ReplaceAll(sp, "/", "_")), Title: "The Book",
 		Kind: string(state.KindEbook), EbookPath: filepath.Join(sp, "Book.epub"), State: string(state.Done)})
 	if err != nil {
 		hr.t.Fatal(err)

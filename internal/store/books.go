@@ -2,23 +2,16 @@ package store
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	sqlite "modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
 )
-
-// workDirSlugMax caps the human-readable slug portion of a derived work dir, so a
-// very long title cannot produce an unwieldy path component.
-const workDirSlugMax = 48
 
 // statusNeedsAttention is the one status value that may carry a park code. The
 // store treats State/Status as opaque strings (internal/state owns their meaning),
@@ -67,43 +60,6 @@ func (b Book) IsAudioRun() bool { return strings.HasPrefix(b.SourcePath, audioRu
 // AudioSource is the path b's audio is read from: its source path, less the
 // audio run's key prefix.
 func (b Book) AudioSource() string { return strings.TrimPrefix(b.SourcePath, audioRunPrefix) }
-
-// DeriveWorkDir returns a unique per-book scratch directory under root. The
-// source_path hash guarantees uniqueness (two books may share a title), while the
-// title slug keeps the path human-readable. An empty/all-symbol title falls back
-// to "book"; the slug is length-capped. It lives here (next to CreateBook/NewBook)
-// so the identity-derivation logic is unit-testable without the transport layer.
-func DeriveWorkDir(root, sourcePath, title string) string {
-	sum := sha256.Sum256([]byte(sourcePath))
-	name := slug(title)
-	if name == "" {
-		name = "book"
-	}
-	return filepath.Join(root, name+"-"+hex.EncodeToString(sum[:])[:8])
-}
-
-// slug lowercases and hyphenates a title into a filesystem-safe, length-capped
-// directory-name fragment.
-func slug(s string) string {
-	var b strings.Builder
-	prevDash := false
-	for _, r := range strings.ToLower(strings.TrimSpace(s)) {
-		if b.Len() >= workDirSlugMax {
-			break
-		}
-		switch {
-		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
-			b.WriteRune(r)
-			prevDash = false
-		default:
-			if !prevDash && b.Len() > 0 {
-				b.WriteByte('-')
-				prevDash = true
-			}
-		}
-	}
-	return strings.Trim(b.String(), "-")
-}
 
 // ErrNotFound is returned when a lookup by id/path finds no row.
 var ErrNotFound = errors.New("not found")
