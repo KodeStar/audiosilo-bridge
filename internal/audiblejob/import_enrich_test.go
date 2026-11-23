@@ -123,6 +123,9 @@ func TestImportEnrichesOnlyTheTitlesBook(t *testing.T) {
 	}
 }
 
+// A disc beside an indexed sibling disc: the parent the rescan may join them
+// at takes no ASIN, the disc's own book does, and the sibling needs no
+// listing of the library to say so.
 func TestImportBesideIndexedDisc(t *testing.T) {
 	const parent = "Other Tapes"
 	const old = parent + "/CD1"
@@ -132,17 +135,7 @@ func TestImportBesideIndexedDisc(t *testing.T) {
 			e := newImportEnv(t)
 			e.writeLibrary(old+"/tape.mp3", "other recording")
 			e.srv.books = []link.LibraryBook{{Path: old, Title: "Tape"}}
-			e.srv.bookOf = func(string) string {
-				marker := NewImport(e.opts).markerPath(e.accts.acct.ID, e.accts.title.ASIN)
-				m, err := readPlaced(marker, e.libs.lib.ID, e.root)
-				if err != nil || m == nil {
-					t.Fatalf("placement marker before rescan = %+v, %v", m, err)
-				}
-				if enrich, recorded := m.Joins[parent]; !recorded || enrich {
-					t.Errorf("pre-rescan verdict for %q = %v", parent, m.Joins)
-				}
-				return answer
-			}
+			e.srv.bookOf = func(string) string { return answer }
 			out, err := e.run(context.Background(), e.params(func(p *ImportParams) { p.DestPath = dest }))
 			if err != nil {
 				t.Fatal(err)
@@ -150,8 +143,9 @@ func TestImportBesideIndexedDisc(t *testing.T) {
 			got := out.(*ImportResult)
 			wantEnrich := answer == dest
 			if got.Path != answer || got.Enriched != wantEnrich || (len(e.srv.enriched) > 0) != wantEnrich ||
-				!slices.Equal(e.srv.rescanned, []string{dest + "/The Copper Grove.m4b"}) || len(e.libraryFiles()) != 2 {
-				t.Fatalf("placed %+v, rescanned %v, enriched %v", got, e.srv.rescanned, e.srv.enriched)
+				!slices.Equal(e.srv.rescanned, []string{dest + "/The Copper Grove.m4b"}) || len(e.libraryFiles()) != 2 ||
+				e.srv.lists != 0 {
+				t.Fatalf("placed %+v, rescanned %v, enriched %v, library listings %d", got, e.srv.rescanned, e.srv.enriched, e.srv.lists)
 			}
 		})
 	}

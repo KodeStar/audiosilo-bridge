@@ -3636,9 +3636,8 @@ internal/
             the ASIN only on its verdict, any other is new (the title's own, a pack
             placed as a pack included) and takes it, except the parent of a disc
             folder destination: the server joins a disc there only beside another
-            disc, so that parent takes it only on its own listed verdict, never
-            beside an indexed sibling disc nor unlisted (an older marker's
-            included). A joined book
+            disc (indexed or not), so that parent takes it only on its own
+            listed verdict, never unlisted (an older marker's included). A joined book
             whose verdict lets it take the ASIN is read again for the title's
             Not this book mark first (unknown_account there fails the import
             as unknown_account). Result
@@ -3675,8 +3674,8 @@ internal/
             15 minutes (booksFor, the rescanned books refreshed by their page:
             importjob.Listing.BookAt), checking the destination's paths on the
             server before vacant (booksAt: a book there reads the whole listing;
-            a disc folder destination asks about the parent's other disc folders
-            on disk too).
+            a disc folder's sibling discs are never asked about, finish's
+            parent rule covers them).
             After the install a placement marker
             (<tmp>/<acct>-<asin>.placed.json: library_id, the request's dest_path
             and template, path, size, mtime_ns, the joins' verdicts) is written:

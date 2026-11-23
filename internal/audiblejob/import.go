@@ -753,25 +753,19 @@ func discParent(rel string) (parent string, ok bool) {
 // doesn't (importjob.SpanMismatch), so an omnibus never names a single volume
 // and a title never names another book, and the book not one the library
 // holds twice (importjob.Twins: the title's words can't tell the copies
-// apart, bridge#64). A disc folder beside an indexed sibling disc also lists
-// their parent, which may not take the ASIN even when it had no index entry:
-// the rescan can join the discs there (a book override on the parent
-// included). The book the rescan answers decides:
+// apart, bridge#64). The book the rescan answers decides:
 // one not listed here is new, the title itself (a pack placed as a pack
 // included), and takes the ASIN, unless it is the disc folder's parent
-// (finish: the server joins a disc there only beside another).
+// (finish: the server joins a disc there only beside another, indexed or
+// not, so the join is never the title's own).
 func joinedBooks(rec source.Record, books []link.LibraryBook, rel string) map[string]bool {
 	joins := map[string]bool{}
 	var twins map[string]bool
 	var match link.LibraryBook
 	matched, looked := false, false
 	dir := path.Dir(rel)
-	parent, disc := discParent(rel)
-	sibling := false
+	parent := path.Dir(dir)
 	for _, b := range books {
-		if disc && b.Path != dir && path.Dir(b.Path) == parent && isDiscFolder(path.Base(b.Path)) {
-			sibling = true
-		}
 		if b.Path == "." || (b.Path != rel && b.Path != dir && b.Path != parent) {
 			continue
 		}
@@ -781,9 +775,6 @@ func joinedBooks(rec source.Record, books []link.LibraryBook, rel string) map[st
 			looked = true
 		}
 		joins[b.Path] = matched && match.Path == b.Path && !importjob.SpanMismatch(rec, b) && !twins[b.Path]
-	}
-	if sibling {
-		joins[parent] = false
 	}
 	return joins
 }
@@ -799,8 +790,10 @@ type installed struct {
 }
 
 // finish is the steps after the install: the rescan, the ASIN (unless the
-// book it answers is one the file joined that may not take it) and the result.
-// The placement marker goes once the result is made.
+// book it answers is one the file joined that may not take it, a disc
+// folder's parent not listed, or a joined book while the title is marked Not
+// this book) and the result. The placement marker goes once the result is
+// made.
 func (h *Importer) finish(ctx context.Context, rep *jobs.Reporter, srv ImportServer, account, asin string, library importLibrary,
 	in installed, marker string) (*ImportResult, error) {
 	libraryID := library.id
@@ -815,9 +808,8 @@ func (h *Importer) finish(ctx context.Context, rep *jobs.Reporter, srv ImportSer
 	enrich, joined := in.joins[bookPath]
 	switch {
 	case !joined:
-		// A rescan joins a disc at its parent only beside another disc: one
-		// not indexed at placement, or an older marker's, which predates the
-		// sibling-disc check. That book isn't the title's own.
+		// A rescan joins a disc at its parent only beside another disc (one
+		// indexed or not at placement): that book isn't the title's own.
 		parent, disc := discParent(rel)
 		enrich = !disc || bookPath != parent
 	case enrich:
