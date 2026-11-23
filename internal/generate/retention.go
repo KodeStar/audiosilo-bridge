@@ -189,7 +189,11 @@ func (h *Handler) fromKeptTranscript(ctx context.Context, eng Engine, r *run, ol
 	if !current {
 		return false, nil
 	}
-	if kept, err := pipeline.KeptTranscription(ctx, old.WorkDir, m); err != nil || !kept {
+	var want pipeline.ASRSettings
+	if h.o.ASR != nil {
+		want = h.o.ASR()
+	}
+	if kept, err := pipeline.KeptTranscription(ctx, old.WorkDir, m, want); err != nil || !kept {
 		return false, err
 	}
 	if err := h.newBatch(ctx, &nb); err != nil {

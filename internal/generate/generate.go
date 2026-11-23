@@ -104,6 +104,10 @@ type Options struct {
 	// RetentionDays is transcripts.retention_days: 0 deletes a finished book's
 	// transcripts when its job ends (else the daily sweep does, that much later).
 	RetentionDays int
+	// ASR reports the model and language a new run transcribes with, so a kept
+	// transcript made under others is not reused (nil, or before the engine has
+	// started: unknown).
+	ASR func() pipeline.ASRSettings
 	// ContribCredential reports why no GitHub token resolves (contribute=issue
 	// needs one): nil when one does, else contrib.ErrNoCredential or
 	// contrib.ErrSignInUnrefreshed. A nil func counts as one resolving.

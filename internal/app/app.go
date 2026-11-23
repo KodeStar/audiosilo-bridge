@@ -224,6 +224,7 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 			return nil
 		},
 		WorkRoot: filepath.Join(opts.DataDir, "work"), Version: opts.Version, RetentionDays: cfg.Transcripts.RetentionDays,
+		ASR:               b.engine.asrSettings,
 		ContribCredential: b.contribCredential, Background: b.bg.run, Log: opts.Logger})
 	b.wakeParked = b.gen.WakeParked
 	serverID := func() string { return b.conn.Pairing().ServerID }

@@ -85,6 +85,14 @@ func (s *engineState) sharer() generate.Sharer {
 	return nil
 }
 
+// asrSettings is the engine's transcript settings (unknown until it started).
+func (s *engineState) asrSettings() pipeline.ASRSettings {
+	if e := s.get(); e != nil {
+		return e.exec.ASRSettings()
+	}
+	return pipeline.ASRSettings{}
+}
+
 // agentBackend is the backend the agent container runs: codex or
 // openai-compatible (codex against the endpoint) when set, else claude.
 func agentBackend(cfg config.Config) string {

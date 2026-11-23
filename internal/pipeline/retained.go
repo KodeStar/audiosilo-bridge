@@ -48,9 +48,25 @@ func manifestAtBook(m audio.Manifest, source string) (audio.Manifest, error) {
 	return m, nil
 }
 
+// ASRSettings are the settings that shape a transcript: a kept one is reused
+// only by a run under the same ones. A blank field is unknown.
+type ASRSettings struct {
+	Model    string
+	Language string
+}
+
+// ASRSettings reports the model and language the asr stage transcribes with.
+func (e *Executor) ASRSettings() ASRSettings {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return ASRSettings{Model: e.asr.Model, Language: e.asr.Language}
+}
+
 // KeptTranscription checks every raw chapter against the manifest and its
-// recorded ASR fingerprint. Older runs can predate the fingerprint.
-func KeptTranscription(ctx context.Context, dir string, m audio.Manifest) (bool, error) {
+// recorded ASR fingerprint and settings (want, the new run's). Older runs can
+// predate the fingerprint or the settings: only a recorded setting that differs
+// from a known one rules the transcript out.
+func KeptTranscription(ctx context.Context, dir string, m audio.Manifest, want ASRSettings) (bool, error) {
 	if len(m.Chapters) == 0 {
 		return false, nil
 	}
@@ -63,6 +79,9 @@ func KeptTranscription(ctx context.Context, dir string, m audio.Manifest) (bool,
 		}
 	case !errors.Is(err, os.ErrNotExist):
 		return false, err
+	}
+	if settingDiffers(provenance.Model, want.Model) || settingDiffers(provenance.Language, want.Language) {
+		return false, nil
 	}
 	if sum := provenance.ManifestSHA; sum != "" {
 		fp, err := manifestFingerprint(dir)
@@ -79,6 +98,12 @@ func KeptTranscription(ctx context.Context, dir string, m audio.Manifest) (bool,
 		}
 	}
 	return true, nil
+}
+
+// settingDiffers reports a recorded ASR setting known to differ from the new
+// run's (a blank one on either side is unknown).
+func settingDiffers(recorded, want string) bool {
+	return recorded != "" && want != "" && recorded != want
 }
 
 // SeedTranscription installs just the immutable inputs a fresh run needs

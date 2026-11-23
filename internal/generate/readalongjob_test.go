@@ -802,7 +802,8 @@ func TestReadalongRightAfterACancelIsNotRefused(t *testing.T) {
 }
 
 func TestRegenerateUsesCompleteRetainedTranscript(t *testing.T) {
-	for _, tc := range []string{"kept", "incomplete", "swept", "expired", "changed", "bad fingerprint"} {
+	for _, tc := range []string{"kept", "same settings", "unrecorded settings", "incomplete", "swept", "expired", "changed",
+		"bad fingerprint", "other language", "other model"} {
 		t.Run(tc, func(t *testing.T) {
 			hr := newHarness(t)
 			hr.generated(301)
@@ -817,6 +818,17 @@ func TestRegenerateUsesCompleteRetainedTranscript(t *testing.T) {
 				hr.h.o.Now = func() time.Time { return time.Now().Add(31 * 24 * time.Hour) }
 			case "bad fingerprint":
 				mustWrite(t, filepath.Join(old.WorkDir, "asr.json"), "{")
+			case "same settings", "other language", "other model":
+				mustWrite(t, filepath.Join(old.WorkDir, "asr.json"), `{"model":"large-v3","language":"en"}`)
+			case "unrecorded settings":
+				mustWrite(t, filepath.Join(old.WorkDir, "asr.json"), `{"backend":"whisper-cli"}`)
+			}
+			hr.h.o.ASR = func() pipeline.ASRSettings { return pipeline.ASRSettings{Model: "large-v3", Language: "en"} }
+			switch tc {
+			case "other language":
+				hr.h.o.ASR = func() pipeline.ASRSettings { return pipeline.ASRSettings{Model: "large-v3", Language: "de"} }
+			case "other model":
+				hr.h.o.ASR = func() pipeline.ASRSettings { return pipeline.ASRSettings{Model: "small", Language: "en"} }
 			case "incomplete":
 				mustWrite(t, filepath.Join(old.WorkDir, transcript.RawDir, transcript.RawName(2)), "{")
 			case "swept":
@@ -836,7 +848,7 @@ func TestRegenerateUsesCompleteRetainedTranscript(t *testing.T) {
 			waitDone(hr, 302)
 			b := hr.engineBook(302)
 			stages := hr.stagesRun(b.ID)
-			if tc == "kept" {
+			if tc == "kept" || tc == "same settings" || tc == "unrecorded settings" {
 				if len(stages) == 0 || stages[0] != string(state.Sanitizing) || slices.Contains(stages, string(state.ASR)) {
 					t.Fatalf("regenerate stages = %v", stages)
 				}
