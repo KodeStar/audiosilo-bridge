@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,6 +17,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/contrib"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/metaops"
+	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
 
 type fakeMeta struct {
@@ -32,6 +34,10 @@ type memKV struct {
 	m  map[string]string
 	// failSet fails each SetSetting of a key with this prefix ("": none).
 	failSet string
+}
+
+func (k *memKV) EarlierBookJobs(context.Context, string, string, int64, string, int64) ([]store.ServerJob, error) {
+	return nil, nil
 }
 
 func (k *memKV) GetSetting(_ context.Context, key string) (string, bool, error) {
@@ -845,5 +851,58 @@ func TestCorrectKeysByTheJobsServer(t *testing.T) {
 	p := Params{WorkID: "w"}
 	if a, b := h.filingKey(job, p), h.filingKey(jobs.ClaimedFrom(jobs.Job{ID: 4}, "b"), p); a == b || !strings.Contains(a, "/a/") {
 		t.Fatalf("filing keys a %q, b %q: want each under its own server", a, b)
+	}
+}
+
+func TestCorrectRetryAfterPartOfBatchApplied(t *testing.T) {
+	for _, scenario := range []string{"confirmed after job history pruned", "interrupted legacy job", "interrupted same job"} {
+		t.Run(scenario, func(t *testing.T) {
+			lost := scenario != "confirmed after job history pruned"
+			legacy := scenario == "interrupted legacy job"
+			ctx := context.Background()
+			db, err := store.Open(ctx, filepath.Join(t.TempDir(), "bridge.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			lib, path := int64(3), "Book"
+			job := jobs.Job{ID: 11, LibraryID: &lib, Path: &path, Params: json.RawMessage(params)}
+			gh := &gh{drop: lost}
+			creds := &tokens{token: "test", from: contrib.FromGH}
+			h := New(Options{KV: db, ServerID: func() string { return "s" }, Meta: fakeMeta{cov: cov()}, Tokens: creds, CoreRepo: "KodeStar/audiosilo-meta", BaseURL: gh.server(t).URL})
+			if legacy {
+				if err := db.RecordClaim(ctx, store.ServerJob{ID: job.ID, Kind: Kind, ServerID: "s", LibraryID: &lib, Path: &path, Params: job.Params, Attempt: 1}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, err = h.Run(ctx, job, jobs.LocalReporter())
+			if (lost && !errors.Is(err, errNoAnswer)) || (!lost && err != nil) {
+				t.Fatal(err)
+			}
+			if legacy {
+				// Legacy claims had only the exact-request marker.
+				if err := db.DeleteSetting(ctx, h.bookKey(job)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			gh.setDrop(false)
+			p, _ := ParseParams(job.Params)
+			p.Changes = p.Changes[1:]
+			if scenario != "interrupted same job" {
+				job.ID++
+			}
+			job.Params, _ = json.Marshal(p)
+			creds.from = contrib.FromDevice
+			out, err := h.Run(ctx, job, jobs.LocalReporter())
+			if err != nil || out.(Result).IssueNumber != 42 || out.(Result).Changes != 3 || out.(Result).IntakeNote != contrib.ManualIntakeNote || gh.count() != 1 {
+				t.Fatalf("subset retry: %+v, %v, %d issues", out, err, gh.count())
+			}
+			p.Changes[0].Corrected = "A different correction"
+			job.ID++
+			job.Params, _ = json.Marshal(p)
+			if _, err = h.Run(ctx, job, jobs.LocalReporter()); err != nil || gh.count() != 2 {
+				t.Fatalf("different correction: %v, %d issues", err, gh.count())
+			}
+		})
 	}
 }

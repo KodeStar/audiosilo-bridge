@@ -237,7 +237,7 @@ func TestDescribeJob(t *testing.T) {
 		strings.Join(res.Files, ",") != "description.json,bridge.json" {
 		t.Fatalf("result = %+v", res)
 	}
-	if calls := d.calls(); len(calls) != 1 || calls[0] {
+	if calls := d.calls(); len(calls) != 1 || !calls[0] {
 		t.Fatalf("describe calls = %+v", calls)
 	}
 	adir := filepath.Join(hr.root, "Author", "Book", AttachDir)
@@ -347,9 +347,7 @@ func TestDescribeJobParks(t *testing.T) {
 		case m == "budget" && call == 1:
 			return scheduler.ParkWithCode(state.ParkBudgetExceeded, "the budget is spent")
 		case m == "rate" && call == 3:
-			return scheduler.ParkWithCodeAfter(state.ParkAgentRateLimited, "rate limited", time.Now().Add(50*time.Millisecond))
-		case m == "rate": // the try at retry_at holds until the server has the park, as in TestDescribeJob
-			poll(func() bool { return hr.srv.saw(63, rateLimited) })
+			return scheduler.ParkWithCodeAfter(state.ParkAgentRateLimited, "rate limited", time.Now().Add(time.Hour))
 		case m == "checks":
 			return scheduler.ParkWithCode(state.ParkAgentValidationExhausted, "kept failing")
 		}
@@ -380,7 +378,18 @@ func TestDescribeJobParks(t *testing.T) {
 	}
 	hr.srv.addDescribe(63, "Author/Book")
 	hr.waitFor("the rate limit's park", func() bool { return hr.srv.saw(63, rateLimited) })
-	hr.waitFor("done at retry_at", func() bool { s, _ := hr.srv.final(63); return s == link.StateDone })
+	if calls := d.calls(); len(calls) != 3 || !calls[2] {
+		t.Fatalf("rate-limited describe calls = %v, want noWait", calls)
+	}
+	release, ok := hr.sched.Hold(hr.engineBook(61).ID)
+	if !ok {
+		t.Fatal("rate-limited describe still holds the engine book")
+	}
+	release()
+	if err := h.Retry(context.Background(), 63); err != nil {
+		t.Fatal(err)
+	}
+	hr.waitFor("done after rate-limit retry", func() bool { s, _ := hr.srv.final(63); return s == link.StateDone })
 
 	mu.Lock()
 	mode = "checks"
@@ -727,5 +736,24 @@ func TestDescribeWaitsForTheEnginesCancel(t *testing.T) {
 	hr.waitFor("the description ended", func() bool { s, _ := hr.srv.final(312); return s != "" })
 	if s, u := hr.srv.final(312); s != link.StateDone {
 		t.Fatalf("the description ended %s (%q), want done", s, errOf(u))
+	}
+}
+
+func TestDescribeRetriesWhenRateLimitEnds(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.generated(301)
+	d := &fakeDescriber{db: hr.db, fail: func(call int) error {
+		if call == 1 {
+			return scheduler.ParkWithCodeAfter(state.ParkAgentRateLimited, "rate limited", time.Now().Add(50*time.Millisecond))
+		}
+		return nil
+	}}
+	stop := hr.runAll(hr.describeHandler(d))
+	defer stop()
+	hr.srv.addDescribe(302, "Author/Book")
+	waitDone(hr, 302)
+	if calls := d.calls(); len(calls) != 2 || !calls[0] || !calls[1] {
+		t.Fatalf("describe attempts at the rate limit and after it: %v", calls)
 	}
 }

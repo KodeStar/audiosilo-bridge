@@ -317,14 +317,45 @@ func (db *DB) CreateBook(ctx context.Context, nb NewBook) (Book, error) {
 // inserted: a job that heard share_off has it local in the store
 // (keepSharedOffLocal), which a read of the book shows.
 func (db *DB) CreateMappedBook(ctx context.Context, nb NewBook, g GenerateBook) (Book, error) {
+	return db.ReplaceMappedBook(ctx, nil, nb, g)
+}
+
+// ReplaceMappedBook queues a fresh book, optionally replacing the finished
+// audio run whose retained inputs the caller staged under the engine hold.
+func (db *DB) ReplaceMappedBook(ctx context.Context, old *Book, nb NewBook, g GenerateBook) (Book, error) {
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return Book{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if old != nil {
+		var ok bool
+		err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM books WHERE id=?1 AND state='done' AND kind='audio'
+			AND NOT EXISTS (SELECT 1 FROM books other WHERE other.work_dir=books.work_dir AND other.id!=books.id)
+			AND NOT EXISTS (SELECT 1 FROM generate_books WHERE book_id=?1 AND swept_at!='')
+			AND NOT EXISTS (SELECT 1 FROM `+openJobsSQL+` AND g.book_id=?1 AND g.server_job_id!=?2))`, old.ID, g.ServerJobID).Scan(&ok)
+		if err != nil {
+			return Book{}, err
+		}
+		if !ok {
+			return Book{}, ErrNotContinuable
+		}
+		if err := setSetting(ctx, tx, TranscriptCleanupPrefix+nb.BatchID, old.WorkDir); err != nil {
+			return Book{}, err
+		}
+		if err := deleteBook(ctx, tx, old.ID); err != nil {
+			return Book{}, err
+		}
+	}
 	b, err := insertBook(ctx, tx, nb)
 	if err != nil {
 		return Book{}, err
+	}
+	if old != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE books SET chapters=?,duration_sec=? WHERE id=?`, old.Chapters, old.DurationSec, b.ID); err != nil {
+			return Book{}, err
+		}
+		b.Chapters, b.DurationSec = old.Chapters, old.DurationSec
 	}
 	g.BookID = &b.ID
 	if err := putGenerateBook(ctx, tx, g); err != nil {
@@ -841,15 +872,19 @@ func (db *DB) DeleteBook(ctx context.Context, id int64) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := deleteBook(ctx, tx, id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func deleteBook(ctx context.Context, tx *sql.Tx, id int64) error {
 	if _, err := tx.ExecContext(ctx, `INSERT INTO deleted_stage_spend (started_at, cost_usd)
 		SELECT started_at, `+budgetCostSQL+` FROM stage_runs WHERE book_id = ? AND (`+budgetCostSQL+`) > 0`, id); err != nil {
 		return err
 	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM books WHERE id = ?`, id)
-	if err := checkAffected(res, err); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return checkAffected(res, err)
 }
 
 // checkAffected maps a zero-row UPDATE/DELETE to ErrNotFound.

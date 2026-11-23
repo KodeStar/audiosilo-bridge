@@ -253,6 +253,12 @@ func (db *DB) ListServerJobs(ctx context.Context, before int64, limit int) ([]Se
 		`SELECT `+serverJobColumns+` FROM server_jobs WHERE id < ? ORDER BY id DESC LIMIT ?`, before, limit)
 }
 
+// EarlierBookJobs returns prior claims of this kind for the same server book.
+func (db *DB) EarlierBookJobs(ctx context.Context, server, kind string, library int64, path string, before int64) ([]ServerJob, error) {
+	return db.queryServerJobs(ctx, `SELECT `+serverJobColumns+` FROM server_jobs
+        WHERE server_id=? AND kind=? AND library_id=? AND path=? AND id<? ORDER BY id DESC`, server, kind, library, path, before)
+}
+
 // PruneServerJobs deletes finished, reported jobs beyond the newest keep.
 func (db *DB) PruneServerJobs(ctx context.Context, keep int) (int64, error) {
 	res, err := db.sql.ExecContext(ctx,

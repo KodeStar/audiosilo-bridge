@@ -264,6 +264,32 @@ func audioComplete(p string) bool {
 	return err == nil && info.Size() > 0
 }
 
+func TestChapterDetectFromMovedRetainedWindows(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+	book := chapterlessFixture(t, ffmpeg, 20,
+		owJSON("Chapter@0.5 One@0.9 it_began@2.2", "and@4 on@4.5"),
+		owJSON("Chapter@2.5 Two@2.9 it_ended@4.2"))
+	moved := filepath.Join(t.TempDir(), filepath.Base(book.SourcePath))
+	if err := os.Rename(book.SourcePath, moved); err != nil {
+		t.Fatal(err)
+	}
+	book.SourcePath = moved
+	if err := os.RemoveAll(filepath.Join(book.WorkDir, audio.ChaptersDir)); err != nil {
+		t.Fatal(err)
+	}
+	e := NewExecutor(Config{FFmpeg: ffmpeg})
+	if _, err := e.Execute(t.Context(), book, state.ChapterDetecting, scheduler.StageReport{}); err != nil {
+		t.Fatal(err)
+	}
+	m, err := audio.ReadManifest(book.WorkDir)
+	if err != nil || !m.Detected || m.Source != moved || len(m.Chapters) != 2 {
+		t.Fatalf("detected chapters after move: %+v, %v", m, err)
+	}
+}
+
 func TestChapterDetectStageParksWhenNotConfident(t *testing.T) {
 	ffmpeg, err := exec.LookPath("ffmpeg")
 	if err != nil {
@@ -508,9 +534,20 @@ func TestDetectionRerunnable(t *testing.T) {
 		mustWriteFile(filepath.Join(work, transcript.RawDir, transcript.RawName(w)), string(owJSON("and@1 on@2")))
 		mustWriteFile(filepath.Join(work, audio.ChaptersDir, audio.ChapterFileName(w)), strings.Repeat("f", 512))
 	}
-	if !DetectionRerunnable(work) {
+	if !DetectionRerunnable(work, src) {
 		t.Fatal("a complete window layer isn't rerunnable")
 	}
+	// Both retry decisions follow the engine source through a folder rename.
+	// The window fingerprint still covers the path inspect originally wrote.
+	movedDir := t.TempDir()
+	moved := filepath.Join(movedDir, filepath.Base(src))
+	if err := os.Rename(src, moved); err != nil {
+		t.Fatal(err)
+	}
+	if !DetectionRerunnable(work, movedDir) || !TranscriptionContinuable(work, movedDir) || DetectionRerunnable(work, src) {
+		t.Fatal("the retry checks did not follow the engine book")
+	}
+	src = moved
 	flac := filepath.Join(work, audio.ChaptersDir, audio.ChapterFileName(2))
 	raw := filepath.Join(work, transcript.RawDir, transcript.RawName(2))
 	for _, tc := range []struct {
@@ -529,18 +566,18 @@ func TestDetectionRerunnable(t *testing.T) {
 			func() { _ = os.Remove(raw) }, func() { mustWriteFile(raw, string(owJSON("and@1 on@2"))) }},
 	} {
 		tc.spoil()
-		if DetectionRerunnable(work) {
+		if DetectionRerunnable(work, src) {
 			t.Fatalf("rerunnable with %s", tc.denied)
 		}
 		tc.restore()
-		if !DetectionRerunnable(work) {
+		if !DetectionRerunnable(work, src) {
 			t.Fatalf("not rerunnable once %s was undone", tc.denied)
 		}
 	}
 	// A file dated a little after the probe (a library on a clock running ahead of
 	// the Bridge's, the file copied in just before inspect) is still the one read.
 	writeSource("the audio", time.Now().Add(sourceClockSlack/2))
-	if !DetectionRerunnable(work) {
+	if !DetectionRerunnable(work, src) {
 		t.Fatal("a file dated within the clock slack of its probe isn't rerunnable")
 	}
 	writeSource("the audio", before)
@@ -552,7 +589,7 @@ func TestDetectionRerunnable(t *testing.T) {
 	kept := windowDetection{WindowsSHA: windowsSHA(m), Result: chapterdetect.Result{Confident: true}}
 	_ = os.Remove(flac)
 	writeJSONFile(t, detection, kept)
-	if !DetectionRerunnable(work) {
+	if !DetectionRerunnable(work, src) {
 		t.Fatal("a layer in place with its confident detection kept isn't rerunnable")
 	}
 	_ = os.Remove(detection)
@@ -562,11 +599,11 @@ func TestDetectionRerunnable(t *testing.T) {
 	if err := os.Rename(filepath.Join(work, transcript.RawDir), filepath.Join(wdir, transcript.RawDir)); err != nil {
 		t.Fatal(err)
 	}
-	if DetectionRerunnable(work) {
+	if DetectionRerunnable(work, src) {
 		t.Fatal("rerunnable after a move with no detection kept")
 	}
 	writeJSONFile(t, detection, kept)
-	if !DetectionRerunnable(work) {
+	if !DetectionRerunnable(work, src) {
 		t.Fatal("a moved layer with its detection isn't rerunnable")
 	}
 }
@@ -586,7 +623,7 @@ func TestTranscriptionContinuable(t *testing.T) {
 	if err := os.MkdirAll(work, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if TranscriptionContinuable(work) {
+	if TranscriptionContinuable(work, src) {
 		t.Fatal("continuable with no manifest")
 	}
 	m := audio.Manifest{Source: src, Style: audio.StyleWindows, Duration: 20, ChapterCount: 2, Chapters: []audio.Chapter{
@@ -601,7 +638,7 @@ func TestTranscriptionContinuable(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(work, transcript.RawDir, transcript.RawName(1)), owJSON("and@1 on@2"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if !TranscriptionContinuable(work) {
+	if !TranscriptionContinuable(work, src) {
 		t.Fatal("a windows book stopped at asr isn't continuable")
 	}
 	for _, tc := range []struct {
@@ -618,11 +655,11 @@ func TestTranscriptionContinuable(t *testing.T) {
 			func() { writeProbeJSON(t, work, `{"format":{"duration":"20"}}`) }, func() { writeProbeJSON(t, work, probe) }},
 	} {
 		tc.spoil()
-		if TranscriptionContinuable(work) {
+		if TranscriptionContinuable(work, src) {
 			t.Fatalf("continuable with %s", tc.denied)
 		}
 		tc.restore()
-		if !TranscriptionContinuable(work) {
+		if !TranscriptionContinuable(work, src) {
 			t.Fatalf("not continuable once %s was undone", tc.denied)
 		}
 	}
@@ -630,7 +667,7 @@ func TestTranscriptionContinuable(t *testing.T) {
 	if err := writeASRProvenance(work, asrProvenance{ManifestSHA: "another manifest"}); err != nil {
 		t.Fatal(err)
 	}
-	if TranscriptionContinuable(work) {
+	if TranscriptionContinuable(work, src) {
 		t.Fatal("continuable with raws kept for another manifest")
 	}
 	fp, err := manifestFingerprint(work)
@@ -640,7 +677,7 @@ func TestTranscriptionContinuable(t *testing.T) {
 	if err := writeASRProvenance(work, asrProvenance{ManifestSHA: fp}); err != nil {
 		t.Fatal(err)
 	}
-	if !TranscriptionContinuable(work) {
+	if !TranscriptionContinuable(work, src) {
 		t.Fatal("not continuable with the raws kept for its own manifest")
 	}
 	// Splitting's sentinel kept passes it straight on: the windows it cut must still
@@ -648,7 +685,7 @@ func TestTranscriptionContinuable(t *testing.T) {
 	if err := scheduler.WriteSentinel(work, string(state.Splitting), scheduler.StageResult{}); err != nil {
 		t.Fatal(err)
 	}
-	if TranscriptionContinuable(work) {
+	if TranscriptionContinuable(work, src) {
 		t.Fatal("continuable with splitting passed on and its windows gone")
 	}
 	for w := 1; w <= 2; w++ {
@@ -659,7 +696,7 @@ func TestTranscriptionContinuable(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if !TranscriptionContinuable(work) {
+	if !TranscriptionContinuable(work, src) {
 		t.Fatal("not continuable with splitting passed on and its windows whole")
 	}
 	// The layer moved aside: the detection ran, so it isn't a book stopped at asr.
@@ -668,7 +705,7 @@ func TestTranscriptionContinuable(t *testing.T) {
 	if err := os.Rename(filepath.Join(work, transcript.RawDir), filepath.Join(wdir, transcript.RawDir)); err != nil {
 		t.Fatal(err)
 	}
-	if TranscriptionContinuable(work) {
+	if TranscriptionContinuable(work, src) {
 		t.Fatal("continuable with the window layer moved aside")
 	}
 }

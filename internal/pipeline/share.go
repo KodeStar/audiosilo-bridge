@@ -37,6 +37,7 @@ var ErrNotMatched = errors.New("the book isn't matched to a community work")
 type ShareResult struct {
 	WorkID      string
 	Contributed map[string]string
+	IntakeNotes map[string]string
 	Covered     []string
 }
 
@@ -83,7 +84,7 @@ func (e *Executor) ShareChecked(ctx context.Context, bookID int64, workID string
 	if err != nil {
 		return ShareResult{}, err
 	}
-	if err := e.prepareArtifacts(ctx, book, slug, artifacts); err != nil {
+	if err := e.prepareArtifacts(ctx, book, slug, slug, artifacts); err != nil {
 		return ShareResult{}, fmt.Errorf("share: %w", err)
 	}
 	out := ShareResult{WorkID: slug, Contributed: map[string]string{}, Covered: []string{}}
@@ -101,6 +102,7 @@ func (e *Executor) ShareChecked(ctx context.Context, bookID int64, workID string
 	for _, r := range e.bookContributions(ctx, book.ID) {
 		if filed[r.Kind] && r.URL != "" {
 			out.Contributed[r.Kind] = r.URL
+			out.IntakeNotes = contrib.AddIntakeNote(out.IntakeNotes, r.Kind, r.Note)
 		}
 	}
 	return out, nil

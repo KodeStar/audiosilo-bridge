@@ -154,7 +154,7 @@ type Config struct {
 	// database's COMMUNITY repository, which takes the characters/recaps sidecars
 	// (add-work proposals go to the core repository through contrib.Service, not
 	// through this stage); ContribBaseURL overrides the GitHub REST base for tests
-	// (empty = api.github.com); ExportRoot is where local mode writes its export.
+	// (empty = api.github.com); an explicit ExportRoot also copies local sidecars there.
 	Meta                 MetaCoverage
 	TokenSource          TokenResolver
 	ContribMode          string
@@ -698,9 +698,13 @@ var splitTransientRetryDelay = 2 * time.Second
 // from the stage's productive seconds - the same contract the agent runner uses for
 // rate-limit backoff. Backoff is waiting, not work; charging it to the learned
 // chapters/sec rate would make every later book's ETA wrong.
-func splitWithRetries(ctx context.Context, m audio.Manifest, workDir, ffmpeg string, r scheduler.StageReport, progress audio.ProgressFunc) (slept time.Duration, err error) {
+func splitWithRetries(ctx context.Context, m audio.Manifest, book store.Book, ffmpeg string, r scheduler.StageReport, progress audio.ProgressFunc) (slept time.Duration, err error) {
+	m, err = manifestAtBook(m, book.AudioSource())
+	if err != nil {
+		return 0, err
+	}
 	for attempt := 1; ; attempt++ {
-		err = audio.Split(ctx, m, workDir, ffmpeg, progress)
+		err = audio.Split(ctx, m, book.WorkDir, ffmpeg, progress)
 		if err == nil || attempt == splitTransientMaxAttempts || !audio.IsTransientSourceErr(err) {
 			return slept, err
 		}
@@ -762,7 +766,7 @@ func (e *Executor) split(ctx context.Context, book store.Book, r scheduler.Stage
 		return fmt.Sprintf("splitting: ffmpeg still running (%s elapsed)", humanDuration(elapsed))
 	}, func() error {
 		var serr error
-		slept, serr = splitWithRetries(ctx, manifest, book.WorkDir, ffmpeg, r, progress)
+		slept, serr = splitWithRetries(ctx, manifest, book, ffmpeg, r, progress)
 		return serr
 	})
 	if err != nil {

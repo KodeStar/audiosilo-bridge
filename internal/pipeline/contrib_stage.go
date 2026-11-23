@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -139,14 +140,17 @@ type contribArtifact struct {
 // rewritten to it, the source edition stamped) and marks the dimensions the work
 // already carries upstream as covered. ErrWorkNotFound, transport and disabled
 // degrade to "not covered" (metaissue's overwrite refusal is the backstop).
-func (e *Executor) prepareArtifacts(ctx context.Context, book store.Book, slug string, artifacts []contribArtifact) error {
-	sourceRef := e.contributionSourceRef(ctx, book, slug)
+func (e *Executor) prepareArtifacts(ctx context.Context, book store.Book, slug, workID string, artifacts []contribArtifact) error {
+	sourceRef := e.contributionSourceRef(ctx, book, workID)
 	for _, a := range artifacts {
 		if err := reconcileSidecar(a.path, slug, sourceRef); err != nil {
 			return fmt.Errorf("reconcile %s: %w", filepath.Base(a.path), err)
 		}
 	}
-	hasChars, hasRecaps := e.coveredDimensions(ctx, slug)
+	if workID == "" {
+		return nil
+	}
+	hasChars, hasRecaps := e.coveredDimensions(ctx, workID)
 	for i, a := range artifacts {
 		artifacts[i].covered = (a.kind == store.ContribKindCharacters && hasChars) || (a.kind == store.ContribKindRecaps && hasRecaps)
 	}
@@ -229,7 +233,11 @@ func (e *Executor) contribute(ctx context.Context, book store.Book, r scheduler.
 	if haveRecaps {
 		artifacts = append(artifacts, contribArtifact{kind: store.ContribKindRecaps, path: recapsPath})
 	}
-	if err := e.prepareArtifacts(ctx, book, slug, artifacts); err != nil {
+	workID := slug
+	if placeholderNote != "" {
+		workID = ""
+	}
+	if err := e.prepareArtifacts(ctx, book, slug, workID, artifacts); err != nil {
 		return scheduler.StageResult{}, fmt.Errorf("contributing: %w", err)
 	}
 
@@ -696,12 +704,12 @@ func (e *Executor) submitIssueWith(ctx context.Context, book store.Book, slug st
 		note := ""
 		// An issue filed through the GitHub App is labelled by the meta repo's
 		// route workflow once it is open (D3), so a label missing now says nothing.
-		if !cli.AppFiled() {
+		if cmp.Or(issue.FiledWith, cli.CredentialSource()) != contrib.FromDevice {
 			if got, gerr := cli.GetIssue(ctx, e.contribCommunityRepo, issue.Number); gerr == nil && !labelStuck(got.Labels, routingLabel(a.kind)) {
 				note = fmt.Sprintf("%s - a maintainer must apply %s for intake to run", store.ContribNoteLabelsMissingPrefix, routingLabel(a.kind))
 			}
 		}
-		if err := e.upsertRow(ctx, book.ID, a.kind, store.ContribModeIssue, issue.Number, issue.URL, store.ContribStatusSubmitted, contrib.JoinNotes(note, auditNote)); err != nil {
+		if err := e.upsertRow(ctx, book.ID, a.kind, store.ContribModeIssue, issue.Number, issue.URL, store.ContribStatusSubmitted, contrib.JoinNotes(note, contrib.IntakeNote(issue.FiledWith), auditNote)); err != nil {
 			return err
 		}
 		e.clearFiling(ctx, book.ID, a.kind)
@@ -709,9 +717,8 @@ func (e *Executor) submitIssueWith(ctx context.Context, book store.Book, slug st
 	return nil
 }
 
-// submitLocal exports each uncovered sidecar as <exportRoot>/<slug>/<kind>.json - the
-// bare file an intake-issue attachment takes - and records a local row (with
-// placeholderNote for a title-derived placeholder slug). No network, no credential.
+// submitLocal records each local sidecar. Bridge jobs publish the files from
+// the work folder beside the book. An explicit export root requests another copy.
 func (e *Executor) submitLocal(ctx context.Context, book store.Book, slug string, artifacts []contribArtifact, placeholderNote, auditNote string) error {
 	// WriteFileAtomic MkdirAlls the destination parent, so no explicit MkdirAll here.
 	destDir := filepath.Join(e.exportRoot, slug)
@@ -728,12 +735,14 @@ func (e *Executor) submitLocal(ctx context.Context, book store.Book, slug string
 			}
 			continue
 		}
-		content, rerr := os.ReadFile(a.path) //nolint:gosec // path derives from the book's work dir
-		if rerr != nil {
-			return rerr
-		}
-		if err := fsutil.WriteFileAtomic(filepath.Join(destDir, fileNameFor(a.kind)), content, 0o644); err != nil {
-			return err
+		if e.exportRoot != "" {
+			content, rerr := os.ReadFile(a.path) //nolint:gosec // path derives from the book's work dir
+			if rerr != nil {
+				return rerr
+			}
+			if err := fsutil.WriteFileAtomic(filepath.Join(destDir, fileNameFor(a.kind)), content, 0o644); err != nil {
+				return err
+			}
 		}
 		if err := e.upsertRow(ctx, book.ID, a.kind, store.ContribModeLocal, 0, "", store.ContribStatusLocal, contrib.JoinNotes(placeholderNote, auditNote)); err != nil {
 			return err
@@ -875,6 +884,9 @@ func reconcileSidecar(path, slug, sourceRef string) error {
 // contributionSources returns the one community provenance entry permitted by the
 // sidecar contract. The ref names the actual audiobook edition, not this tool.
 func contributionSources(sourceRef string) []model.Source {
+	if sourceRef == "" {
+		return []model.Source{}
+	}
 	return []model.Source{{Type: sourceTypeCommunity, Ref: sourceRef}}
 }
 
@@ -882,7 +894,10 @@ func contributionSources(sourceRef string) []model.Source {
 // locally captured ASIN/ISBN is strongest. Otherwise the resolved work's recordings
 // are matched against local narrator/runtime evidence; only a tie-free match is used.
 func (e *Executor) contributionSourceRef(ctx context.Context, book store.Book, slug string) string {
-	cov, covErr := e.metaCoverageForWork(ctx, slug, false)
+	var cov metaops.Coverage
+	if slug != "" {
+		cov, _ = e.metaCoverageForWork(ctx, slug, false)
+	}
 	if asin := strings.TrimSpace(book.ASIN); asin != "" {
 		for _, rec := range cov.Recordings {
 			for _, candidate := range rec.ASINs {
@@ -896,24 +911,25 @@ func (e *Executor) contributionSourceRef(ctx context.Context, book store.Book, s
 	if isbn := strings.TrimSpace(book.ISBN); isbn != "" {
 		return "isbn:" + isbn
 	}
-	if covErr == nil {
-		if rec := bestRecordingRef(book, cov.Recordings); rec != nil {
-			for _, region := range []string{"us", "uk", "au", "ca"} {
-				for _, asin := range rec.ASINs {
-					if strings.EqualFold(asin.Region, region) && strings.TrimSpace(asin.ASIN) != "" {
-						return "audible:" + strings.ToLower(asin.Region) + ":" + strings.TrimSpace(asin.ASIN)
-					}
+	if slug == "" {
+		return ""
+	}
+	if rec := bestRecordingRef(book, cov.Recordings); rec != nil {
+		for _, region := range []string{"us", "uk", "au", "ca"} {
+			for _, asin := range rec.ASINs {
+				if strings.EqualFold(asin.Region, region) && strings.TrimSpace(asin.ASIN) != "" {
+					return "audible:" + strings.ToLower(asin.Region) + ":" + strings.TrimSpace(asin.ASIN)
 				}
 			}
-			if len(rec.ASINs) > 0 && strings.TrimSpace(rec.ASINs[0].ASIN) != "" {
-				return "audible:" + strings.TrimSpace(rec.ASINs[0].ASIN)
-			}
-			if len(rec.ISBNs) > 0 && strings.TrimSpace(rec.ISBNs[0]) != "" {
-				return "isbn:" + strings.TrimSpace(rec.ISBNs[0])
-			}
-			if rec.ID != "" {
-				return "audiosilo-meta:recording:" + slug + "/" + rec.ID
-			}
+		}
+		if len(rec.ASINs) > 0 && strings.TrimSpace(rec.ASINs[0].ASIN) != "" {
+			return "audible:" + strings.TrimSpace(rec.ASINs[0].ASIN)
+		}
+		if len(rec.ISBNs) > 0 && strings.TrimSpace(rec.ISBNs[0]) != "" {
+			return "isbn:" + strings.TrimSpace(rec.ISBNs[0])
+		}
+		if rec.ID != "" {
+			return "audiosilo-meta:recording:" + slug + "/" + rec.ID
 		}
 	}
 	return "audiosilo-meta:work:" + slug

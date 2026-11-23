@@ -257,13 +257,13 @@ type described struct {
 // (waiting a few polls for it; errBookBusy when it never comes) and reads the
 // description back before letting go, so no stage, delete, purge or sweep acts on
 // the book meanwhile. The result carries the step's spend whatever happened.
-func (h *Handler) describeHeld(ctx context.Context, d Describer, bookID int64, noWait bool) (described, error) {
+func (h *Handler) describeHeld(ctx context.Context, d Describer, bookID int64) (described, error) {
 	release, err := h.holdBook(ctx, bookID)
 	if err != nil {
 		return described{}, err
 	}
 	defer release()
-	res, err := d.Describe(ctx, bookID, noWait)
+	res, err := d.Describe(ctx, bookID, true)
 	if err != nil {
 		return described{res: res}, err
 	}
@@ -306,7 +306,7 @@ func (h *Handler) describeParked(ctx context.Context, r *run, d Describer, bookI
 				Extra: r.describeExtra(spent)})
 		}
 		mark := h.wakeMark()
-		got, err := h.describeHeld(ctx, d, bookID, false)
+		got, err := h.describeHeld(ctx, d, bookID)
 		spent += got.res.CostUSD
 		var park *scheduler.ParkError
 		switch {
@@ -417,7 +417,7 @@ func (h *Handler) describeOnce(ctx context.Context, r *run, b store.Book) bool {
 	}
 	r.rep.Progress(jobs.Progress{Step: pipeline.DescribeStage, Message: "Writing a description",
 		Extra: r.bookExtra(b)})
-	got, err := h.describeHeld(ctx, d, b.ID, true)
+	got, err := h.describeHeld(ctx, d, b.ID)
 	if err != nil && r.desc != nil {
 		// The re-compose at done failed: the park's description stands (as the
 		// park had its work).

@@ -1676,3 +1676,29 @@ func TestInspectNotesATitleMarkerAsWindows(t *testing.T) {
 		t.Fatalf("notes = %q", notes)
 	}
 }
+
+func TestManifestAtMovedFolder(t *testing.T) {
+	old, moved := t.TempDir(), t.TempDir()
+	m := audio.Manifest{Source: old, Style: audio.StyleFiles}
+	for i, name := range []string{"01.mp3", "02.mp3"} {
+		if err := os.WriteFile(filepath.Join(moved, name), []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		m.Chapters = append(m.Chapters, audio.Chapter{Chapter: i + 1, FilePath: filepath.Join(old, name)})
+	}
+	got, err := manifestAtBook(m, moved)
+	if err != nil || got.Source != moved {
+		t.Fatalf("source = %q, %v", got.Source, err)
+	}
+	for i, c := range got.Chapters {
+		if filepath.Dir(c.FilePath) != moved || filepath.Dir(m.Chapters[i].FilePath) != old {
+			t.Fatalf("chapter paths: %q, original %q", c.FilePath, m.Chapters[i].FilePath)
+		}
+	}
+	if err := os.Rename(filepath.Join(moved, "02.mp3"), filepath.Join(moved, "03.mp3")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manifestAtBook(m, moved); err == nil {
+		t.Fatal("accepted a missing chapter file")
+	}
+}

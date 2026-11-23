@@ -1837,3 +1837,65 @@ func TestStoppedByParksAShareItCantConfirm(t *testing.T) {
 		t.Fatalf("stands false: %v %v, want the share stopped", stop, err)
 	}
 }
+
+func TestRecoverInterruptedTranscriptReplacement(t *testing.T) {
+	ctx := t.Context()
+	root := t.TempDir()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	h := New(Options{DB: db, WorkRoot: root})
+	old := store.NewBook{SourcePath: "/Book", WorkDir: filepath.Join(root, "old"), Title: "Book", Kind: "audio", State: "done"}
+	b, err := db.CreateBook(ctx, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := old
+	next.BatchID, next.WorkDir = "replacement", filepath.Join(root, "new")
+	if err := db.EnsureBatch(ctx, next.BatchID, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	key := store.TranscriptCleanupPrefix + next.BatchID
+	mustWrite(t, filepath.Join(old.WorkDir, "raw"), "original")
+	stage := func() {
+		t.Helper()
+		if err := db.SetSetting(ctx, key, next.WorkDir); err != nil {
+			t.Fatal(err)
+		}
+		mustWrite(t, filepath.Join(next.WorkDir, "raw"), "staged")
+	}
+	recoverAndCheck := func(kept, removed string) {
+		t.Helper()
+		if err := h.RecoverTranscriptDirs(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Join(kept, "raw")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(removed); !os.IsNotExist(err) {
+			t.Fatalf("disposable directory %s: %v", removed, err)
+		}
+	}
+	stage()
+	recoverAndCheck(old.WorkDir, next.WorkDir)
+	stage()
+	if _, err := db.ReplaceMappedBook(ctx, &b, next, store.GenerateBook{ServerJobID: 1, LibraryID: 1, RelPath: "Book"}); err != nil {
+		t.Fatal(err)
+	}
+	recoverAndCheck(next.WorkDir, old.WorkDir)
+	outside := t.TempDir()
+	for _, dir := range []string{next.WorkDir, outside} {
+		if err := db.SetSetting(ctx, key, dir); err != nil {
+			t.Fatal(err)
+		}
+		err := h.RecoverTranscriptDirs(ctx)
+		if (dir == outside) != (err != nil) {
+			t.Fatalf("cleanup of %s: %v", dir, err)
+		}
+		if _, err := os.Stat(dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+}

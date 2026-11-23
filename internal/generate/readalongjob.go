@@ -163,11 +163,7 @@ func (h *Handler) writeReadalongRequest(r *run, workDir string) error {
 // again when the server moved the job with its book: the ebook moved with it.
 // The stage reads it as it starts, so a move after that fails the stage (the
 // ebook isn't where it was), to be run again.
-func (h *Handler) readalongAsk(ctx context.Context, r *run, b store.Book) error {
-	if cur := r.rep.Path(); cur != "" && cur != r.jobPath && h.adoptMove(ctx, r) {
-		h.recordMove(ctx, r)
-		r.readalongAsked = false // adoptMove took the move: asked again below, or at a later poll
-	}
+func (h *Handler) readalongAsk(r *run, b store.Book) error {
 	if r.readalongAsked {
 		return nil
 	}
@@ -355,9 +351,6 @@ func (h *Handler) createReadalong(ctx context.Context, eng Engine, r *run) error
 	nb := h.newBook(r, key, "")
 	nb.Goal = state.GoalReadalong
 	nb.Series, nb.SeriesPos, nb.ContribMode = "", "", ""
-	if err := h.writeReadalongRequest(r, nb.WorkDir); err != nil {
-		return err
-	}
 	return h.queueBook(ctx, eng, r, nb)
 }
 
@@ -436,7 +429,7 @@ func (h *Handler) reuseForReadalong(ctx context.Context, eng Engine, r *run, old
 	}
 	e := readalongEarlier{Goal: old.Goal, State: old.State, Status: old.Status, Swept: swept, Current: current}
 	if state.State(old.State) == state.ASR {
-		e.Continuable = pipeline.TranscriptionContinuable(old.WorkDir)
+		e.Continuable = pipeline.TranscriptionContinuable(old.WorkDir, old.AudioSource())
 	}
 	if e.FactPass, err = h.readalongFromWholeRun(ctx, old); err != nil {
 		return false, err

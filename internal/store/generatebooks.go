@@ -176,6 +176,26 @@ func (db *DB) SetGenerateBookPath(ctx context.Context, serverJobID int64, relPat
 	return err
 }
 
+// MoveGenerateBook changes the active mapping and its engine input together.
+// The audio run beside an ebook keeps its separate key. WorkDir holds the
+// retained artifacts and stays at its original location.
+func (db *DB) MoveGenerateBook(ctx context.Context, jobID, bookID int64, rel, source, ebook string) error {
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, `UPDATE generate_books SET rel_path=? WHERE server_job_id=? AND book_id=?`, rel, jobID, bookID)
+	if err := checkAffected(res, err); err != nil {
+		return err
+	}
+	res, err = tx.ExecContext(ctx, `UPDATE books SET source_path=?, ebook_path=? WHERE id=?`, source, ebook, bookID)
+	if err := checkAffected(res, err); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // StopGuard is what a job's end read before it stops its engine book: the
 // job's claim (its id, attempt, server and pairing) and whether the job's
 // mapping recorded its end already (Ended). A later claim of the same job
@@ -410,6 +430,17 @@ func (db *DB) GenerateBookSwept(ctx context.Context, bookID int64) (bool, error)
 	return n > 0, err
 }
 
+// TranscriptRetained checks the deadline even between daily sweeps. For an
+// older book without an ended job mapping, its last engine update dates the run.
+func (db *DB) TranscriptRetained(ctx context.Context, bookID int64, cutoff time.Time) (bool, error) {
+	var kept bool
+	err := db.sql.QueryRowContext(ctx, `SELECT
+		NOT EXISTS (SELECT 1 FROM generate_books WHERE book_id=b.id AND swept_at!='')
+		AND COALESCE((SELECT MAX(NULLIF(ended_at,'')) FROM generate_books WHERE book_id=b.id), b.updated_at) > ?
+		FROM books b WHERE id=?`, timestamp(cutoff), bookID).Scan(&kept)
+	return kept, err
+}
+
 // MarkGenerateBookSwept records that an engine book's transcripts were deleted,
 // so the sweep skips it from now on.
 func (db *DB) MarkGenerateBookSwept(ctx context.Context, bookID int64, at time.Time) error {
@@ -461,4 +492,36 @@ func (db *DB) FinishedBooks(ctx context.Context) ([]FinishedBook, error) {
 		out = append(out, f)
 	}
 	return out, rows.Err()
+}
+
+// TranscriptCleanupPrefix keys the disposable folder of a transcript
+// replacement by its unique batch, through both sides of the admission commit.
+const TranscriptCleanupPrefix = "transcript.cleanup/"
+
+func (db *DB) TranscriptCleanupKeys(ctx context.Context) ([]string, error) {
+	rows, err := db.sql.QueryContext(ctx, `SELECT key FROM settings WHERE key GLOB ?`, TranscriptCleanupPrefix+"*")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var keys []string
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, err
+		}
+		keys = append(keys, key)
+	}
+	return keys, rows.Err()
+}
+
+// DisposableTranscriptDir only returns a tracked folder that no engine book owns.
+func (db *DB) DisposableTranscriptDir(ctx context.Context, key string) (string, bool, error) {
+	var dir string
+	err := db.sql.QueryRowContext(ctx, `SELECT value FROM settings WHERE key=?
+		AND NOT EXISTS (SELECT 1 FROM books WHERE work_dir=settings.value)`, key).Scan(&dir)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	return dir, err == nil, err
 }

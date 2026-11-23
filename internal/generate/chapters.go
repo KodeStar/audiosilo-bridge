@@ -154,8 +154,8 @@ func markersFile(path string) (string, error) {
 }
 
 // bookFileNow is the book's one audio file where the job has it now: at the path
-// the server's last answer moved the job to (adoptMove takes it up at the next
-// save, after the chapters were checked), else at the run's place; "" when that
+// the server's last answer moved the job to, including an answer received while
+// awaitChapters is parked inside a single engine poll, else at the run's place; "" when that
 // can't be told (CheckCurrent then looks at the manifest's path, and fails
 // closed itself). The look is bounded as CheckCurrent's stat is (bridge#24):
 // locate's stat and markersFile's looks at a hung mount would hold the poll
@@ -494,9 +494,9 @@ func (r *run) generateBook() store.GenerateBook {
 func resumesAt(b store.Book) (state.State, bool) {
 	switch from := state.State(b.State); from {
 	case state.ChapterDetecting:
-		return from, pipeline.DetectionRerunnable(b.WorkDir)
+		return from, pipeline.DetectionRerunnable(b.WorkDir, b.AudioSource())
 	case state.ASR:
-		return state.Splitting, pipeline.TranscriptionContinuable(b.WorkDir)
+		return state.Splitting, pipeline.TranscriptionContinuable(b.WorkDir, b.AudioSource())
 	}
 	return "", false
 }
@@ -861,11 +861,19 @@ func (h *Handler) createChapters(ctx context.Context, eng Engine, r *run) error 
 	if err == nil {
 		old, err = h.openJobRefusal(ctx, r, old)
 	}
+	nb := h.newBook(r, key, "")
+	nb.Goal = state.GoalChapters
+	nb.Series, nb.SeriesPos = "", ""
 	if err == nil {
 		if keeps, err := h.keepsWholeRun(ctx, old); err != nil {
 			return err
 		} else if keeps {
 			return errChaptersKeepsRun
+		}
+		if old.Goal == state.GoalReadalong {
+			if ok, err := h.fromKeptTranscript(ctx, eng, r, old, nb); ok || err != nil {
+				return err
+			}
 		}
 		if ok, err := h.resumeChapters(ctx, eng, r, old); ok || err != nil {
 			return err
@@ -876,9 +884,6 @@ func (h *Handler) createChapters(ctx context.Context, eng Engine, r *run) error 
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return err
 	}
-	nb := h.newBook(r, key, "")
-	nb.Goal = state.GoalChapters
-	nb.Series, nb.SeriesPos = "", ""
 	return h.queueBook(ctx, eng, r, nb)
 }
 

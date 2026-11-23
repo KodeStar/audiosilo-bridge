@@ -2416,7 +2416,7 @@ func (e *Executor) resplitChapter(ctx context.Context, r scheduler.StageReport, 
 	if len(one.Chapters) == 0 {
 		return fmt.Errorf("retranscribing: chapter %d isn't in the manifest", chapter)
 	}
-	if _, err := splitWithRetries(ctx, one, book.WorkDir, ffmpeg, r, nil); err != nil {
+	if _, err := splitWithRetries(ctx, one, book, ffmpeg, r, nil); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -2476,7 +2476,14 @@ func (e *Executor) clipChapter(ctx context.Context, r scheduler.StageReport, set
 	req.WorkDir = book.WorkDir
 	req.Chapter = chapter
 	req.Transcript = origT
-	req.Cut = cut
+	req.Cut = func(ctx context.Context, src, dst string, start, dur float64) error {
+		if e.clipCutter == nil && !fsutil.IsFile(src) {
+			if err := e.resplitChapter(ctx, r, book, chapter); err != nil {
+				return err
+			}
+		}
+		return cut(ctx, src, dst, start, dur)
+	}
 	req.Transcribe = transcribe
 	req.DecodeTag = decodeTag
 	// A failed or obsolete verdict must not leave an older repaired/corrected layer

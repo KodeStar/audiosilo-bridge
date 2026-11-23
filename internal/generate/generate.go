@@ -18,6 +18,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"maps"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -351,6 +352,7 @@ type Result struct {
 	CostUSD          float64           `json:"cost_usd"`
 	WorkID           string            `json:"work_id"`
 	Contributed      map[string]string `json:"contributed,omitempty"`
+	IntakeNotes      map[string]string `json:"intake_notes,omitempty"`
 	Description      bool              `json:"description"`
 	DescriptionError string            `json:"description_error,omitempty"`
 	// ShareSkipped is why a job that was to share kept its results local
@@ -780,11 +782,6 @@ func (h *Handler) runEngineBook(ctx context.Context, eng Engine, r *run, mapped 
 			r.bookID = *mapped.BookID // its own book: end() stops it
 		}
 		return h.end(ctx, r, nil, err)
-	}
-	if resumed && ownBook() && mapped.RelPath != r.rel {
-		h.o.Log.Info("generate: the book moved while the job was away; the job follows it", "job", r.job.ID,
-			"from", mapped.RelPath, "to", r.rel)
-		h.recordMove(ctx, r)
 	}
 	if resumed && !ownBook() {
 		// That run's job is gone (its id is this job's now), so nothing follows it.
@@ -1486,6 +1483,11 @@ func (h *Handler) create(ctx context.Context, eng Engine, r *run) error {
 		}
 	}
 	if found {
+		if r.source == SourceAudio && old.Goal == "" && ebookRun == 0 {
+			if ok, err := h.fromKeptTranscript(ctx, eng, r, old, h.newBook(r, sp, "")); ok || err != nil {
+				return err
+			}
+		}
 		if ok, err := h.continueReadalongRun(ctx, eng, r, old, ebookRun); ok || err != nil {
 			return err
 		}
@@ -1702,8 +1704,18 @@ func (h *Handler) queueBook(ctx context.Context, eng Engine, r *run, nb store.Ne
 		return err
 	}
 	nb.BatchID = batch.ID
+	// A move can free the old source path for another book. Each batch owns its folder.
+	nb.WorkDir = filepath.Join(h.o.WorkRoot, batch.ID)
+	if r.kind == ReadalongKind {
+		if err := h.writeReadalongRequest(r, nb.WorkDir); err != nil {
+			return err
+		}
+	}
 	b, err := h.o.DB.CreateMappedBook(ctx, nb, r.generateBook())
 	if err != nil {
+		if r.kind == ReadalongKind {
+			_ = os.RemoveAll(nb.WorkDir)
+		}
 		return fmt.Errorf("could not queue the book in the engine: %w", err)
 	}
 	r.bookID = b.ID
@@ -1757,8 +1769,8 @@ func (h *Handler) newBook(r *run, sourcePath, ebookPath string) store.NewBook {
 		kind = string(state.KindEbook)
 	}
 	return store.NewBook{
-		SourcePath: sourcePath, WorkDir: store.DeriveWorkDir(h.o.WorkRoot, sourcePath, title),
-		Title: title, Authors: info.Authors, Narrators: info.Narrators,
+		SourcePath: sourcePath,
+		Title:      title, Authors: info.Authors, Narrators: info.Narrators,
 		Series: strings.TrimSpace(info.Series), SeriesPos: strings.TrimSpace(info.SeriesIndex),
 		ASIN: strings.TrimSpace(info.ASIN), ISBN: strings.TrimSpace(info.ISBN), IdentitySources: sources,
 		WorkID: workID, Kind: kind, EbookPath: ebookPath, ContribMode: r.params.Contribute,
@@ -1778,6 +1790,23 @@ func (h *Handler) attach(ctx context.Context, eng Engine, r *run, m store.Genera
 	}
 	if err != nil {
 		return err
+	}
+	// Older versions updated only rel_path. Repair their source too when the
+	// resumed claim and the checked mount identify this book.
+	if r.place.full != "" {
+		source, ok, err := metaops.AllowedPath(r.place.full, []string{r.mount})
+		if err != nil || !ok {
+			return errors.New("the book's path leaves the library's folder")
+		}
+		if m.RelPath != r.rel || source != b.AudioSource() {
+			if err := h.recordMove(ctx, r, r.place, r.rel); err != nil {
+				return err
+			}
+			b, err = h.o.DB.GetBook(ctx, b.ID)
+			if err != nil {
+				return err
+			}
+		}
 	}
 	if m.EndedAt != "" {
 		if err := h.o.DB.ReopenGenerateBook(ctx, r.job.ID); err != nil {
@@ -1858,6 +1887,10 @@ func (h *Handler) follow(ctx context.Context, eng Engine, r *run) (any, error) {
 // finishes, failed fails, a contributing park (core_needed) still writes the
 // local files first.
 func (h *Handler) step(ctx context.Context, eng Engine, r *run, b store.Book) (any, bool, error) {
+	if err := h.adoptMove(ctx, r, true); err != nil {
+		h.park(r, parkBookNotWritable, "the Bridge can't follow the book to its new path: "+err.Error())
+		return nil, false, ctx.Err()
+	}
 	if r.kind == Kind && h.keepShareLocal(ctx, eng, r, &b) {
 		// The share's park lifted: the look goes on with the book as it is now,
 		// never reporting the park it no longer has, and the next look comes at
@@ -1878,7 +1911,7 @@ func (h *Handler) step(ctx context.Context, eng Engine, r *run, b store.Book) (a
 	v.eta, v.hasETA = eng.ETASeconds(b.ID)
 	st, status := state.State(b.State), state.Status(b.Status)
 	if r.kind == ReadalongKind {
-		if err := h.readalongAsk(ctx, r, b); err != nil {
+		if err := h.readalongAsk(r, b); err != nil {
 			return nil, true, err
 		}
 	}
@@ -1980,6 +2013,7 @@ func (h *Handler) finish(ctx context.Context, r *run, b store.Book, cost float64
 						res.Contributed = map[string]string{}
 					}
 					res.Contributed[c.Kind] = c.URL
+					res.IntakeNotes = contrib.AddIntakeNote(res.IntakeNotes, c.Kind, c.Note)
 				}
 			}
 		}
@@ -2111,10 +2145,10 @@ func (h *Handler) save(ctx context.Context, r *run, spec saveSpec) error {
 		if err := h.waitMapped(ctx, r, false); err != nil {
 			return err
 		}
-		if h.adoptMove(ctx, r) && spec.record {
-			h.recordMove(ctx, r)
+		err := h.adoptMove(ctx, r, spec.record)
+		if err == nil {
+			err = h.saveOnce(r, spec)
 		}
-		err := h.saveOnce(r, spec)
 		if err == nil {
 			break
 		}
@@ -2166,37 +2200,71 @@ func (r *run) relocate() error {
 	return nil
 }
 
-// adoptMove adopts the job's path when the server moved the job with its book (a
-// rename its scan noticed; the answer to a report says so): the book's files are
-// asked for again there. It reports whether the book moved.
-func (h *Handler) adoptMove(ctx context.Context, r *run) bool {
+// adoptMove takes the path in a report answer only after the server and the
+// checked mount agree on the new book. A failed lookup leaves it pending.
+func (h *Handler) adoptMove(ctx context.Context, r *run, record bool) error {
 	cur := r.rep.Path()
 	if cur == "" || cur == r.jobPath {
-		return false
+		return nil
 	}
-	from := r.rel
-	r.jobPath, r.rel = cur, cur
-	if book, err := r.srv.Book(ctx, r.lib.ID, cur); err == nil {
-		r.files = book.Files
-		if book.Info != nil {
-			r.info = book.Info
-		}
-		if book.Path != "" {
-			r.rel = book.Path
-		}
-	} else {
-		h.o.Log.Warn("generate: asking the server for the moved book failed", "job", r.job.ID, "err", err)
+	if err := h.waitMapped(ctx, r, false); err != nil {
+		return err
 	}
-	h.o.Log.Info("generate: the book moved; the job follows it", "job", r.job.ID, "from", from, "to", r.rel)
-	return true
+	book, err := r.srv.Book(ctx, r.lib.ID, cur)
+	if err != nil {
+		return err
+	}
+	rel := cmp.Or(book.Path, cur)
+	if err := h.compareFiles(ctx, r, book.Files); err != nil {
+		return err
+	}
+	p, err := locate(r.mount, rel)
+	if err != nil {
+		return err
+	}
+	if record {
+		if err := h.recordMove(ctx, r, p, rel); err != nil {
+			return err
+		}
+	}
+	h.o.Log.Info("generate: the book moved", "job", r.job.ID, "from", r.rel, "to", rel)
+	r.jobPath, r.rel, r.place, r.files = cur, rel, p, book.Files
+	if book.Info != nil {
+		r.info = book.Info
+	}
+	r.readalongAsked, r.detectedStamp = false, ""
+	r.unparkOwn()
+	return nil
 }
 
-// recordMove records the job's book at r.rel in its mapping, so a restart finds
-// the same book.
-func (h *Handler) recordMove(ctx context.Context, r *run) {
-	if err := h.o.DB.SetGenerateBookPath(ctx, r.job.ID, r.rel); err != nil {
-		h.o.Log.Warn("generate: recording the book's new path failed", "job", r.job.ID, "err", err)
+func (h *Handler) recordMove(ctx context.Context, r *run, p place, rel string) error {
+	source, ok, err := metaops.AllowedPath(p.full, []string{r.mount})
+	if err != nil || !ok {
+		return errors.New("the moved book leaves the library's folder")
 	}
+	b, err := h.o.DB.GetBook(ctx, r.bookID)
+	if err != nil {
+		return err
+	}
+	ebook := b.EbookPath
+	if ebook != "" {
+		name := filepath.Base(ebook)
+		if p.single {
+			name = strings.TrimSuffix(p.prefix, ".") + ".epub"
+		}
+		ebook, ok, err = metaops.AllowedPath(filepath.Join(p.dir, name), []string{r.mount})
+		if err != nil || !ok {
+			return errors.New("the moved ebook leaves the library's folder")
+		}
+	}
+	if b.IsAudioRun() {
+		source = store.AudioRunKey(source)
+	}
+	if err := h.o.DB.MoveGenerateBook(ctx, r.job.ID, b.ID, rel, source, ebook); err != nil {
+		return err
+	}
+	r.epub = ebook
+	return nil
 }
 
 // loadSidecars reads the engine's sidecars, unless their files are unchanged

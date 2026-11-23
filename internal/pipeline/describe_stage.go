@@ -121,8 +121,7 @@ type descriptionPromptData struct {
 // book so the spend counts, and runs through the shared agent driver, whose parks
 // (rate limit, budget, credential, unavailable, validation exhausted) come back as
 // *scheduler.ParkError for the caller to handle. noWait parks a rate limit at once
-// instead of waiting it out in-process: sidecars.generate's description must never
-// hold its job.
+// so a describe job releases the book before waiting for a retry.
 func (e *Executor) Describe(ctx context.Context, bookID int64, noWait bool) (DescribeResult, error) {
 	if e.db == nil {
 		return DescribeResult{}, errors.New("describe: no store")

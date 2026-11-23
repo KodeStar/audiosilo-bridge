@@ -101,6 +101,9 @@ func (b *Bridge) runEngine(ctx context.Context) {
 	cfg := b.config()
 	log := b.log
 
+	if err := b.gen.RecoverTranscriptDirs(ctx); err != nil {
+		log.Warn("bridge: recovering interrupted transcript cleanup", "err", err)
+	}
 	hub := events.NewHub(events.DefaultRingSize)
 	persister := newEventPersister(b.db, log, eventQueueSize)
 	persister.start()
@@ -161,8 +164,8 @@ func (b *Bridge) runEngine(ctx context.Context) {
 		Fallback: scheduler.NewStubExecutor(0, 0),
 		Meta:     metaClient, TokenSource: tokens,
 		ContribMode: cfg.Contribution.Mode, ContribCommunityRepo: cfg.Contribution.CommunityRepo,
-		ContribBaseURL: cfg.Contribution.APIBaseURL, ExportRoot: filepath.Join(b.dataDir, "export"),
-		ShareOff: b.gen.ShareOff,
+		ContribBaseURL: cfg.Contribution.APIBaseURL,
+		ShareOff:       b.gen.ShareOff,
 	})
 	sched := scheduler.New(b.db, hub, exec, slots, workRoot, cfg.Contribution.AutoPurge)
 

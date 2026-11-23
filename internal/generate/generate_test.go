@@ -27,6 +27,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/mapping"
+	"github.com/kodestar/audiosilo-bridge/internal/pipeline"
 	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
@@ -216,12 +217,13 @@ func (l *libraries) Status(id int64) (link.LibraryStatus, bool) {
 // hooks is a test executor: the scheduler's stub with a hook per stage, and the
 // validating stage leaving sidecars in the work dir as the real one does.
 type hooks struct {
-	t     *testing.T
-	stub  *scheduler.StubExecutor
-	db    *store.DB
-	mu    sync.Mutex
-	parks map[string]int // stage -> how many times to park there
-	block map[string]chan struct{}
+	t            *testing.T
+	contributing *pipeline.Executor
+	stub         *scheduler.StubExecutor
+	db           *store.DB
+	mu           sync.Mutex
+	parks        map[string]int // stage -> how many times to park there
+	block        map[string]chan struct{}
 	// estimated, when set, is the fact pass's spend as a codex run records it: a
 	// complete estimate from the pricing table, no reported cost.
 	estimated float64
@@ -238,6 +240,7 @@ type hooks struct {
 
 func (e *hooks) Execute(ctx context.Context, b store.Book, st state.State, r scheduler.StageReport) (scheduler.StageResult, error) {
 	e.mu.Lock()
+	contributing := e.contributing
 	gate := e.block[string(st)]
 	park := e.parks[string(st)] > 0
 	if park {
@@ -291,6 +294,10 @@ func (e *hooks) Execute(ctx context.Context, b store.Book, st state.State, r sch
 		}
 	}
 	switch st {
+	case state.Contributing:
+		if contributing != nil {
+			return contributing.Execute(ctx, b, st, r)
+		}
 	case state.FactPass:
 		// Spend, as an agent stage records it on its open run.
 		e.mu.Lock()
@@ -534,8 +541,12 @@ func (hr *harness) engineBook(id int64) store.Book {
 // progress reaches the server with the stage, ETA and cost, the attachments land
 // in the book's .audiosilo/ and the server is asked to re-read them.
 func TestGenerateFolderBook(t *testing.T) {
-	t.Parallel()
+	t.Chdir(t.TempDir())
 	hr := newHarness(t)
+	data := t.TempDir()
+	hr.exec.mu.Lock()
+	hr.exec.contributing = pipeline.NewExecutor(pipeline.Config{DB: hr.db, DataDir: data, ContribMode: "local"})
+	hr.exec.mu.Unlock()
 	asr := hr.exec.gate("asr")
 	hr.srv.add(21, "Author/Book", `{"source":"auto","contribute":"local"}`)
 	stop := hr.runner(hr.h)
@@ -560,6 +571,11 @@ func TestGenerateFolderBook(t *testing.T) {
 	close(asr)
 
 	hr.waitFor("done", func() bool { s, _ := hr.srv.final(21); return s == link.StateDone })
+	for _, dir := range []string{".", data} {
+		if files, err := os.ReadDir(dir); err != nil || len(files) != 0 {
+			t.Fatalf("extra local export in %s: %v, %v", dir, files, err)
+		}
+	}
 	if !hr.srv.saw(21, func(u link.Update, p map[string]any) bool { c, _ := p["cost_usd"].(float64); return c == 3.5 }) {
 		t.Fatal("the spend never reached the server")
 	}
@@ -1153,6 +1169,13 @@ func TestGenerateFollowsAMovedBook(t *testing.T) {
 			{Path: "Author/Book (2026)/01.mp3", Size: 9}, {Path: "Author/Book (2026)/02.mp3", Size: 10}}}
 		delete(hr.srv.books, "Author/Book")
 		hr.srv.paths = map[int64]string{92: "Author/Book (2026)"}
+	})
+	newPath, err := filepath.EvalSymlinks(filepath.Join(hr.root, "Author", "Book (2026)"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hr.waitFor("the engine book to follow the move during auditing", func() bool {
+		return hr.engineBook(92).AudioSource() == newPath
 	})
 	close(gate)
 	hr.waitFor("done", func() bool { s, _ := hr.srv.final(92); return s == link.StateDone })
@@ -1787,5 +1810,59 @@ func TestGenerateShareOffLiftsAParkAfterIt(t *testing.T) {
 	hr.result(67, &r)
 	if r.ShareSkipped != ShareSkippedContributionsOff {
 		t.Fatalf("result = %+v", r)
+	}
+}
+
+func TestMovePreservesAudioRunAndRefusesUnsafeDestinations(t *testing.T) {
+	hr := newHarness(t)
+	ctx := t.Context()
+	old := filepath.Join(hr.root, "Loose.m4b")
+	b, err := hr.db.CreateMappedBook(ctx, store.NewBook{SourcePath: store.AudioRunKey(old), Title: "Loose", WorkDir: filepath.Join(hr.work, "original"), State: "done"},
+		store.GenerateBook{ServerJobID: 500, LibraryID: 1, RelPath: "Loose.m4b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &run{bookID: b.ID, job: jobs.Job{ID: 500}, mount: hr.root}
+	moved := filepath.Join(hr.root, "Moved.m4b")
+	if err := os.Rename(old, moved); err != nil {
+		t.Fatal(err)
+	}
+	move := func(name string) error {
+		p, err := locate(hr.root, name)
+		if err != nil {
+			return err
+		}
+		return hr.h.recordMove(ctx, r, p, name)
+	}
+	if err := move("Moved.m4b"); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "book.m4b")
+	mustWrite(t, target, "outside")
+	if err := os.Symlink(target, filepath.Join(hr.root, "link.m4b")); err != nil {
+		t.Fatal(err)
+	}
+	if err := move("link.m4b"); err == nil {
+		t.Fatal("accepted a move outside the library")
+	}
+	occupied := filepath.Join(hr.root, "Taken.m4b")
+	mustWrite(t, occupied, "occupied")
+	realOccupied, err := filepath.EvalSymlinks(occupied)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hr.db.CreateBook(ctx, store.NewBook{SourcePath: store.AudioRunKey(realOccupied), Title: "Taken", WorkDir: filepath.Join(hr.work, "taken"), State: "done"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := move("Taken.m4b"); err == nil {
+		t.Fatal("accepted a move over another book")
+	}
+	now, err := hr.db.GetBook(ctx, b.ID)
+	canonical, pathErr := filepath.EvalSymlinks(moved)
+	if err != nil || pathErr != nil || now.SourcePath != store.AudioRunKey(canonical) || now.WorkDir != b.WorkDir {
+		t.Fatalf("book after moves: %+v, %v, %v", now, err, pathErr)
+	}
+	if g, err := hr.db.GetGenerateBook(ctx, 500); err != nil || g.RelPath != "Moved.m4b" {
+		t.Fatalf("mapping after moves: %+v, %v", g, err)
 	}
 }

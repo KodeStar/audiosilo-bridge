@@ -60,9 +60,9 @@ var (
 	silenceMinSec       = 0.4
 )
 
-// markerless reports whether a single file's marker table is no chapter table at
+// Markerless reports whether a single file's marker table is no chapter table at
 // all: none, or one marker covering (nearly) the whole file.
-func markerless(markers []Marker, duration float64) bool {
+func Markerless(markers []Marker, duration float64) bool {
 	switch len(markers) {
 	case 0:
 		return true

@@ -64,6 +64,27 @@ const (
 	FromGH     = "gh"
 )
 
+// ManualIntakeNote accompanies issues filed outside the Accounts tab's GitHub App.
+const ManualIntakeNote = "This issue was filed outside the AudioSilo GitHub App. A maintainer needs to route it to intake manually."
+
+// AddIntakeNote carries the filing's manual routing note into a job result by dimension.
+func AddIntakeNote(notes map[string]string, kind, note string) map[string]string {
+	if strings.Contains(note, ManualIntakeNote) {
+		if notes == nil {
+			notes = make(map[string]string)
+		}
+		notes[kind] = ManualIntakeNote
+	}
+	return notes
+}
+
+func IntakeNote(from string) string {
+	if from == FromEnv || from == FromGH {
+		return ManualIntakeNote
+	}
+	return ""
+}
+
 // ghTokenTimeout bounds the `gh auth token` shell-out.
 const ghTokenTimeout = 15 * time.Second
 

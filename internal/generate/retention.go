@@ -3,9 +3,16 @@ package generate
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/agent"
+	"github.com/kodestar/audiosilo-bridge/internal/audio"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
+	"github.com/kodestar/audiosilo-bridge/internal/pipeline"
 	"github.com/kodestar/audiosilo-bridge/internal/scratch"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
@@ -116,4 +123,140 @@ func (h *Handler) SweepTranscripts(ctx context.Context, retention time.Duration)
 		}
 	}
 	return n, errors.Join(errs...)
+}
+
+// fromKeptTranscript starts a fresh generate or chapters job after ASR. The
+// finished run stays intact until its inputs have been checked and staged.
+// A fresh book gives the new job its own costs, stage runs and filing state.
+func (h *Handler) fromKeptTranscript(ctx context.Context, eng Engine, r *run, old store.Book, nb store.NewBook) (bool, error) {
+	goal := old.Goal
+	eligible := func(b store.Book) bool {
+		return b.Goal == goal && b.State == string(state.Done) && b.Kind == string(state.KindAudio)
+	}
+	if h.o.RetentionDays == 0 || !eligible(old) {
+		return false, nil
+	}
+	release, ok := h.hold(old.ID)
+	for i := 1; !ok; i++ {
+		if i == giveWayTries {
+			return false, errEarlierRunBusy
+		}
+		r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Waiting for the engine to let go of the book's earlier run"})
+		if err := agent.SleepCtx(ctx, h.o.Poll); err != nil {
+			return false, err
+		}
+		release, ok = h.hold(old.ID)
+	}
+	defer release()
+	old, err := h.o.DB.GetBook(ctx, old.ID)
+	if err != nil {
+		return false, err
+	}
+	if !eligible(old) {
+		return false, errEarlierRunBusy
+	}
+	cutoff := h.now().Add(-time.Duration(h.o.RetentionDays) * 24 * time.Hour)
+	if kept, err := h.o.DB.TranscriptRetained(ctx, old.ID, cutoff); err != nil || !kept {
+		return false, err
+	}
+	wd, ok := scratch.Confined(h.o.WorkRoot, old.WorkDir)
+	if !ok {
+		return false, errors.New("the earlier run's work folder is outside the work root")
+	}
+	m, err := audio.ReadManifest(wd)
+	if err != nil {
+		return false, nil
+	}
+	nb.State = string(state.Sanitizing)
+	if nb.Goal == state.GoalChapters {
+		// A read-along also uses windows for an unusable embedded marker
+		// table. A chapters job only detects books inspect considers markerless.
+		markers, duration, err := audio.ReadProbeMarkers(old.WorkDir)
+		if m.Style != audio.StyleWindows || err != nil || !audio.Markerless(markers, duration) {
+			return false, nil
+		}
+		nb.State = string(state.ChapterDetecting)
+	} else if m.Style != audio.StyleMarkers && m.Style != audio.StyleFiles {
+		return false, nil
+	}
+	current, err := pipeline.AudioCurrent(old.WorkDir, r.place.full)
+	if err != nil {
+		return false, fmt.Errorf("%w: %w", errAudioUnseen, err)
+	}
+	if !current {
+		return false, nil
+	}
+	if kept, err := pipeline.KeptTranscription(ctx, old.WorkDir, m); err != nil || !kept {
+		return false, err
+	}
+	batch, err := h.o.DB.CreateBatch(ctx)
+	if err != nil {
+		return false, err
+	}
+	nb.BatchID = batch.ID
+	nb.WorkDir = filepath.Join(h.o.WorkRoot, batch.ID)
+	// Before the transaction the staged folder is disposable. The same
+	// transaction that admits the new book switches cleanup to the old one.
+	key := store.TranscriptCleanupPrefix + batch.ID
+	if err := h.o.DB.SetSetting(ctx, key, nb.WorkDir); err != nil {
+		return false, err
+	}
+	defer func() {
+		if err := h.cleanTranscriptDir(context.WithoutCancel(ctx), key); err != nil {
+			h.o.Log.Warn("generate: transcript cleanup needs another attempt", "batch", batch.ID, "err", err)
+		}
+	}()
+	if err := pipeline.SeedTranscription(ctx, wd, nb.WorkDir, m); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	b, err := h.o.DB.ReplaceMappedBook(ctx, &old, nb, r.generateBook())
+	if err != nil {
+		return false, err
+	}
+	r.bookID = b.ID
+	eng.Notify()
+	return true, nil
+}
+
+// RecoverTranscriptDirs completes interrupted replacements before the engine
+// accepts jobs. Only a folder explicitly recorded for cleanup is removed.
+func (h *Handler) RecoverTranscriptDirs(ctx context.Context) error {
+	keys, err := h.o.DB.TranscriptCleanupKeys(ctx)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, key := range keys {
+		if err := h.cleanTranscriptDir(ctx, key); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (h *Handler) cleanTranscriptDir(ctx context.Context, key string) error {
+	dir, found, err := h.o.DB.DisposableTranscriptDir(ctx, key)
+	if err != nil || !found {
+		return err
+	}
+	wd, ok := scratch.Confined(h.o.WorkRoot, dir)
+	if !ok {
+		return errors.New("transcript cleanup target is outside the work root")
+	}
+	rel, err := filepath.Rel(h.o.WorkRoot, wd)
+	if err != nil {
+		return err
+	}
+	root, err := os.OpenRoot(h.o.WorkRoot)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	if err := root.RemoveAll(rel); err != nil {
+		return err
+	}
+	return h.o.DB.DeleteSetting(ctx, key)
 }

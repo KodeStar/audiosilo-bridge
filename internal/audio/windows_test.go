@@ -21,7 +21,7 @@ func TestMarkerless(t *testing.T) {
 		{"one marker over part of it", []Marker{{Title: "Chapter 1", Start: 0, End: 500}}, false},
 		{"a table", []Marker{{Start: 0, End: 500}, {Start: 500, End: 1000}}, false},
 	} {
-		if got := markerless(tc.markers, 1000); got != tc.want {
+		if got := Markerless(tc.markers, 1000); got != tc.want {
 			t.Errorf("%s: %v, want %v", tc.name, got, tc.want)
 		}
 	}

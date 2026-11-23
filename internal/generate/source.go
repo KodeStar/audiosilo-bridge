@@ -11,7 +11,9 @@ import (
 	"github.com/kodestar/audiosilo-meta/pkg/extract"
 
 	"github.com/kodestar/audiosilo-bridge/internal/ebook"
+	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 	"github.com/kodestar/audiosilo-bridge/internal/mapping"
+	"github.com/kodestar/audiosilo-bridge/internal/pipeline"
 )
 
 // place is where a book is on the Bridge's side of a checked mapping.
@@ -35,7 +37,7 @@ func locate(mount, rel string) (place, error) {
 	if err != nil {
 		return place{}, err
 	}
-	info, err := os.Stat(full)
+	info, err := fsutil.StatWithin(full, pipeline.SourceStatWait)
 	if errors.Is(err, fs.ErrNotExist) {
 		return place{}, fmt.Errorf("the book isn't at %s through the library's mapping", rel)
 	}
