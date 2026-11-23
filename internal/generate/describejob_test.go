@@ -756,3 +756,52 @@ func TestDescribeRetriesWhenRateLimitEnds(t *testing.T) {
 		t.Fatalf("describe attempts at the rate limit and after it: %d", calls)
 	}
 }
+
+// A description-only job has no mapping to record a move in, and still never
+// follows the server's answer through a link that leaves the library: it parks
+// book_not_writable and writes nothing there.
+func TestDescribeJobRefusesAMoveOutOfTheLibrary(t *testing.T) {
+	hr := newHarness(t)
+	hr.srv.add(95, "Author/Book", `{}`)
+	stop := hr.runner(hr.h)
+	hr.waitFor("generated", func() bool { s, _ := hr.srv.final(95); return s == link.StateDone })
+	stop()
+	outside := t.TempDir()
+	mustWrite(t, filepath.Join(outside, "01.mp3"), "audio-one")
+	mustWrite(t, filepath.Join(outside, "02.mp3"), "audio-two!")
+	if err := os.Symlink(outside, filepath.Join(hr.root, "Author", "Linked")); err != nil {
+		t.Fatal(err)
+	}
+	// The server moves the job while its first try waits on the budget.
+	d := &fakeDescriber{db: hr.db, fail: func(call int) error {
+		if call != 1 {
+			return nil
+		}
+		hr.srv.set(func() {
+			hr.srv.books["Author/Linked"] = link.Book{LibraryID: 1, Path: "Author/Linked", Files: []link.BookFile{
+				{Path: "Author/Linked/01.mp3", Size: 9}, {Path: "Author/Linked/02.mp3", Size: 10}}}
+			hr.srv.paths = map[int64]string{96: "Author/Linked"}
+		})
+		return scheduler.ParkWithCode(state.ParkBudgetExceeded, "the budget is spent")
+	}}
+	h := hr.describeHandler(d)
+	stopAll := hr.runAll(h)
+	defer stopAll()
+	hr.srv.addDescribe(96, "Author/Book")
+	parked := func(code string) func() bool {
+		return func() bool {
+			return hr.srv.saw(96, func(u link.Update, p map[string]any) bool {
+				park, _ := p["park"].(map[string]any)
+				return u.State != nil && *u.State == link.StateNeedsAttention && park["code"] == code
+			})
+		}
+	}
+	hr.waitFor("the budget park", parked("budget_exceeded"))
+	if err := h.Retry(context.Background(), 96); err != nil {
+		t.Fatal(err)
+	}
+	hr.waitFor("the save's park", parked("book_not_writable"))
+	if _, err := os.Lstat(filepath.Join(outside, AttachDir)); !os.IsNotExist(err) {
+		t.Fatalf("wrote outside the library: %v", err)
+	}
+}

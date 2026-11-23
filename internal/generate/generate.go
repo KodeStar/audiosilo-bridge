@@ -2235,6 +2235,10 @@ func (h *Handler) adoptMove(ctx context.Context, r *run, record bool) error {
 		if err := h.recordMove(ctx, r, p, rel); err != nil {
 			return err
 		}
+	} else if _, ok, err := metaops.AllowedPath(p.full, []string{r.mount}); err != nil || !ok {
+		// A job with no mapping to record in still never writes through a link
+		// that leaves the library (recordMove refuses one for the others).
+		return errors.New("the moved book leaves the library's folder")
 	}
 	h.o.Log.Info("generate: the book moved", "job", r.job.ID, "from", r.rel, "to", rel)
 	r.jobPath, r.rel, r.place, r.files = cur, rel, p, book.Files
