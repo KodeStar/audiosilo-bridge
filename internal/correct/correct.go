@@ -504,19 +504,21 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		switch {
 		case filed.Number != 0:
 			filedChanges, doneKey, doneMarker := mapped, lookupKey, marker
-			switch {
-			case prior.key != "" && contrib.IssueSum(filed.Title, filed.Body) == marker.Sum:
-				// Only the earlier batch can confirm its original number of changes.
-				original := batch
-				original.Changes = prior.changes
-				if filedChanges, err = contrib.MapCorrections(original); err != nil {
-					return nil, err
+			if prior.key != "" {
+				if contrib.IssueSum(filed.Title, filed.Body) == marker.Sum {
+					// Only the earlier batch can confirm its original number of changes.
+					original := batch
+					original.Changes = prior.changes
+					if filedChanges, err = contrib.MapCorrections(original); err != nil {
+						return nil, err
+					}
+				} else {
+					// This request's own issue, not the earlier batch's: no other
+					// job to save it under and no marker of this request's to
+					// settle; the earlier batch's marker stays for that batch's
+					// own retry to look for its issue.
+					doneKey, doneMarker = fkey, filing{FiledWith: marker.FiledWith}
 				}
-			case prior.key != "":
-				// This request's own issue, not the earlier batch's: it is this
-				// job's result alone, and the earlier batch's marker stays for that
-				// batch's own retry to look for its issue.
-				doneKey, doneMarker = fkey, filing{FiledWith: marker.FiledWith}
 			}
 			h.o.Log.Info("correct: an interrupted filing had filed these corrections", "job", job.ID,
 				"issue", filed.Number, "by_job", marker.Job)
