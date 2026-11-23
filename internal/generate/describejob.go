@@ -250,7 +250,8 @@ func (h *Handler) namedRun(ctx context.Context, r *run) (store.Book, error) {
 		h.o.Log.Warn("generate: recording the book's new path failed", "job", jobID, "err", err)
 		return b, nil
 	}
-	return h.o.DB.GetBook(ctx, b.ID)
+	b.SourcePath, b.EbookPath = source, ebook
+	return b, nil
 }
 
 // described is a description the step wrote (or reused), read back from the

@@ -105,8 +105,8 @@ type Options struct {
 	// transcripts when its job ends (else the daily sweep does, that much later).
 	RetentionDays int
 	// ASR reports the model and language a new run transcribes with, so a kept
-	// transcript made under others is not reused (nil, or before the engine has
-	// started: unknown).
+	// transcript made under others is not reused (nil, or a blank field before
+	// the engine has started: unknown).
 	ASR func() pipeline.ASRSettings
 	// ContribCredential reports why no GitHub token resolves (contribute=issue
 	// needs one): nil when one does, else contrib.ErrNoCredential or
@@ -230,6 +230,9 @@ func New(o Options) *Handler {
 	}
 	if o.Background == nil {
 		o.Background = func(fn func(context.Context)) { go fn(context.Background()) }
+	}
+	if o.ASR == nil {
+		o.ASR = func() pipeline.ASRSettings { return pipeline.ASRSettings{} }
 	}
 	if o.ContribCredential == nil {
 		o.ContribCredential = func(context.Context) error { return nil }
@@ -1086,14 +1089,19 @@ func stopGuard(job jobs.Job, ended bool) store.StopGuard {
 // description step, a transcript purge): ok is false while a stage runs on it or
 // something else holds it. With no engine nothing runs on it, so it holds.
 func (h *Handler) hold(bookID int64) (release func(), ok bool) {
-	var eng Engine
-	if h.o.Engine != nil {
-		eng = h.o.Engine()
-	}
+	eng := h.engine()
 	if eng == nil {
 		return func() {}, true
 	}
 	return eng.Hold(bookID)
+}
+
+// engine is the engine, nil until it has started (or with no Options.Engine).
+func (h *Handler) engine() Engine {
+	if h.o.Engine == nil {
+		return nil
+	}
+	return h.o.Engine()
 }
 
 // waitEngine waits for the engine to have started.
@@ -2292,9 +2300,11 @@ func (h *Handler) recordMove(ctx context.Context, r *run, p place, rel string) e
 	}
 	err = h.o.DB.MoveGenerateBook(ctx, r.job.ID, b.ID, rel, source, ebook)
 	if errors.Is(err, store.ErrDuplicate) {
-		if free, cerr := h.clearEndedRunAt(ctx, r, source); cerr != nil {
+		free, cerr := h.clearEndedRunAt(ctx, r, source)
+		if cerr != nil {
 			return cerr
-		} else if free {
+		}
+		if free {
 			err = h.o.DB.MoveGenerateBook(ctx, r.job.ID, b.ID, rel, source, ebook)
 		}
 	}
@@ -2342,26 +2352,21 @@ func (h *Handler) clearEndedRunAt(ctx context.Context, r *run, source string) (b
 	if err != nil {
 		return false, err
 	}
-	ended := state.IsTerminal(state.State(occ.State)) || state.Status(occ.Status) == state.StatusFailed
-	if occ.ID == r.bookID || !ended {
+	if occ.ID == r.bookID || !finished(occ.State, occ.Status) {
 		return false, nil
 	}
 	if open, err := h.o.DB.OpenGenerateJobsForBook(ctx, occ.ID, r.job.ID); err != nil || len(open) > 0 {
 		return false, err
 	}
-	var eng Engine
-	if h.o.Engine != nil {
-		eng = h.o.Engine()
-	}
+	eng := h.engine()
 	if eng == nil {
 		return false, nil
 	}
-	if err := h.deleteEarlier(ctx, eng, r, occ.ID); errors.Is(err, scheduler.ErrBusy) {
+	if err := h.clearEarlier(ctx, eng, r, occ.ID); errors.Is(err, errEarlierRunBusy) {
 		return false, nil
-	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+	} else if err != nil {
 		return false, err
 	}
-	h.o.Log.Info("generate: an ended run at the book's new path was cleared", "job", r.job.ID, "old_book", occ.ID)
 	return true, nil
 }
 
