@@ -54,7 +54,7 @@ func (f *fakeSharer) ShareChecked(_ context.Context, bookID int64, workID string
 	}
 	_ = bookID
 	return pipeline.ShareResult{WorkID: "the-book", Contributed: map[string]string{"characters": "https://github.com/x/y/issues/1"},
-		Covered: []string{"recaps"}}, nil
+		IntakeNotes: map[string]string{"characters": contrib.ManualIntakeNote}, Covered: []string{"recaps"}}, nil
 }
 
 // count is how many shares were filed.
@@ -113,7 +113,7 @@ func TestContributeJob(t *testing.T) {
 	var res ContributeResult
 	hr.result(72, &res)
 	if res.LibraryID != 1 || res.Path != "Author/Book" || res.WorkID != "the-book" ||
-		res.Contributed["characters"] == "" || !slices.Equal(res.Covered, []string{"recaps"}) {
+		res.Contributed["characters"] == "" || res.IntakeNotes["characters"] != contrib.ManualIntakeNote || !slices.Equal(res.Covered, []string{"recaps"}) {
 		t.Fatalf("result = %+v", res)
 	}
 	if s.calls[0] != "the-book|characters,recaps" {

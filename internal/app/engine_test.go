@@ -12,6 +12,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/agentbox"
 	"github.com/kodestar/audiosilo-bridge/internal/events"
 	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
+	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 	"github.com/kodestar/audiosilo-bridge/internal/supervisor"
 )
@@ -243,5 +244,37 @@ func TestTranscriptSweepStartsWithTheEngine(t *testing.T) {
 	})
 	if !present(heldRaw) {
 		t.Fatal("the first sweep purged a book the engine holds")
+	}
+}
+
+// The executor built by the Bridge must leave publishing to the job's library
+// attachment writer, even when the data directory is writable.
+func TestBridgeLocalContributionHasNoExport(t *testing.T) {
+	t.Setenv("AUDIOSILO_BRIDGE_TOOLS_AUTO_DOWNLOAD", "false")
+	data := t.TempDir()
+	b := start(t, data)
+	waitFor(t, "the engine", func() bool { return b.engine.get() != nil })
+	work := filepath.Join(data, "work", "finished")
+	book, err := b.db.CreateBook(t.Context(), store.NewBook{Title: "Local Book", SourcePath: filepath.Join(t.TempDir(), "Book"),
+		WorkDir: work, State: "done", ContribMode: store.ContribModeLocal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sidecars := filepath.Join(work, "sidecars")
+	if err := os.MkdirAll(sidecars, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sidecars, "characters.json"), []byte(`{"work":"local-book","characters":[],"sources":[],"license":"CC-BY-SA-4.0"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.engine.get().exec.Execute(t.Context(), book, state.Contributing, scheduler.StageReport{}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := b.db.ListContributionsByBook(t.Context(), book.ID)
+	if err != nil || len(rows) != 1 || rows[0].Status != store.ContribStatusLocal {
+		t.Fatalf("local contribution: %+v, %v", rows, err)
+	}
+	if _, err := os.Stat(filepath.Join(data, "export")); !os.IsNotExist(err) {
+		t.Fatalf("Bridge created a second local export: %v", err)
 	}
 }

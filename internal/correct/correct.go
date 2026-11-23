@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"slices"
 	"strconv"
 	"strings"
@@ -33,6 +34,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/contrib"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/metaops"
+	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
 
 // Kind is the job kind as the server knows it.
@@ -135,6 +137,7 @@ func ParseParams(raw json.RawMessage) (Params, error) {
 // back here (plan D8, deferred).
 type Result struct {
 	IssueURL    string   `json:"issue_url"`
+	IntakeNote  string   `json:"intake_note,omitempty"`
 	IssueNumber int      `json:"issue_number"`
 	Changes     int      `json:"changes"`
 	Auto        []string `json:"auto"`
@@ -149,6 +152,7 @@ type Meta interface {
 // KV keeps each job's result and each request's filing marker (store.DB's
 // settings).
 type KV interface {
+	EarlierBookJobs(ctx context.Context, server, kind string, library int64, path string, before int64) ([]store.ServerJob, error)
 	GetSetting(ctx context.Context, key string) (string, bool, error)
 	SetSetting(ctx context.Context, key, value string) error
 	DeleteSetting(ctx context.Context, key string) error
@@ -194,9 +198,10 @@ func (h *Handler) Lane() string { return jobs.LaneLight }
 // sum (contrib.IssueSum of the title and body sent) and the job. Absent (or "")
 // is none.
 type filing struct {
-	Since time.Time `json:"since"`
-	Sum   string    `json:"sum"`
-	Job   int64     `json:"job"`
+	Since     time.Time `json:"since"`
+	Sum       string    `json:"sum"`
+	Job       int64     `json:"job"`
+	FiledWith string    `json:"filed_with,omitempty"` // the credential source (contrib.From*)
 }
 
 // same reports whether two markers are one (a JSON round trip keeps the time to
@@ -237,20 +242,27 @@ func (h *Handler) filingKey(job jobs.Job, p Params) string {
 	slices.SortFunc(changes, func(a, b change) int {
 		return cmp.Or(strings.Compare(a.Field, b.Field), strings.Compare(a.Corrected, b.Corrected))
 	})
-	asin, isbn, region := p.ASIN, p.ISBN, p.Region
-	if p.RecordingID != "" { // the id picks the recording alone
-		asin, isbn, region = "", "", ""
-	}
-	raw, _ := json.Marshal(struct { // strings only: it can't fail
-		WorkID      string   `json:"work_id"`
-		RecordingID string   `json:"recording_id"`
-		ASIN        string   `json:"asin"`
-		ISBN        string   `json:"isbn"`
-		Region      string   `json:"region"`
-		Changes     []change `json:"changes"`
-	}{p.WorkID, p.RecordingID, asin, isbn, region, changes})
+	raw, _ := json.Marshal(struct {
+		correctionRecord
+		Changes []change `json:"changes"`
+	}{p.record(), changes})
 	sum := sha256.Sum256(raw)
 	return "meta.correct.filing/" + job.KeyServer(h.o.ServerID()) + "/" + hex.EncodeToString(sum[:])
+}
+
+type correctionRecord struct {
+	WorkID      string `json:"work_id"`
+	RecordingID string `json:"recording_id"`
+	ASIN        string `json:"asin"`
+	ISBN        string `json:"isbn"`
+	Region      string `json:"region"`
+}
+
+func (p Params) record() correctionRecord {
+	if p.RecordingID != "" {
+		return correctionRecord{WorkID: p.WorkID, RecordingID: p.RecordingID}
+	}
+	return correctionRecord{WorkID: p.WorkID, ASIN: p.ASIN, ISBN: p.ISBN, Region: p.Region}
 }
 
 func (h *Handler) readFiling(ctx context.Context, key string) (f filing, ok bool, err error) {
@@ -280,30 +292,180 @@ func (h *Handler) clearFiling(ctx context.Context, key string, f filing) {
 	}
 }
 
+// Keep the last submitted batch for this book beyond the jobs list's pruning.
+// The issue result and any interrupted filing stay in their existing keys.
+func (h *Handler) bookKey(job jobs.Job) string {
+	if job.LibraryID == nil || job.Path == nil {
+		return ""
+	}
+	return fmt.Sprintf("meta.correct.book/%s/%d/%s", job.KeyServer(h.o.ServerID()), *job.LibraryID, *job.Path)
+}
+
+type bookBatch struct {
+	ID     int64           `json:"job_id"`
+	Params json.RawMessage `json:"params"`
+}
+
+type priorRequest struct {
+	result  Result
+	key     string
+	marker  filing
+	changes []contrib.Correction
+}
+
+// smallerRetry looks for a strict subset of an earlier batch for this book.
+// The earlier claim carries its full request, including in older databases.
+// A confirmed issue has a result. An interrupted POST has its exact marker.
+func (h *Handler) smallerRetry(ctx context.Context, job jobs.Job, p Params) (priorRequest, error) {
+	key := h.bookKey(job)
+	if key == "" || len(p.Changes) == 0 {
+		return priorRequest{}, nil
+	}
+	rows, err := h.o.KV.EarlierBookJobs(ctx, job.KeyServer(h.o.ServerID()), Kind, *job.LibraryID, *job.Path, job.ID)
+	if err != nil {
+		return priorRequest{}, err
+	}
+	saved, ok, err := h.o.KV.GetSetting(ctx, key)
+	if err != nil {
+		return priorRequest{}, err
+	}
+	var batch bookBatch
+	if ok && json.Unmarshal([]byte(saved), &batch) == nil && batch.ID <= job.ID && batch.ID > 0 {
+		rows = append([]store.ServerJob{{ID: batch.ID, Params: batch.Params}}, rows...)
+	}
+	for _, row := range rows {
+		old, err := ParseParams(row.Params)
+		if err != nil || old.record() != p.record() || len(old.Changes) <= len(p.Changes) || !containsChanges(old.Changes, p.Changes) {
+			continue
+		}
+		var out Result
+		if json.Unmarshal(row.Result, &out) == nil && out.IssueNumber > 0 {
+			return priorRequest{result: out}, nil
+		}
+		previous := job
+		previous.ID = row.ID
+		if out, ok, err := h.savedResult(ctx, previous); err != nil || ok {
+			return priorRequest{result: out}, err
+		}
+		key := h.filingKey(job, old)
+		m, found, err := h.readFiling(ctx, key)
+		if err != nil {
+			return priorRequest{}, err
+		}
+		if found {
+			return priorRequest{key: key, marker: m, changes: old.Changes}, nil
+		}
+	}
+	return priorRequest{}, nil
+}
+
+// credential resolves the GitHub credential, a failure worded for the console.
+func (h *Handler) credential(ctx context.Context) (token, from string, err error) {
+	token, from, err = h.o.Tokens.Resolve(ctx)
+	switch {
+	case errors.Is(err, contrib.ErrSignInUnrefreshed):
+		return "", "", errUnrefreshed
+	case errors.Is(err, contrib.ErrNoCredential):
+		return "", "", errNoCredential
+	case err != nil:
+		return "", "", fmt.Errorf("resolve the GitHub credential: %w", err)
+	}
+	return token, from, nil
+}
+
+// issueOpen reports whether issue number on the core repo is still open: an
+// earlier batch's confirmed issue answers a smaller retry only while it is. One
+// GitHub no longer has (deleted, or moved away) is not.
+func (h *Handler) issueOpen(ctx context.Context, number int) (bool, error) {
+	token, from, err := h.credential(ctx)
+	if err != nil {
+		return false, err
+	}
+	is, err := contrib.NewClientFor(h.o.BaseURL, token, from, h.o.Tokens).GetIssue(ctx, h.o.CoreRepo, number)
+	var apiErr *contrib.APIError
+	var rateErr *contrib.RateLimitError
+	switch {
+	case err == nil:
+		return is.State != "closed", nil
+	case contrib.Unauthorized(err):
+		return false, errRefused
+	case errors.As(err, &rateErr):
+		return false, errRateLimited
+	case errors.As(err, &apiErr) && (apiErr.Status == http.StatusNotFound || apiErr.Status == http.StatusGone):
+		return false, nil
+	}
+	return false, fmt.Errorf("could not read the earlier batch's issue #%d: %w", number, err)
+}
+
+func containsChanges(all, remaining []contrib.Correction) bool {
+	for _, c := range remaining {
+		if !slices.ContainsFunc(all, func(old contrib.Correction) bool {
+			return old.Field == c.Field && strings.TrimSpace(old.Corrected) == strings.TrimSpace(c.Corrected)
+		}) {
+			return false
+		}
+	}
+	return true
+}
+
+// savedResult is the issue a run of job confirmed, kept under its resultKey.
+func (h *Handler) savedResult(ctx context.Context, job jobs.Job) (Result, bool, error) {
+	raw, ok, err := h.o.KV.GetSetting(ctx, h.resultKey(job))
+	if err != nil || !ok {
+		return Result{}, false, err
+	}
+	var r Result
+	if json.Unmarshal([]byte(raw), &r) != nil || r.IssueNumber <= 0 {
+		return Result{}, false, nil
+	}
+	return r, true, nil
+}
+
 // Run files the corrections, or reports the issue an earlier run filed.
 func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (any, error) {
 	p, err := ParseParams(job.Params)
 	if err != nil {
 		return nil, err
 	}
-	prev, ok, err := h.o.KV.GetSetting(ctx, h.resultKey(job))
-	if err != nil {
-		return nil, err
-	}
-	if ok {
-		var r Result
-		if err := json.Unmarshal([]byte(prev), &r); err == nil && r.IssueNumber > 0 {
-			return r, nil
+	if r, ok, err := h.savedResult(ctx, job); err != nil || ok {
+		if err != nil {
+			return nil, err
 		}
+		return r, nil
 	}
 	fkey := h.filingKey(job, p)
 	marker, interrupted, err := h.readFiling(ctx, fkey)
 	if err != nil {
 		return nil, err
 	}
+	lookupKey := fkey
+	var prior priorRequest
+	if !interrupted {
+		prior, err = h.smallerRetry(ctx, job, p)
+		if err != nil {
+			return nil, err
+		}
+		if prior.result.IssueNumber > 0 {
+			open, err := h.issueOpen(ctx, prior.result.IssueNumber)
+			if err != nil {
+				return nil, err
+			}
+			if open {
+				h.saveResult(ctx, job, prior.result)
+				return prior.result, nil
+			}
+			// Closed: a maintainer has dealt with that batch, so the changes
+			// suggested again are a new request, filed afresh.
+			h.o.Log.Info("correct: the earlier batch's issue is closed: filing these corrections again", "job", job.ID,
+				"issue", prior.result.IssueNumber)
+		}
+		if prior.key != "" {
+			lookupKey, marker, interrupted = prior.key, prior.marker, true
+		}
+	}
 	if interrupted && marker.Since.IsZero() {
 		// No time to look from: a person decides, once (the next suggestion files).
-		h.clearFiling(ctx, fkey, marker)
+		h.clearFiling(ctx, lookupKey, marker)
 		return nil, errFiledBefore
 	}
 	rep.Progress(jobs.Progress{Step: "checking", Message: "Reading the book's community record", Total: 2})
@@ -311,15 +473,9 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		return nil, errMetaOff
 	}
 	// The credential first: without one there is nothing to fetch the record for.
-	token, from, err := h.o.Tokens.Resolve(ctx)
-	if errors.Is(err, contrib.ErrSignInUnrefreshed) {
-		return nil, errUnrefreshed
-	}
-	if errors.Is(err, contrib.ErrNoCredential) {
-		return nil, errNoCredential
-	}
+	token, from, err := h.credential(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("resolve the GitHub credential: %w", err)
+		return nil, err
 	}
 	cov, err := h.o.Meta.FreshCoverageForWork(ctx, p.WorkID)
 	switch {
@@ -340,14 +496,33 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	rep.Progress(jobs.Progress{Step: "filing", Message: "Filing the corrections", Done: 1, Total: 2})
 	sum := contrib.IssueSum(title, body)
 	if interrupted {
+		// The request's own sum: filedSince adopts the marker's (an earlier, larger
+		// batch's too) only while that marker is this job's or under a day old.
 		filed, err := h.filedSince(ctx, cli, marker, job.ID, sum, body)
 		var other otherBatch
 		var rateErr *contrib.RateLimitError
 		switch {
 		case filed.Number != 0:
+			filedChanges, doneKey, doneMarker := mapped, lookupKey, marker
+			if prior.key != "" {
+				if contrib.IssueSum(filed.Title, filed.Body) == marker.Sum {
+					// Only the earlier batch can confirm its original number of changes.
+					original := batch
+					original.Changes = prior.changes
+					if filedChanges, err = contrib.MapCorrections(original); err != nil {
+						return nil, err
+					}
+				} else {
+					// This request's own issue, not the earlier batch's: no other
+					// job to save it under and no marker of this request's to
+					// settle; the earlier batch's marker stays for that batch's
+					// own retry to look for its issue.
+					doneKey, doneMarker = fkey, filing{FiledWith: marker.FiledWith}
+				}
+			}
 			h.o.Log.Info("correct: an interrupted filing had filed these corrections", "job", job.ID,
 				"issue", filed.Number, "by_job", marker.Job)
-			return h.done(ctx, job, fkey, marker, contrib.Issue{Number: filed.Number, URL: filed.URL}, mapped, rep), nil
+			return h.done(ctx, job, doneKey, doneMarker, contrib.Issue{Number: filed.Number, URL: filed.URL}, filedChanges, rep), nil
 		case contrib.Unauthorized(err):
 			return nil, errRefused
 		case errors.As(err, &rateErr):
@@ -358,7 +533,7 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 			h.o.Log.Warn("correct: an interrupted filing's issue can't be told from another batch", "job", job.ID,
 				"err", err, "whole", other.whole)
 			if other.whole {
-				h.clearFiling(ctx, fkey, marker)
+				h.clearFiling(ctx, lookupKey, marker)
 			}
 			return nil, errFiledBefore
 		case err != nil && !cli.StaleFiling(marker.Since):
@@ -370,13 +545,27 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 			// fail for good; meta's intake catches a batch it has applied.
 			h.o.Log.Warn("correct: an interrupted filing's issue can't be found or ruled out, and its marker is "+
 				"over a day old: filing again", "job", job.ID, "err", err)
+		case lookupKey != fkey:
+			// The list reached back to the earlier batch's marker and holds nothing
+			// it made: that marker goes, so a later retry of that batch files it
+			// rather than being told this one's issue was filed before.
+			h.clearFiling(ctx, lookupKey, marker)
 		}
 	}
 	// GitHub's time, which the issues' created_at is compared with later.
-	mine := filing{Since: cli.Now(ctx), Sum: sum, Job: job.ID}
+	mine := filing{Since: cli.Now(ctx), Sum: sum, Job: job.ID, FiledWith: from}
 	raw, err := json.Marshal(mine)
 	if err != nil {
 		return nil, err
+	}
+	if key := h.bookKey(job); key != "" {
+		snapshot, err := json.Marshal(bookBatch{ID: job.ID, Params: job.Params})
+		if err != nil {
+			return nil, err
+		}
+		if err := h.o.KV.SetSetting(ctx, key, string(snapshot)); err != nil {
+			return nil, err
+		}
 	}
 	if err := h.o.KV.SetSetting(ctx, fkey, string(raw)); err != nil {
 		return nil, err
@@ -462,7 +651,7 @@ func (h *Handler) filedSince(ctx context.Context, cli *contrib.Client, m filing,
 // after a failed write still looks, and adopts the issue.
 func (h *Handler) done(ctx context.Context, job jobs.Job, fkey string, f filing, issue contrib.Issue,
 	mapped []contrib.MappedChange, rep *jobs.Reporter) Result {
-	out := Result{IssueURL: issue.URL, IssueNumber: issue.Number, Changes: len(mapped), Auto: []string{}, Maintainer: []string{}}
+	out := Result{IssueURL: issue.URL, IntakeNote: contrib.IntakeNote(f.FiledWith), IssueNumber: issue.Number, Changes: len(mapped), Auto: []string{}, Maintainer: []string{}}
 	for _, m := range mapped {
 		if m.Auto {
 			out.Auto = append(out.Auto, m.ServerField)
@@ -470,14 +659,26 @@ func (h *Handler) done(ctx context.Context, job jobs.Job, fkey string, f filing,
 			out.Maintainer = append(out.Maintainer, m.ServerField)
 		}
 	}
-	raw, _ := json.Marshal(out) // strings and ints: it can't fail
-	if err := h.o.KV.SetSetting(context.WithoutCancel(ctx), h.resultKey(job), string(raw)); err != nil {
-		h.o.Log.Warn("correct: recording the filed issue failed", "job", job.ID, "err", err)
-	} else {
-		h.clearFiling(ctx, fkey, f) // the filing is confirmed
+	saved := h.saveResult(ctx, job, out)
+	if f.Job != 0 && f.Job != job.ID {
+		original := job
+		original.ID = f.Job
+		saved = h.saveResult(ctx, original, out) && saved
+	}
+	if saved {
+		h.clearFiling(ctx, fkey, f)
 	}
 	rep.Progress(jobs.Progress{Step: "done", Message: "Filed", Done: 2, Total: 2})
 	return out
+}
+
+func (h *Handler) saveResult(ctx context.Context, job jobs.Job, out Result) bool {
+	raw, _ := json.Marshal(out)
+	if err := h.o.KV.SetSetting(context.WithoutCancel(ctx), h.resultKey(job), string(raw)); err != nil {
+		h.o.Log.Warn("correct: recording the filed issue failed", "job", job.ID, "err", err)
+		return false
+	}
+	return true
 }
 
 // recordingFor is the recording the changes address: the job's own, else the

@@ -432,7 +432,7 @@ func (e *Executor) resplitMissing(ctx context.Context, book store.Book, m audio.
 	err := runWithStageHeartbeat(ctx, r, func(elapsed time.Duration) string {
 		return fmt.Sprintf("readalong_aligning: still cutting the chapters again (%s elapsed)", humanDuration(elapsed))
 	}, func() error {
-		_, serr := splitWithRetries(ctx, m, book.WorkDir, ffmpeg, r, nil)
+		_, serr := splitWithRetries(ctx, m, book, ffmpeg, r, nil)
 		return serr
 	})
 	if err != nil {

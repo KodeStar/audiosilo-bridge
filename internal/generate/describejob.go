@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/agent"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
@@ -216,7 +217,7 @@ func (h *Handler) latestGenerated(ctx context.Context, r *run) (store.Book, erro
 // names (store.ErrNotFound for none): a book that moved after its job ended took
 // that file along, while the Bridge's records (the book's source path, the job's
 // mapping) stayed at the old place. Only this library's run, at a source inside its
-// folder, counts; the job's mapping follows the book from then on.
+// folder, counts; its source path and the job's mapping follow the book from then on.
 func (h *Handler) namedRun(ctx context.Context, r *run) (store.Book, error) {
 	prov := readProvenance(filepath.Join(r.place.dir, AttachDir), r.place.prefix+provenanceName)
 	var kind string
@@ -239,9 +240,21 @@ func (h *Handler) namedRun(ctx context.Context, r *run) (store.Book, error) {
 	if _, ok, err := metaops.AllowedPath(b.SourcePath, []string{r.mount}); err != nil || !ok {
 		return store.Book{}, store.ErrNotFound
 	}
-	if err := h.o.DB.SetGenerateBookPath(ctx, jobID, r.rel); err != nil {
-		h.o.Log.Warn("generate: recording the book's new path failed", "job", jobID, "err", err)
+	// The run's source moves with its mapping, so a later regenerate finds it
+	// (and its kept transcript) at the book's place. A job still following the
+	// run records the move itself (adoptMove); notesBook then refuses.
+	if open, err := h.o.DB.OpenGenerateJobsForBook(ctx, b.ID, r.job.ID); err != nil || len(open) > 0 {
+		return b, err
 	}
+	source, ebook, err := movedSources(r.mount, r.place, b)
+	if err == nil {
+		err = h.o.DB.MoveGenerateBook(ctx, jobID, b.ID, r.rel, source, ebook)
+	}
+	if err != nil {
+		h.o.Log.Warn("generate: recording the book's new path failed", "job", jobID, "err", err)
+		return b, nil
+	}
+	b.SourcePath, b.EbookPath = source, ebook
 	return b, nil
 }
 
@@ -257,13 +270,13 @@ type described struct {
 // (waiting a few polls for it; errBookBusy when it never comes) and reads the
 // description back before letting go, so no stage, delete, purge or sweep acts on
 // the book meanwhile. The result carries the step's spend whatever happened.
-func (h *Handler) describeHeld(ctx context.Context, d Describer, bookID int64, noWait bool) (described, error) {
+func (h *Handler) describeHeld(ctx context.Context, d Describer, bookID int64) (described, error) {
 	release, err := h.holdBook(ctx, bookID)
 	if err != nil {
 		return described{}, err
 	}
 	defer release()
-	res, err := d.Describe(ctx, bookID, noWait)
+	res, err := d.Describe(ctx, bookID)
 	if err != nil {
 		return described{res: res}, err
 	}
@@ -277,12 +290,21 @@ func (h *Handler) describeHeld(ctx context.Context, d Describer, bookID int64, n
 // holdBook takes the engine's hold on an engine book, trying again every poll
 // for holdTries polls before giving up (errBookBusy).
 func (h *Handler) holdBook(ctx context.Context, bookID int64) (func(), error) {
+	return h.holdWithin(ctx, bookID, holdTries, nil)
+}
+
+// holdWithin is holdBook with its own number of tries, calling waiting (when
+// set) before each poll it sleeps.
+func (h *Handler) holdWithin(ctx context.Context, bookID int64, tries int, waiting func()) (func(), error) {
 	for i := 1; ; i++ {
 		if release, ok := h.hold(bookID); ok {
 			return release, nil
 		}
-		if i == holdTries {
+		if i == tries {
 			return nil, errBookBusy
+		}
+		if waiting != nil {
+			waiting()
 		}
 		if err := agent.SleepCtx(ctx, h.o.Poll); err != nil {
 			return nil, err
@@ -304,9 +326,17 @@ func (h *Handler) describeParked(ctx context.Context, r *run, d Describer, bookI
 		if !parked {
 			r.rep.Progress(jobs.Progress{Step: pipeline.DescribeStage, Message: "Writing a description", Total: 1,
 				Extra: r.describeExtra(spent)})
+		} else {
+			// The park let go of the book: another job may have replaced, removed or
+			// begun its run since.
+			b, err := h.recheckNotes(ctx, r)
+			if err != nil {
+				return described{}, spent, err
+			}
+			bookID, r.bookID = b.ID, b.ID
 		}
 		mark := h.wakeMark()
-		got, err := h.describeHeld(ctx, d, bookID, false)
+		got, err := h.describeHeld(ctx, d, bookID)
 		spent += got.res.CostUSD
 		var park *scheduler.ParkError
 		switch {
@@ -338,6 +368,41 @@ func (h *Handler) describeParked(ctx context.Context, r *run, d Describer, bookI
 			}
 		default:
 			return described{}, spent, fmt.Errorf("could not write a description: %w", err)
+		}
+	}
+}
+
+// recheckNotes runs a start's checks again before a try after a park: the
+// library mapped and writable and the book's folder writable where the book is
+// now (parking until they are, as a resumed job does), and its notes still there
+// with no other job making them again (notesBook, which fails the job as at the
+// start). It returns the engine book whose notes describe the book now.
+func (h *Handler) recheckNotes(ctx context.Context, r *run) (store.Book, error) {
+	for {
+		if err := h.waitMapped(ctx, r, false); err != nil {
+			return store.Book{}, err
+		}
+		err := h.adoptMove(ctx, r, false)
+		if errors.Is(err, errMoveUnconfirmed) {
+			err = nil // the move stays pending; the save adopts it
+		}
+		if err == nil {
+			err = r.relocate()
+		}
+		if err == nil {
+			err = h.waitWritable(ctx, r)
+		}
+		switch {
+		case err == nil:
+			return h.notesBook(ctx, r)
+		case ctx.Err() != nil:
+			return store.Book{}, ctx.Err()
+		case errors.Is(err, errRemapped):
+			continue
+		}
+		h.park(r, parkBookNotWritable, "the Bridge can't find the book's folder: "+err.Error())
+		if err := h.recheckWait(ctx, r, time.Now().Add(h.o.Recheck)); err != nil {
+			return store.Book{}, err
 		}
 	}
 }
@@ -417,7 +482,7 @@ func (h *Handler) describeOnce(ctx context.Context, r *run, b store.Book) bool {
 	}
 	r.rep.Progress(jobs.Progress{Step: pipeline.DescribeStage, Message: "Writing a description",
 		Extra: r.bookExtra(b)})
-	got, err := h.describeHeld(ctx, d, b.ID, true)
+	got, err := h.describeHeld(ctx, d, b.ID)
 	if err != nil && r.desc != nil {
 		// The re-compose at done failed: the park's description stands (as the
 		// park had its work).

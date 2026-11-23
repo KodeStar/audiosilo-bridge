@@ -1076,7 +1076,7 @@ func TestContinueChaptersRefusesAFolderThatGainedAFile(t *testing.T) {
 	layer := b
 	layer.SourcePath = filepath.Join(dir, "solo.m4b") // the one file the windows were cut from
 	windowLayer(t, layer)
-	if !pipeline.DetectionRerunnable(b.WorkDir) {
+	if !pipeline.DetectionRerunnable(b.WorkDir, b.AudioSource()) {
 		t.Fatal("the fixture's windows aren't rerunnable")
 	}
 	mustWrite(t, filepath.Join(dir, "solo part 2.m4b"), "second")
@@ -1812,5 +1812,31 @@ func TestConcurrentEndsStopTheBook(t *testing.T) {
 		if !scheduler.IsCancelled(got) {
 			t.Fatalf("round %d: the book after two concurrent ends: status=%q error=%q, want stopped", i, got.Status, got.Error)
 		}
+	}
+}
+
+func TestChaptersUsesRetainedReadalongWindows(t *testing.T) {
+	hr := newHarness(t)
+	key, _ := filepath.EvalSymlinks(filepath.Join(hr.root, "Loose.m4b"))
+	old := seedEarlierAt(hr, key, state.GoalReadalong, state.Done, "")
+	windowLayer(t, old)
+	// The run finished before fingerprints existed. The retained raws and the
+	// book's probe still identify these windows after the FLACs are purged.
+	if err := os.Remove(filepath.Join(old.WorkDir, "asr.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(old.WorkDir, audio.ChaptersDir)); err != nil {
+		t.Fatal(err)
+	}
+	hr.srv.addKind(314, ChaptersKind, "Loose.m4b", `{}`)
+	stop := hr.runner(hr.h, hr.h.ChaptersJob())
+	defer stop()
+	waitDone(hr, 314)
+	b := hr.engineBook(314)
+	if stages := hr.stagesRun(b.ID); len(stages) != 1 || stages[0] != string(state.ChapterDetecting) {
+		t.Fatalf("stages = %v", stages)
+	}
+	if _, err := os.Stat(filepath.Join(hr.root, AttachDir, "Loose.chapters.json")); err != nil {
+		t.Fatal(err)
 	}
 }

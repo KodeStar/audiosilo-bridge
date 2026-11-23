@@ -705,8 +705,15 @@ internal/
             covered -> submit per contribution.mode, resume-idempotent via the
             contributions rows; export.go composes the download zip + core-proposal
             JSON injected into api) - EVERY stage is now real. Sidecars go to
-            Config.ContribCommunityRepo (issue mode) or <export>/<slug>/<kind>.json
-            (local mode, also the zip layout). resolveWorkSlug adopts a 301 survivor
+            Config.ContribCommunityRepo (issue mode) or stay in the work dir (local
+            mode: the generate job publishes them beside the book; only an explicit
+            Config.ExportRoot, never set by the Bridge, also copies them to
+            <export>/<slug>/<kind>.json, the zip layout). A title-derived placeholder
+            names a local sidecar's work, but its sources cite only a recorded or
+            resolved work id (or a local ASIN/ISBN), never the placeholder (with
+            none, the bare community source: the schemas need one, and the done
+            pass re-composes the description with it), and no coverage is asked
+            for it. resolveWorkSlug adopts a 301 survivor
             (contrib.AdoptLiveWork) and parks core_pending with contrib.ReleaseWaitMsg
             while a merged core row's work is unreleased (issue mode only: a local
             book files nothing and keeps the merged slug); a duplicate-answered core
@@ -1230,8 +1237,11 @@ internal/
             (a call that works with one moves the sign-in's last_ok_at: NewClientFor
             wires both hooks) - the token NEVER enters argv/logs/
             errors, leak-canary tested). NewClientFor records where the token came
-            from: AppFiled() (a device token) skips the labels check, since meta's
-            routing workflow labels an issue the App filed. corrections.go (Phase
+            from (CredentialSource; CreateIssue stamps it on Issue.FiledWith, and the
+            filing markers keep it): a device token skips the labels check, since
+            meta's routing workflow labels an issue the App filed; an env or gh
+            filing carries ManualIntakeNote (IntakeNote, AddIntakeNote: the jobs'
+            intake_notes / intake_note). corrections.go (Phase
             2b): CorrectionBatchIssue composes meta's correction-batch issue
             ([corrections] <title>; labels data + data:correction-batch; Record,
             Changes as fenced JSON {v:1, source, changes}, Evidence / source, the CC0
@@ -1465,10 +1475,19 @@ internal/
             it); and for an unreadable or incomplete list stops only while the
             marker is under a day old by GitHub's clock (contrib.FilingStale,
             Client.StaleFiling), past which it files again (meta's intake
-            catches a batch it has applied). A 401 (contrib.Unauthorized), on
-            the lookup (even past a same-record batch on a page read before) or
-            the filing, is errRefused; a rate limit on either errRateLimited (a
-            lookup's keeps the marker); a lost or 5xx answer errNoAnswer
+            catches a batch it has applied). A strict subset of an earlier
+            batch for the same book and record (the same corrected values; the
+            book's last batch kept under meta.correct.book/<server id>/<library
+            id>/<path> beyond the jobs list's pruning, the older claims read as
+            store.ServerJob rows through KV.EarlierBookJobs) is a retry of it:
+            its confirmed issue is the result only while GitHub has it open (a
+            closed one files afresh), its interrupted filing's marker is looked
+            up as the request's own (an issue of the subset's own changes found
+            that way is the subset's result alone, the batch's marker kept). A
+            401 (contrib.Unauthorized), on the lookup (even past a same-record
+            batch on a page read before) or the filing, is errRefused; a rate
+            limit on either errRateLimited (a lookup's keeps the marker); a lost
+            or 5xx answer errNoAnswer
             (worded: the Bridge checks before filing again). Result {issue_url,
             issue_number, changes, auto, maintainer}: auto and maintainer as
             known at filing; the Bridge doesn't follow the issue (a batch meta
@@ -4201,7 +4220,8 @@ internal/
             work_id, inputs [{path, size, mod_time}] relative to the library) are
             written 0644 through fsutil.WriteFileAtomic, ONLY those names, once per
             content hash, at the path the book is at NOW (Reporter.Path: the server
-            moves the job with its book; the move is recorded in generate_books). The
+            moves the job with its book; the move is recorded in generate_books, an
+            ended run at the new path replaced, a live one parking book_not_writable). The
             mapping is checked again before each write; a failed write on a done book
             parks book_not_writable and tries again every minute or on Retry (the
             sidecars stay in the work dir, never lost to a failed job). Then
@@ -4323,7 +4343,9 @@ internal/
             book's source path, else LatestGenerateBookAt for library+path, else the
             generate run the book's own bridge.json names, for a book that moved
             after its job ended (that file moved with it, the Bridge's records did
-            not; the job's mapping then follows the book); never a run whose source
+            not; the job's mapping and the run's source path then follow the
+            book, unless a job still follows the run and records it itself);
+            never a run whose source
             lies outside this library's folder: library ids and paths repeat across
             servers): none is
             errDescribeNoNotes ("The Bridge has no notes for this book ..."), a
@@ -4337,8 +4359,8 @@ internal/
             acts on the book meanwhile (a new generate job waits giveWayTries polls for
             a held earlier run, deleteEarlier: the server asks a describe job to give
             way to it, which it does at its next report; then "try again in a
-            minute"); a park waits with the hold let go (the job's in-process
-            rate-limit backoff, noWait false, does not). The job sets r.bookID once
+            minute"); a park waits with the hold let go (a rate limit parks at once,
+            never waited out under the hold). The job sets r.bookID once
             it has its engine book, so its own parks are lifted by the save that
             clears them, never between two tries. describeParked runs it: an agent park
             (rate limit, budget, credential, unavailable) is the job's park (code,

@@ -86,6 +86,7 @@ type ContributeResult struct {
 	Path        string            `json:"path"`
 	WorkID      string            `json:"work_id"`
 	Contributed map[string]string `json:"contributed"`
+	IntakeNotes map[string]string `json:"intake_notes,omitempty"`
 	Covered     []string          `json:"covered"`
 }
 
@@ -149,7 +150,7 @@ func (c *ContributeJob) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporte
 	h.o.Log.Info("generate: shared the book's sidecars", "job", job.ID, "path", r.rel, "work", res.WorkID,
 		"contributed", len(res.Contributed), "covered", len(res.Covered))
 	rep.Progress(jobs.Progress{Step: string(state.Done), Message: "Shared", Done: 1, Total: 1})
-	return ContributeResult{LibraryID: r.lib.ID, Path: r.rel, WorkID: res.WorkID, Contributed: res.Contributed,
+	return ContributeResult{LibraryID: r.lib.ID, Path: r.rel, WorkID: res.WorkID, Contributed: res.Contributed, IntakeNotes: res.IntakeNotes,
 		Covered: res.Covered}, nil
 }
 

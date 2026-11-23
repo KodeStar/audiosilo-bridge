@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -260,7 +261,7 @@ func (e *Executor) chapterDetect(ctx context.Context, book store.Book, r schedul
 		return fmt.Sprintf("chapter_detecting: still listening for the chapters (%s elapsed)", humanDuration(elapsed))
 	}, func() error {
 		var derr error
-		det, derr = e.detection(ctx, book.WorkDir, layer, tl, ffmpeg)
+		det, derr = e.detection(ctx, book, layer, tl, ffmpeg, r)
 		return derr
 	})
 	if err != nil {
@@ -275,7 +276,10 @@ func (e *Executor) chapterDetect(ctx context.Context, book store.Book, r schedul
 	if err := moveWindowLayer(book.WorkDir, &layer); err != nil {
 		return scheduler.StageResult{}, fmt.Errorf("chapter_detecting: move the windows aside: %w", err)
 	}
-	manifest := detectedManifest(layer.manifest, det.Chapters)
+	manifest, err := manifestAtBook(detectedManifest(layer.manifest, det.Chapters), book.AudioSource())
+	if err != nil {
+		return scheduler.StageResult{}, fmt.Errorf("chapter_detecting: find the book's audio: %w", err)
+	}
 	docs := tl.split(manifest.Chapters)
 	fp, err := e.remapTranscripts(book.WorkDir, manifest, docs)
 	if err != nil {
@@ -287,7 +291,7 @@ func (e *Executor) chapterDetect(ctx context.Context, book store.Book, r schedul
 	err = runWithStageHeartbeat(ctx, r, func(elapsed time.Duration) string {
 		return fmt.Sprintf("chapter_detecting: ffmpeg still cutting the chapters (%s elapsed)", humanDuration(elapsed))
 	}, func() error {
-		return cutDetectedChapters(ctx, book.WorkDir, manifest, layer.manifest, ffmpeg, r)
+		return cutDetectedChapters(ctx, book, manifest, layer.manifest, ffmpeg, r)
 	})
 	if err != nil {
 		return scheduler.StageResult{}, fmt.Errorf("chapter_detecting: cut the chapters: %w", err)
@@ -319,7 +323,8 @@ func (e *Executor) chapterDetect(ctx context.Context, book store.Book, r schedul
 // one for these windows (windows/detection.json), else a fresh one over the
 // windows' silences (audio.WindowSilences: split heard them, else the window FLACs
 // are listened to once), which is kept there when confident.
-func (e *Executor) detection(ctx context.Context, workDir string, layer windowLayer, tl windowTimeline, ffmpeg string) (chapterdetect.Result, error) {
+func (e *Executor) detection(ctx context.Context, book store.Book, layer windowLayer, tl windowTimeline, ffmpeg string, r scheduler.StageReport) (chapterdetect.Result, error) {
+	workDir := book.WorkDir
 	sha := windowsSHA(layer.manifest)
 	if kept, ok := keptDetection(workDir, sha); ok {
 		return kept, nil
@@ -327,10 +332,17 @@ func (e *Executor) detection(ctx context.Context, workDir string, layer windowLa
 	if layer.moved {
 		return chapterdetect.Result{}, errors.New("the windows were moved aside without their detection; cancel the job and generate the book again")
 	}
+	dir := filepath.Join(workDir, audio.ChaptersDir)
+	unheard := func(w audio.Chapter) bool { return !audio.WindowHeard(dir, w) }
+	if slices.ContainsFunc(layer.manifest.Chapters, unheard) {
+		if _, err := splitWithRetries(ctx, layer.manifest, book, ffmpeg, r, nil); err != nil {
+			return chapterdetect.Result{}, err
+		}
+	}
 	var sil []audio.Silence
 	for _, w := range layer.manifest.Chapters {
 		bound := max(silenceDetectFloor, time.Duration(silenceDetectPerAudioSec*w.Duration*float64(time.Second)))
-		got, err := audio.WindowSilences(ctx, ffmpeg, filepath.Join(workDir, audio.ChaptersDir), w, bound)
+		got, err := audio.WindowSilences(ctx, ffmpeg, dir, w, bound)
 		if err != nil {
 			return chapterdetect.Result{}, fmt.Errorf("window %d silences: %w", w.Chapter, err)
 		}
@@ -378,8 +390,12 @@ const sourceClockSlack = 2 * time.Minute
 // inspect read for the book in workDir: the size probe.json states (which must be
 // known) and modified no later than probe.json was written, give or take
 // sourceClockSlack (a tag editor adding chapter markers can keep the size).
-func inspectedSource(workDir, source string) bool {
-	info, err := os.Stat(source)
+func inspectedSource(workDir, source string, manifest audio.Manifest) bool {
+	current, err := manifestAtBook(manifest, source)
+	if err != nil {
+		return false
+	}
+	info, err := fsutil.StatWithin(current.Source, SourceStatWait)
 	return err == nil && inspectedFile(workDir, info)
 }
 
@@ -415,9 +431,9 @@ func modifiedBeforeProbe(workDir string, info os.FileInfo) bool {
 // still to transcribe). A generate job continues such a chapters-only book from
 // splitting (cut again after a purge, which takes the sentinel too), and asr then
 // skips every window already complete.
-func TranscriptionContinuable(workDir string) bool {
+func TranscriptionContinuable(workDir, source string) bool {
 	if m, err := audio.ReadManifest(workDir); err == nil && m.Style != audio.StyleWindows && !windowsMoved(workDir) {
-		return chaptersContinuable(workDir, m)
+		return chaptersContinuable(workDir, source, m)
 	}
 	layer, err := readWindowLayer(workDir)
 	if err != nil || layer.moved || len(layer.manifest.Chapters) == 0 {
@@ -428,7 +444,7 @@ func TranscriptionContinuable(workDir string) bool {
 			return false
 		}
 	}
-	if !inspectedSource(workDir, layer.manifest.Source) {
+	if !inspectedSource(workDir, source, layer.manifest) {
 		return false
 	}
 	if !scheduler.SentinelExists(workDir, string(state.Splitting)) {
@@ -455,7 +471,7 @@ func windowsMoved(workDir string) bool {
 }
 
 // chaptersContinuable is TranscriptionContinuable for a files or markers manifest.
-func chaptersContinuable(workDir string, m audio.Manifest) bool {
+func chaptersContinuable(workDir, source string, m audio.Manifest) bool {
 	if len(m.Chapters) == 0 || (m.Style != audio.StyleFiles && m.Style != audio.StyleMarkers) {
 		return false
 	}
@@ -464,7 +480,7 @@ func chaptersContinuable(workDir string, m audio.Manifest) bool {
 			return false
 		}
 	}
-	if ok, err := AudioCurrent(workDir, ""); err != nil || !ok {
+	if ok, err := AudioCurrent(workDir, source); err != nil || !ok {
 		return false
 	}
 	if !scheduler.SentinelExists(workDir, string(state.Splitting)) {
@@ -489,14 +505,14 @@ func chaptersContinuable(workDir string, m audio.Manifest) bool {
 // which must be known, and not modified since probe.json was written, give or
 // take sourceClockSlack: a tag editor adding chapter markers can keep the size). A
 // generate job continues such a chapters-only book.
-func DetectionRerunnable(workDir string) bool {
+func DetectionRerunnable(workDir, source string) bool {
 	layer, err := readWindowLayer(workDir)
 	if err != nil || len(layer.manifest.Chapters) == 0 {
 		return false
 	}
 	// The cheap check first: a replaced or edited file refuses before any
 	// transcript is read.
-	if !inspectedSource(workDir, layer.manifest.Source) {
+	if !inspectedSource(workDir, source, layer.manifest) {
 		return false
 	}
 	_, kept := keptDetection(workDir, windowsSHA(layer.manifest))
@@ -542,7 +558,8 @@ func moveWindowLayer(workDir string, layer *windowLayer) error {
 // cutDetectedChapters cuts the detected manifest's chapter FLACs from the window
 // FLACs in windows/chapters/, splits any they can't give from the source (a crash
 // after the window FLACs went), then lets the window FLACs go.
-func cutDetectedChapters(ctx context.Context, workDir string, m, windows audio.Manifest, ffmpeg string, r scheduler.StageReport) error {
+func cutDetectedChapters(ctx context.Context, book store.Book, m, windows audio.Manifest, ffmpeg string, r scheduler.StageReport) error {
+	workDir := book.WorkDir
 	audioDir := filepath.Join(workDir, audio.WindowAudioDir)
 	left, err := audio.CutFromWindows(ctx, m, windows.Chapters, audioDir, workDir, ffmpeg)
 	if err != nil {
@@ -552,7 +569,7 @@ func cutDetectedChapters(ctx context.Context, workDir string, m, windows audio.M
 		if r.Note != nil {
 			r.Note(fmt.Sprintf("the window audio is gone: splitting %s from the source", countNoun(left, "chapter")))
 		}
-		if _, err := splitWithRetries(ctx, m, workDir, ffmpeg, r, nil); err != nil {
+		if _, err := splitWithRetries(ctx, m, book, ffmpeg, r, nil); err != nil {
 			return err
 		}
 	}

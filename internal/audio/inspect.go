@@ -156,7 +156,7 @@ func inspectMarkers(ctx context.Context, bookFile, workDir, ffprobePath, ffmpegP
 
 	m, stats := markerManifestFromProbe(bookFile, meta)
 	markers := probeMarkers(meta)
-	if (markerless(markers, m.Duration) || (opts.WindowUnusable && !stats.Usable())) && m.Duration > 0 {
+	if (Markerless(markers, m.Duration) || (opts.WindowUnusable && !stats.Usable())) && m.Duration > 0 {
 		// Nothing to chapter by: transcribe in windows and find the chapters in the
 		// narration. (A file with no known duration can't be cut, so it keeps the
 		// draft and goes to markers_normalizing, as before.)
@@ -199,7 +199,7 @@ func ReparseMarkerManifest(workDir string, draft Manifest) (Manifest, MarkerStat
 	// usable markers (Phase 1d's markerless rule), is transcribed in windows and gets
 	// its chapters from the narration, as inspect does now: no agent can map markers
 	// that aren't there. Cut at the targets: the reparse reads no audio.
-	if mk := probeMarkers(meta); len(draft.Chapters) == 0 && markerless(mk, m.Duration) && m.Duration > 0 {
+	if mk := probeMarkers(meta); len(draft.Chapters) == 0 && Markerless(mk, m.Duration) && m.Duration > 0 {
 		wm, err := windowsManifest(context.Background(), draft.Source, m.Title, m.Duration, "")
 		if err != nil {
 			return Manifest{}, MarkerStats{}, err

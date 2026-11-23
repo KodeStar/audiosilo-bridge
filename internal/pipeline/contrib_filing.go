@@ -45,6 +45,7 @@ type filing struct {
 	// is now).
 	IssueSince time.Time `json:"issue_since,omitzero"`
 	Issue      string    `json:"issue,omitempty"`
+	FiledWith  string    `json:"filed_with,omitempty"`
 }
 
 func filingKey(bookID int64, kind string) string {
@@ -158,7 +159,7 @@ func (e *Executor) filedIssue(ctx context.Context, cli *contrib.Client, f filing
 	issues, complete, err := cli.IssuesSinceBy(ctx, e.contribCommunityRepo, f.IssueSince.Add(-contrib.FilingSkew), creator)
 	for _, is := range issues {
 		if is.Number != recorded && contrib.IssueSum(is.Title, is.Body) == f.Issue {
-			return contrib.Issue{Number: is.Number, URL: is.URL}, true, nil
+			return contrib.Issue{Number: is.Number, URL: is.URL, FiledWith: f.FiledWith}, true, nil
 		}
 	}
 	switch {
@@ -276,6 +277,7 @@ func (e *Executor) fileIssue(ctx context.Context, cli *contrib.Client, bookID in
 		title, body, labels = composeIssue(kind, slug, payload, f.Gist)
 	}
 	// A refusal leaves a made gist in the marker for the next try.
+	f.FiledWith = cli.CredentialSource()
 	f.Issue = contrib.IssueSum(title, body)
 	var issue contrib.Issue
 	err = e.guardedCreate(ctx, cli, bookID, kind, &f, &f.IssueSince, func() (err error) {

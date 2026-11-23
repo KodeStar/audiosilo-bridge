@@ -25,35 +25,46 @@ import (
 // job names (recorded on the book), skipping a dimension the work carries; a
 // second share keeps the filed issue.
 func TestShareFilesOverALocalRun(t *testing.T) {
-	ctx := context.Background()
-	db := openContribDB(t)
-	gh := newFakeGitHub(t)
-	meta := newFakeMeta(t, nil, map[string]metaWorkFixture{"reacher-01": {title: "Killing Floor", hasRecaps: true}})
-	b := contribBook(t, db, store.NewBook{}, baseChars("x"), baseRecaps("x"))
-	if _, err := db.UpsertContribution(ctx, store.Contribution{BookID: b.ID, Kind: store.ContribKindCharacters,
-		Mode: store.ContribModeLocal, Status: store.ContribStatusLocal}); err != nil {
-		t.Fatal(err)
-	}
-	exe := NewExecutor(contribConfig(t, db, contribModeLocal, gh.srv.URL, meta.srv.URL, t.TempDir(),
-		fakeTokenResolver{token: "ghu_x", from: contrib.FromDevice}))
+	for _, from := range []string{contrib.FromEnv, contrib.FromGH, contrib.FromDevice} {
+		t.Run(from, func(t *testing.T) {
+			ctx := context.Background()
+			db := openContribDB(t)
+			gh := newFakeGitHub(t)
+			meta := newFakeMeta(t, nil, map[string]metaWorkFixture{"reacher-01": {title: "Killing Floor", hasRecaps: true}})
+			b := contribBook(t, db, store.NewBook{}, baseChars("x"), baseRecaps("x"))
+			if _, err := db.UpsertContribution(ctx, store.Contribution{BookID: b.ID, Kind: store.ContribKindCharacters,
+				Mode: store.ContribModeLocal, Status: store.ContribStatusLocal}); err != nil {
+				t.Fatal(err)
+			}
+			exe := NewExecutor(contribConfig(t, db, contribModeLocal, gh.srv.URL, meta.srv.URL, t.TempDir(),
+				fakeTokenResolver{token: "ghu_x", from: from}))
 
-	got, err := exe.Share(ctx, b.ID, "reacher-01", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.WorkID != "reacher-01" || got.Contributed["characters"] == "" || len(got.Contributed) != 1 ||
-		strings.Join(got.Covered, ",") != "recaps" {
-		t.Fatalf("share = %+v", got)
-	}
-	if gh.issueCount() != 1 {
-		t.Fatalf("issues = %d, want the characters only", gh.issueCount())
-	}
-	if cur, _ := db.GetBook(ctx, b.ID); cur.WorkID != "reacher-01" {
-		t.Fatalf("book work = %q", cur.WorkID)
-	}
-	again, err := exe.Share(ctx, b.ID, "", []string{ShareCharacters})
-	if err != nil || gh.issueCount() != 1 || again.Contributed["characters"] != got.Contributed["characters"] {
-		t.Fatalf("again = %+v %v, issues %d", again, err, gh.issueCount())
+			got, err := exe.Share(ctx, b.ID, "reacher-01", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.WorkID != "reacher-01" || got.Contributed["characters"] == "" || len(got.Contributed) != 1 ||
+				strings.Join(got.Covered, ",") != "recaps" {
+				t.Fatalf("share = %+v", got)
+			}
+			wantNote := contrib.ManualIntakeNote
+			if from == contrib.FromDevice {
+				wantNote = ""
+			}
+			if got.IntakeNotes["characters"] != wantNote || got.IntakeNotes["recaps"] != "" {
+				t.Fatalf("intake notes = %v", got.IntakeNotes)
+			}
+			if gh.issueCount() != 1 {
+				t.Fatalf("issues = %d, want the characters only", gh.issueCount())
+			}
+			if cur, _ := db.GetBook(ctx, b.ID); cur.WorkID != "reacher-01" {
+				t.Fatalf("book work = %q", cur.WorkID)
+			}
+			again, err := exe.Share(ctx, b.ID, "", []string{ShareCharacters})
+			if err != nil || gh.issueCount() != 1 || again.Contributed["characters"] != got.Contributed["characters"] {
+				t.Fatalf("again = %+v %v, issues %d", again, err, gh.issueCount())
+			}
+		})
 	}
 }
 
@@ -259,6 +270,7 @@ func TestShareAdoptsTheIssueSentForEarlierContent(t *testing.T) {
 func TestShareAdoptsAnIssueFiledAsAnotherAccount(t *testing.T) {
 	ctx := context.Background()
 	_, gh, exe, b := shareFixture(t, baseChars("x"))
+	exe.tokenSource = fakeTokenResolver{token: "manual", from: contrib.FromGH}
 	gh.lostIssues = 1
 	if _, err := exe.Share(ctx, b.ID, "reacher-01", nil); err == nil {
 		t.Fatal("a lost answer should fail the share")
@@ -266,8 +278,9 @@ func TestShareAdoptsAnIssueFiledAsAnotherAccount(t *testing.T) {
 	gh.mu.Lock()
 	gh.login = "someone-else"
 	gh.mu.Unlock()
+	exe.tokenSource = fakeTokenResolver{token: "app", from: contrib.FromDevice}
 	got, err := exe.Share(ctx, b.ID, "reacher-01", nil)
-	if err != nil || gh.issueCount() != 1 || got.Contributed["characters"] != gh.srv.URL+"/issue/1" {
+	if err != nil || got.IntakeNotes["characters"] != contrib.ManualIntakeNote || gh.issueCount() != 1 || got.Contributed["characters"] != gh.srv.URL+"/issue/1" {
 		t.Fatalf("share = %+v %v, issues %d", got, err, gh.issueCount())
 	}
 }

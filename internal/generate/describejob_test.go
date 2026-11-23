@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -33,16 +32,16 @@ const testDescription = `{"license":"CC-BY-SA-4.0","sources":[{"type":"community
 type fakeDescriber struct {
 	db       *store.DB
 	mu       sync.Mutex
-	runs     []bool // each call's noWait
+	runs     int
 	fail     func(call int) error
 	freeFail bool
 	fromWork bool
 }
 
-func (f *fakeDescriber) Describe(ctx context.Context, bookID int64, noWait bool) (pipeline.DescribeResult, error) {
+func (f *fakeDescriber) Describe(ctx context.Context, bookID int64) (pipeline.DescribeResult, error) {
 	f.mu.Lock()
-	f.runs = append(f.runs, noWait)
-	call := len(f.runs)
+	f.runs++
+	call := f.runs
 	fail, freeFail, fromWork := f.fail, f.freeFail, f.fromWork
 	f.mu.Unlock()
 	if fail != nil {
@@ -75,11 +74,11 @@ func (f *fakeDescriber) Describe(ctx context.Context, bookID int64, noWait bool)
 		CostUSD: 0.25, GeneratedAt: time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)}, nil
 }
 
-// calls is each call's noWait.
-func (f *fakeDescriber) calls() []bool {
+// calls is how many times Describe ran.
+func (f *fakeDescriber) calls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return slices.Clone(f.runs)
+	return f.runs
 }
 
 // describeHandler is a handler whose engine writes descriptions with d.
@@ -147,8 +146,8 @@ func TestGenerateWritesTheDescription(t *testing.T) {
 	}
 	// Asked at the park, and again at done (to re-compose it with the work the
 	// contributing stage resolved), never waiting out a rate limit.
-	if calls := d.calls(); len(calls) != 2 || !calls[0] || !calls[1] {
-		t.Fatalf("describe calls = %+v, want two with noWait", calls)
+	if calls := d.calls(); calls != 2 {
+		t.Fatalf("describe calls = %d, want two", calls)
 	}
 	adir := filepath.Join(hr.root, "Author", "Book", AttachDir)
 	if raw, err := os.ReadFile(filepath.Join(adir, "description.json")); err != nil || string(raw) != testDescription {
@@ -237,8 +236,8 @@ func TestDescribeJob(t *testing.T) {
 		strings.Join(res.Files, ",") != "description.json,bridge.json" {
 		t.Fatalf("result = %+v", res)
 	}
-	if calls := d.calls(); len(calls) != 1 || calls[0] {
-		t.Fatalf("describe calls = %+v", calls)
+	if calls := d.calls(); calls != 1 {
+		t.Fatalf("describe calls = %d", calls)
 	}
 	adir := filepath.Join(hr.root, "Author", "Book", AttachDir)
 	if raw, err := os.ReadFile(filepath.Join(adir, "description.json")); err != nil || string(raw) != testDescription {
@@ -321,7 +320,7 @@ func TestDescribeJobRefusals(t *testing.T) {
 		}
 	}
 	close(gate)
-	if len(d.calls()) != 0 {
+	if d.calls() != 0 {
 		t.Fatal("a refused job described")
 	}
 }
@@ -347,9 +346,7 @@ func TestDescribeJobParks(t *testing.T) {
 		case m == "budget" && call == 1:
 			return scheduler.ParkWithCode(state.ParkBudgetExceeded, "the budget is spent")
 		case m == "rate" && call == 3:
-			return scheduler.ParkWithCodeAfter(state.ParkAgentRateLimited, "rate limited", time.Now().Add(50*time.Millisecond))
-		case m == "rate": // the try at retry_at holds until the server has the park, as in TestDescribeJob
-			poll(func() bool { return hr.srv.saw(63, rateLimited) })
+			return scheduler.ParkWithCodeAfter(state.ParkAgentRateLimited, "rate limited", time.Now().Add(time.Hour))
 		case m == "checks":
 			return scheduler.ParkWithCode(state.ParkAgentValidationExhausted, "kept failing")
 		}
@@ -380,7 +377,18 @@ func TestDescribeJobParks(t *testing.T) {
 	}
 	hr.srv.addDescribe(63, "Author/Book")
 	hr.waitFor("the rate limit's park", func() bool { return hr.srv.saw(63, rateLimited) })
-	hr.waitFor("done at retry_at", func() bool { s, _ := hr.srv.final(63); return s == link.StateDone })
+	if calls := d.calls(); calls != 3 {
+		t.Fatalf("rate-limited describe calls = %d, want 3", calls)
+	}
+	release, ok := hr.sched.Hold(hr.engineBook(61).ID)
+	if !ok {
+		t.Fatal("rate-limited describe still holds the engine book")
+	}
+	release()
+	if err := h.Retry(context.Background(), 63); err != nil {
+		t.Fatal(err)
+	}
+	hr.waitFor("done after rate-limit retry", func() bool { s, _ := hr.srv.final(63); return s == link.StateDone })
 
 	mu.Lock()
 	mode = "checks"
@@ -389,6 +397,45 @@ func TestDescribeJobParks(t *testing.T) {
 	hr.waitFor("failed", func() bool { s, _ := hr.srv.final(64); return s == link.StateFailed })
 	if _, u := hr.srv.final(64); u.Error == nil || *u.Error != string(errDescribeChecks) {
 		t.Fatalf("failed with %v", u.Error)
+	}
+}
+
+// A try after a rate limit's park (which let go of the book) runs the start's
+// checks again: a run the engine began on the book meanwhile refuses the job as
+// at the start, and nothing is described mid-run.
+func TestDescribeJobRetryChecksTheBookAgain(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.generated(66)
+	d := &fakeDescriber{db: hr.db, freeFail: true, fail: func(call int) error {
+		if call == 1 {
+			return scheduler.ParkWithCodeAfter(state.ParkAgentRateLimited, "rate limited", time.Now().Add(time.Hour))
+		}
+		return nil
+	}}
+	h := hr.describeHandler(d)
+	stop := hr.runAll(h)
+	defer stop()
+	hr.srv.addDescribe(67, "Author/Book")
+	hr.waitFor("the rate limit's park", func() bool {
+		return hr.srv.saw(67, func(u link.Update, p map[string]any) bool {
+			park, _ := p["park"].(map[string]any)
+			return u.State != nil && *u.State == link.StateNeedsAttention && park["code"] == "agent_rate_limited"
+		})
+	})
+	b := hr.engineBook(66)
+	if err := hr.db.SetBookState(context.Background(), b.ID, "asr", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Retry(context.Background(), 67); err != nil {
+		t.Fatal(err)
+	}
+	hr.waitFor("the refusal", func() bool { s, _ := hr.srv.final(67); return s == link.StateFailed })
+	if _, u := hr.srv.final(67); u.Error == nil || *u.Error != string(errDescribeGenerating) {
+		t.Fatalf("failed with %v, want %q", u.Error, errDescribeGenerating)
+	}
+	if calls := d.calls(); calls != 1 {
+		t.Fatalf("describe calls = %d, want 1 (none on a book mid-run)", calls)
 	}
 }
 
@@ -522,8 +569,8 @@ func TestDescriptionNeedsTheHold(t *testing.T) {
 	if res.Description || res.DescriptionError != "the engine was busy with this book" {
 		t.Fatalf("result = %+v", res)
 	}
-	if len(d.calls()) != 0 {
-		t.Fatalf("described %d times without the hold", len(d.calls()))
+	if d.calls() != 0 {
+		t.Fatalf("described %d times without the hold", d.calls())
 	}
 }
 
@@ -666,7 +713,7 @@ func (hr *harness) contributingSettled(id int64, d *fakeDescriber) func() bool {
 		hr.srv.mu.Lock()
 		defer hr.srv.mu.Unlock()
 		ups := hr.srv.updates[id]
-		if len(ups) == 0 || len(d.calls()) == 0 {
+		if len(ups) == 0 || d.calls() == 0 {
 			return false
 		}
 		var p map[string]any
@@ -710,7 +757,7 @@ func TestDescribeWaitsForTheEnginesCancel(t *testing.T) {
 	// Parked and quiet (as in TestDescribeRightAfterACancelRuns): the cancel is
 	// heard only through the description's Refresh.
 	hr.waitFor("the contributing park, settled", hr.contributingSettled(311, d))
-	calls := len(d.calls())
+	calls := d.calls()
 	hr.srv.set(func() { hr.srv.cancel[311] = true })
 	hr.srv.addDescribe(312, "Author/Book")
 	select {
@@ -719,13 +766,81 @@ func TestDescribeWaitsForTheEnginesCancel(t *testing.T) {
 		t.Fatal("the engine was never asked to cancel the book")
 	}
 	time.Sleep(testwait.Scaled(100 * time.Millisecond)) // ten polls of the description's wait (Scaled: still ten under -race)
-	if s, u := hr.srv.final(312); s != "" || len(d.calls()) != calls {
+	if s, u := hr.srv.final(312); s != "" || d.calls() != calls {
 		t.Fatalf("while the engine cancels the book: the description ended %q (%q), describe calls %d (was %d)",
-			s, errOf(u), len(d.calls()), calls)
+			s, errOf(u), d.calls(), calls)
 	}
 	eng.open()
 	hr.waitFor("the description ended", func() bool { s, _ := hr.srv.final(312); return s != "" })
 	if s, u := hr.srv.final(312); s != link.StateDone {
 		t.Fatalf("the description ended %s (%q), want done", s, errOf(u))
+	}
+}
+
+func TestDescribeRetriesWhenRateLimitEnds(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.generated(301)
+	d := &fakeDescriber{db: hr.db, fail: func(call int) error {
+		if call == 1 {
+			return scheduler.ParkWithCodeAfter(state.ParkAgentRateLimited, "rate limited", time.Now().Add(50*time.Millisecond))
+		}
+		return nil
+	}}
+	stop := hr.runAll(hr.describeHandler(d))
+	defer stop()
+	hr.srv.addDescribe(302, "Author/Book")
+	waitDone(hr, 302)
+	if calls := d.calls(); calls != 2 {
+		t.Fatalf("describe attempts at the rate limit and after it: %d", calls)
+	}
+}
+
+// A description-only job has no mapping to record a move in, and still never
+// follows the server's answer through a link that leaves the library: it parks
+// book_not_writable and writes nothing there.
+func TestDescribeJobRefusesAMoveOutOfTheLibrary(t *testing.T) {
+	hr := newHarness(t)
+	hr.srv.add(95, "Author/Book", `{}`)
+	stop := hr.runner(hr.h)
+	hr.waitFor("generated", func() bool { s, _ := hr.srv.final(95); return s == link.StateDone })
+	stop()
+	outside := t.TempDir()
+	mustWrite(t, filepath.Join(outside, "01.mp3"), "audio-one")
+	mustWrite(t, filepath.Join(outside, "02.mp3"), "audio-two!")
+	if err := os.Symlink(outside, filepath.Join(hr.root, "Author", "Linked")); err != nil {
+		t.Fatal(err)
+	}
+	// The server moves the job while its first try waits on the budget.
+	d := &fakeDescriber{db: hr.db, fail: func(call int) error {
+		if call != 1 {
+			return nil
+		}
+		hr.srv.set(func() {
+			hr.srv.books["Author/Linked"] = link.Book{LibraryID: 1, Path: "Author/Linked", Files: []link.BookFile{
+				{Path: "Author/Linked/01.mp3", Size: 9}, {Path: "Author/Linked/02.mp3", Size: 10}}}
+			hr.srv.paths = map[int64]string{96: "Author/Linked"}
+		})
+		return scheduler.ParkWithCode(state.ParkBudgetExceeded, "the budget is spent")
+	}}
+	h := hr.describeHandler(d)
+	stopAll := hr.runAll(h)
+	defer stopAll()
+	hr.srv.addDescribe(96, "Author/Book")
+	parked := func(code string) func() bool {
+		return func() bool {
+			return hr.srv.saw(96, func(u link.Update, p map[string]any) bool {
+				park, _ := p["park"].(map[string]any)
+				return u.State != nil && *u.State == link.StateNeedsAttention && park["code"] == code
+			})
+		}
+	}
+	hr.waitFor("the budget park", parked("budget_exceeded"))
+	if err := h.Retry(context.Background(), 96); err != nil {
+		t.Fatal(err)
+	}
+	hr.waitFor("the save's park", parked("book_not_writable"))
+	if _, err := os.Lstat(filepath.Join(outside, AttachDir)); !os.IsNotExist(err) {
+		t.Fatalf("wrote outside the library: %v", err)
 	}
 }

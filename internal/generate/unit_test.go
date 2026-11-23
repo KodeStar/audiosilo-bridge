@@ -1837,3 +1837,126 @@ func TestStoppedByParksAShareItCantConfirm(t *testing.T) {
 		t.Fatalf("stands false: %v %v, want the share stopped", stop, err)
 	}
 }
+
+func TestRecoverInterruptedTranscriptReplacement(t *testing.T) {
+	ctx := t.Context()
+	root := t.TempDir()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	h := New(Options{DB: db, WorkRoot: root})
+	old := store.NewBook{SourcePath: "/Book", WorkDir: filepath.Join(root, "old"), Title: "Book", Kind: "audio", State: "done"}
+	b, err := db.CreateBook(ctx, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := old
+	next.BatchID, next.WorkDir = "replacement", filepath.Join(root, "new")
+	if err := db.EnsureBatch(ctx, next.BatchID, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	key := store.TranscriptCleanupPrefix + next.BatchID
+	mustWrite(t, filepath.Join(old.WorkDir, "raw"), "original")
+	stage := func() {
+		t.Helper()
+		if err := db.SetSetting(ctx, key, next.WorkDir); err != nil {
+			t.Fatal(err)
+		}
+		mustWrite(t, filepath.Join(next.WorkDir, "raw"), "staged")
+	}
+	recoverAndCheck := func(kept, removed string) {
+		t.Helper()
+		if err := h.RecoverTranscriptDirs(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Join(kept, "raw")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(removed); !os.IsNotExist(err) {
+			t.Fatalf("disposable directory %s: %v", removed, err)
+		}
+	}
+	stage()
+	recoverAndCheck(old.WorkDir, next.WorkDir)
+	stage()
+	if _, err := db.ReplaceMappedBook(ctx, &b, next, store.GenerateBook{ServerJobID: 1, LibraryID: 1, RelPath: "Book"}); err != nil {
+		t.Fatal(err)
+	}
+	recoverAndCheck(next.WorkDir, old.WorkDir)
+	outside := t.TempDir()
+	for _, dir := range []string{next.WorkDir, outside} {
+		if err := db.SetSetting(ctx, key, dir); err != nil {
+			t.Fatal(err)
+		}
+		err := h.RecoverTranscriptDirs(ctx)
+		if (dir == outside) != (err != nil) {
+			t.Fatalf("cleanup of %s: %v", dir, err)
+		}
+		if _, err := os.Stat(dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A relative --data makes a relative work root: the cleanup still removes the
+// folder recorded inside it.
+func TestTranscriptCleanupWithARelativeWorkRoot(t *testing.T) {
+	ctx := t.Context()
+	t.Chdir(t.TempDir())
+	db, err := store.Open(ctx, "bridge.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	h := New(Options{DB: db, WorkRoot: "work"})
+	dir := filepath.Join("work", "batch-staged")
+	mustWrite(t, filepath.Join(dir, "raw"), "staged")
+	key := store.TranscriptCleanupPrefix + "batch-staged"
+	if err := db.SetSetting(ctx, key, dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.RecoverTranscriptDirs(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("staged folder: %v", err)
+	}
+	if _, found, err := db.GetSetting(ctx, key); err != nil || found {
+		t.Fatalf("cleanup key kept: %v %v", found, err)
+	}
+}
+
+// An earlier run the job can't reuse is no reason to fail it: one whose folder
+// lies outside the work root (a data folder moved since), or one gone while the
+// job waited for the engine's hold, leaves create to clear it and start over.
+func TestKeptTranscriptNotReusableFallsThrough(t *testing.T) {
+	ctx := t.Context()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	h := New(Options{DB: db, WorkRoot: filepath.Join(t.TempDir(), "work"), RetentionDays: 30})
+	r := &run{rep: jobs.LocalReporter()}
+	outside, err := db.CreateBook(ctx, store.NewBook{SourcePath: "/Moved", WorkDir: filepath.Join(t.TempDir(), "old-data", "work", "x"),
+		Title: "Moved", Kind: "audio", State: "done"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := h.fromKeptTranscript(ctx, nil, r, outside, store.NewBook{}); ok || err != nil {
+		t.Fatalf("outside the work root: %v %v", ok, err)
+	}
+	gone, err := db.CreateBook(ctx, store.NewBook{SourcePath: "/Gone", WorkDir: filepath.Join(h.o.WorkRoot, "gone"),
+		Title: "Gone", Kind: "audio", State: "done"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteBook(ctx, gone.ID); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := h.fromKeptTranscript(ctx, nil, r, gone, store.NewBook{}); ok || err != nil {
+		t.Fatalf("gone meanwhile: %v %v", ok, err)
+	}
+}

@@ -34,6 +34,7 @@ const maxErrorBody = 300
 // the labels that actually stuck (GitHub silently drops labels set by a
 // non-collaborator, so the caller re-reads via GetIssue to verify).
 type Issue struct {
+	FiledWith string `json:"-"` // Credential source, when known.
 	Number    int
 	URL       string
 	State     string // "open" | "closed" (the poller closes an issue with no merged intake PR)
@@ -101,10 +102,8 @@ type Client struct {
 	dated   bool
 }
 
-// AppFiled reports whether the Client's issues are filed through the GitHub App
-// (the Accounts tab's sign-in): the meta repo's route workflow labels those
-// itself, after the issue is opened.
-func (c *Client) AppFiled() bool { return c.from == FromDevice }
+// CredentialSource identifies the credential that will file an issue.
+func (c *Client) CredentialSource() string { return c.from }
 
 // NewClient returns a Client for baseURL (e.g. https://api.github.com) carrying
 // token as a Bearer credential (empty token = unauthenticated).
@@ -349,7 +348,9 @@ func (c *Client) CreateIssue(ctx context.Context, repo, title, body string, labe
 	if err := json.Unmarshal(respBody, &r); err != nil {
 		return Issue{}, fmt.Errorf("contrib: decode issue: %w", err)
 	}
-	return r.toIssue(), nil
+	issue := r.toIssue()
+	issue.FiledWith = c.from
+	return issue, nil
 }
 
 // FiledIssue is an issue as the repo's issue list shows it.

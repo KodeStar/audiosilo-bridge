@@ -137,7 +137,7 @@ func TestContributingDescribesAnEbookAgainstItsText(t *testing.T) {
 	if err := os.RemoveAll(filepath.Join(book.WorkDir, ebook.TextDir)); err != nil {
 		t.Fatal(err)
 	}
-	res, err := e.Describe(context.Background(), book.ID, true)
+	res, err := e.Describe(context.Background(), book.ID)
 	if err != nil || !res.Reused || res.CostUSD != 0 || res.CheckedAgainst != CheckedBookText || res.Chapters != 2 {
 		t.Fatalf("done's pass = %+v, %v", res, err)
 	}

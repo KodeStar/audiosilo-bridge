@@ -23,6 +23,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
+	"github.com/kodestar/audiosilo-bridge/internal/transcript"
 )
 
 // epubBytes is a minimal EPUB (one section); drm adds META-INF/rights.xml.
@@ -402,7 +403,7 @@ func bookSource(hr *harness) string {
 func seedEarlierAt(hr *harness, key, goal string, st state.State, status string) store.Book {
 	hr.t.Helper()
 	ctx := context.Background()
-	b, err := hr.db.CreateBook(ctx, store.NewBook{SourcePath: key, WorkDir: store.DeriveWorkDir(hr.work, key, "The Book"), Title: "The Book",
+	b, err := hr.db.CreateBook(ctx, store.NewBook{SourcePath: key, WorkDir: filepath.Join(hr.work, strings.ReplaceAll(key, "/", "_")), Title: "The Book",
 		Goal: goal, Kind: string(state.KindAudio), State: string(state.Done)}) // never queued: the engine would run it
 	if err != nil {
 		hr.t.Fatal(err)
@@ -638,7 +639,7 @@ func seedEbookRun(hr *harness) store.Book {
 	hr.t.Helper()
 	ctx := context.Background()
 	sp := bookSource(hr)
-	b, err := hr.db.CreateBook(ctx, store.NewBook{SourcePath: sp, WorkDir: store.DeriveWorkDir(hr.work, sp, "The Book"), Title: "The Book",
+	b, err := hr.db.CreateBook(ctx, store.NewBook{SourcePath: sp, WorkDir: filepath.Join(hr.work, strings.ReplaceAll(sp, "/", "_")), Title: "The Book",
 		Kind: string(state.KindEbook), EbookPath: filepath.Join(sp, "Book.epub"), State: string(state.Done)})
 	if err != nil {
 		hr.t.Fatal(err)
@@ -797,5 +798,69 @@ func TestReadalongRightAfterACancelIsNotRefused(t *testing.T) {
 	}
 	if s, _ := hr.srv.final(236); s != link.StateCancelled {
 		t.Fatalf("the cancelled job ended %q, want cancelled", s)
+	}
+}
+
+func TestRegenerateUsesCompleteRetainedTranscript(t *testing.T) {
+	for _, tc := range []string{"kept", "same settings", "unrecorded settings", "incomplete", "swept", "expired", "changed",
+		"bad fingerprint", "other language", "other model"} {
+		t.Run(tc, func(t *testing.T) {
+			hr := newHarness(t)
+			hr.generated(301)
+			old := hr.engineBook(301)
+			inspected(hr, old.WorkDir)
+			raw := `{"text":"kept transcript","segments":[]}`
+			for _, n := range []int{1, 2} {
+				mustWrite(t, filepath.Join(old.WorkDir, transcript.RawDir, transcript.RawName(n)), raw)
+			}
+			switch tc {
+			case "expired":
+				hr.h.o.Now = func() time.Time { return time.Now().Add(31 * 24 * time.Hour) }
+			case "bad fingerprint":
+				mustWrite(t, filepath.Join(old.WorkDir, "asr.json"), "{")
+			case "same settings", "other language", "other model":
+				mustWrite(t, filepath.Join(old.WorkDir, "asr.json"), `{"model":"large-v3","language":"en"}`)
+			case "unrecorded settings":
+				mustWrite(t, filepath.Join(old.WorkDir, "asr.json"), `{"backend":"whisper-cli"}`)
+			}
+			hr.h.o.ASR = func() pipeline.ASRSettings { return pipeline.ASRSettings{Model: "large-v3", Language: "en"} }
+			switch tc {
+			case "other language":
+				hr.h.o.ASR = func() pipeline.ASRSettings { return pipeline.ASRSettings{Model: "large-v3", Language: "de"} }
+			case "other model":
+				hr.h.o.ASR = func() pipeline.ASRSettings { return pipeline.ASRSettings{Model: "small", Language: "en"} }
+			case "incomplete":
+				mustWrite(t, filepath.Join(old.WorkDir, transcript.RawDir, transcript.RawName(2)), "{")
+			case "swept":
+				if err := hr.db.MarkGenerateBookSwept(context.Background(), old.ID, time.Now()); err != nil {
+					t.Fatal(err)
+				}
+			case "changed":
+				at := time.Now().Add(time.Hour)
+				if err := os.Chtimes(filepath.Join(old.AudioSource(), "02.mp3"), at, at); err != nil {
+					t.Fatal(err)
+				}
+			}
+			mustWrite(t, filepath.Join(old.WorkDir, "facts", "obsolete.md"), "previous generation")
+			hr.srv.add(302, "Author/Book", `{"source":"audio"}`)
+			stop := hr.runner(hr.h)
+			defer stop()
+			waitDone(hr, 302)
+			b := hr.engineBook(302)
+			stages := hr.stagesRun(b.ID)
+			if tc == "kept" || tc == "same settings" || tc == "unrecorded settings" {
+				if len(stages) == 0 || stages[0] != string(state.Sanitizing) || slices.Contains(stages, string(state.ASR)) {
+					t.Fatalf("regenerate stages = %v", stages)
+				}
+				if got, err := os.ReadFile(filepath.Join(b.WorkDir, transcript.RawDir, transcript.RawName(2))); err != nil || string(got) != raw {
+					t.Fatalf("retained raw = %q, %v", got, err)
+				}
+				if _, err := os.Stat(filepath.Join(b.WorkDir, "facts", "obsolete.md")); !os.IsNotExist(err) {
+					t.Fatal("reused earlier agent output")
+				}
+			} else if !slices.Contains(stages, string(state.ASR)) {
+				t.Fatalf("%s transcript used: %v", tc, stages)
+			}
+		})
 	}
 }

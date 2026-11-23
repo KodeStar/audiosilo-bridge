@@ -11,7 +11,9 @@ import (
 	"github.com/kodestar/audiosilo-meta/pkg/extract"
 
 	"github.com/kodestar/audiosilo-bridge/internal/ebook"
+	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 	"github.com/kodestar/audiosilo-bridge/internal/mapping"
+	"github.com/kodestar/audiosilo-bridge/internal/pipeline"
 )
 
 // place is where a book is on the Bridge's side of a checked mapping.
@@ -35,7 +37,7 @@ func locate(mount, rel string) (place, error) {
 	if err != nil {
 		return place{}, err
 	}
-	info, err := os.Stat(full)
+	info, err := fsutil.StatWithin(full, pipeline.SourceStatWait)
 	if errors.Is(err, fs.ErrNotExist) {
 		return place{}, fmt.Errorf("the book isn't at %s through the library's mapping", rel)
 	}
@@ -50,13 +52,19 @@ func locate(mount, rel string) (place, error) {
 	return place{full: full, dir: filepath.Dir(full), prefix: stem + ".", single: true}, nil
 }
 
+// singleEpub is where a single-file book's own .epub sits: "<stem>.epub" beside
+// the file.
+func singleEpub(p place) string {
+	return filepath.Join(p.dir, strings.TrimSuffix(p.prefix, ".")+".epub")
+}
+
 // epubBeside finds the book's own .epub: for a folder book exactly one directly
 // in its folder (never a subfolder, never a dot file such as macOS's "._x.epub"
 // stub), for a single-file book "<stem>.epub" beside the file (its folder holds
 // other books). "" when there is none; an error when a folder holds several.
 func epubBeside(p place) (string, error) {
 	if p.single {
-		cand := filepath.Join(p.dir, strings.TrimSuffix(p.prefix, ".")+".epub")
+		cand := singleEpub(p)
 		if info, err := os.Stat(cand); err == nil && info.Mode().IsRegular() {
 			return cand, nil
 		}

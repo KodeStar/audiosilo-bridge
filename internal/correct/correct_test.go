@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,6 +18,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/contrib"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/metaops"
+	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
 
 type fakeMeta struct {
@@ -32,6 +35,10 @@ type memKV struct {
 	m  map[string]string
 	// failSet fails each SetSetting of a key with this prefix ("": none).
 	failSet string
+}
+
+func (k *memKV) EarlierBookJobs(context.Context, string, string, int64, string, int64) ([]store.ServerJob, error) {
+	return nil, nil
 }
 
 func (k *memKV) GetSetting(_ context.Context, key string) (string, bool, error) {
@@ -102,6 +109,8 @@ type gh struct {
 	// date is GitHub's clock (every answer's Date; fakeNow when zero), so a
 	// marker's age doesn't depend on the day the tests run.
 	date time.Time
+	// closed are the issue numbers a maintainer closed (GET of one issue).
+	closed map[int]bool
 }
 
 // fakeNow is the fake GitHub's clock: shortly after the issues it made.
@@ -119,6 +128,18 @@ func (g *gh) server(t *testing.T) *httptest.Server {
 		w.Header().Set("Date", date.Format(http.TimeFormat))
 		if limited {
 			w.Header().Set("X-RateLimit-Remaining", "0")
+		}
+		if n, ok := strings.CutPrefix(r.URL.Path, "/repos/KodeStar/audiosilo-meta/issues/"); ok && r.Method == http.MethodGet {
+			number, _ := strconv.Atoi(n)
+			g.mu.Lock()
+			made, closed := number >= 42 && number < 42+len(g.issues), g.closed[number]
+			g.mu.Unlock()
+			if !made {
+				http.NotFound(w, r)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"number": number, "state": map[bool]string{false: "open", true: "closed"}[closed]})
+			return
 		}
 		if r.URL.Path != "/repos/KodeStar/audiosilo-meta/issues" {
 			http.NotFound(w, r)
@@ -845,5 +866,167 @@ func TestCorrectKeysByTheJobsServer(t *testing.T) {
 	p := Params{WorkID: "w"}
 	if a, b := h.filingKey(job, p), h.filingKey(jobs.ClaimedFrom(jobs.Job{ID: 4}, "b"), p); a == b || !strings.Contains(a, "/a/") {
 		t.Fatalf("filing keys a %q, b %q: want each under its own server", a, b)
+	}
+}
+
+func TestCorrectRetryAfterPartOfBatchApplied(t *testing.T) {
+	for _, scenario := range []string{"confirmed after job history pruned", "interrupted legacy job", "interrupted same job"} {
+		t.Run(scenario, func(t *testing.T) {
+			lost := scenario != "confirmed after job history pruned"
+			legacy := scenario == "interrupted legacy job"
+			ctx := context.Background()
+			db, err := store.Open(ctx, filepath.Join(t.TempDir(), "bridge.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			lib, path := int64(3), "Book"
+			job := jobs.Job{ID: 11, LibraryID: &lib, Path: &path, Params: json.RawMessage(params)}
+			gh := &gh{drop: lost}
+			creds := &tokens{token: "test", from: contrib.FromGH}
+			h := New(Options{KV: db, ServerID: func() string { return "s" }, Meta: fakeMeta{cov: cov()}, Tokens: creds, CoreRepo: "KodeStar/audiosilo-meta", BaseURL: gh.server(t).URL})
+			if legacy {
+				if err := db.RecordClaim(ctx, store.ServerJob{ID: job.ID, Kind: Kind, ServerID: "s", LibraryID: &lib, Path: &path, Params: job.Params, Attempt: 1}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, err = h.Run(ctx, job, jobs.LocalReporter())
+			if (lost && !errors.Is(err, errNoAnswer)) || (!lost && err != nil) {
+				t.Fatal(err)
+			}
+			if legacy {
+				// Legacy claims had only the exact-request marker.
+				if err := db.DeleteSetting(ctx, h.bookKey(job)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			gh.setDrop(false)
+			p, _ := ParseParams(job.Params)
+			p.Changes = p.Changes[1:]
+			if scenario != "interrupted same job" {
+				job.ID++
+			}
+			job.Params, _ = json.Marshal(p)
+			creds.from = contrib.FromDevice
+			out, err := h.Run(ctx, job, jobs.LocalReporter())
+			if err != nil || out.(Result).IssueNumber != 42 || out.(Result).Changes != 3 || out.(Result).IntakeNote != contrib.ManualIntakeNote || gh.count() != 1 {
+				t.Fatalf("subset retry: %+v, %v, %d issues", out, err, gh.count())
+			}
+			p.Changes[0].Corrected = "A different correction"
+			job.ID++
+			job.Params, _ = json.Marshal(p)
+			if _, err = h.Run(ctx, job, jobs.LocalReporter()); err != nil || gh.count() != 2 {
+				t.Fatalf("different correction: %v, %d issues", err, gh.count())
+			}
+		})
+	}
+}
+
+// A smaller retry reports an earlier batch's confirmed issue only while that
+// issue is open: once a maintainer has closed it, the changes suggested again
+// are filed afresh.
+func TestCorrectSmallerRetryFilesAgainOnceTheIssueIsClosed(t *testing.T) {
+	ctx := context.Background()
+	g, kv := &gh{}, &memKV{m: map[string]string{}}
+	h := newHandler(t, g, &tokens{token: "t", from: contrib.FromDevice}, kv, fakeMeta{cov: cov()})
+	lib, path := int64(3), "Book"
+	if out, err := h.Run(ctx, jobs.Job{ID: 50, LibraryID: &lib, Path: &path, Params: json.RawMessage(params)}, jobs.LocalReporter()); err != nil || out.(Result).IssueNumber != 42 {
+		t.Fatalf("the batch: %+v %v", out, err)
+	}
+	p, _ := ParseParams(json.RawMessage(params))
+	p.Changes = p.Changes[1:]
+	smaller, _ := json.Marshal(p)
+	if out, err := h.Run(ctx, jobs.Job{ID: 51, LibraryID: &lib, Path: &path, Params: smaller}, jobs.LocalReporter()); err != nil ||
+		out.(Result).IssueNumber != 42 || g.count() != 1 {
+		t.Fatalf("a smaller retry while the issue is open: %+v %v, issues %d", out, err, g.count())
+	}
+	g.mu.Lock()
+	g.closed = map[int]bool{42: true}
+	g.mu.Unlock()
+	out, err := h.Run(ctx, jobs.Job{ID: 52, LibraryID: &lib, Path: &path, Params: smaller}, jobs.LocalReporter())
+	if err != nil || g.count() != 2 || out.(Result).IssueNumber != 43 || out.(Result).Changes != 2 {
+		t.Fatalf("a smaller retry once the issue is closed: %+v %v, issues %d", out, err, g.count())
+	}
+}
+
+// A smaller retry adopts an earlier batch's lost issue only as a new job adopts
+// its own request's: a day after the lost answer it is no retry of it, so the
+// admin is told once and the next suggestion files.
+func TestCorrectSmallerRetryLeavesAStaleBatch(t *testing.T) {
+	ctx := context.Background()
+	g, kv := &gh{drop: true}, &memKV{m: map[string]string{}}
+	h := newHandler(t, g, &tokens{token: "t", from: contrib.FromEnv}, kv, fakeMeta{cov: cov()})
+	lib, path := int64(3), "Book"
+	if _, err := h.Run(ctx, jobs.Job{ID: 30, LibraryID: &lib, Path: &path, Params: json.RawMessage(params)}, jobs.LocalReporter()); !errors.Is(err, errNoAnswer) {
+		t.Fatalf("lost answer: %v", err)
+	}
+	g.setDrop(false)
+	g.mu.Lock()
+	g.date = fakeNow.Add(contrib.FilingStale + time.Hour)
+	g.mu.Unlock()
+	p, _ := ParseParams(json.RawMessage(params))
+	p.Changes = p.Changes[1:]
+	smaller, _ := json.Marshal(p)
+	if _, err := h.Run(ctx, jobs.Job{ID: 31, LibraryID: &lib, Path: &path, Params: smaller}, jobs.LocalReporter()); !errors.Is(err, errFiledBefore) || g.count() != 1 {
+		t.Fatalf("a smaller batch a day later: %v, issues %d", err, g.count())
+	}
+	out, err := h.Run(ctx, jobs.Job{ID: 32, LibraryID: &lib, Path: &path, Params: smaller}, jobs.LocalReporter())
+	if err != nil || g.count() != 2 || out.(Result).IssueNumber != 43 || out.(Result).Changes != 2 {
+		t.Fatalf("the next suggestion: %+v %v, issues %d", out, err, g.count())
+	}
+}
+
+// A smaller retry whose lookup through the earlier batch's marker finds an
+// issue of its own request (filed by another job) keeps it as its own result
+// only: the earlier batch's marker stays, and that batch gets no result.
+func TestCorrectSmallerRetryKeepsItsOwnIssueToItself(t *testing.T) {
+	ctx := context.Background()
+	g, kv := &gh{status: http.StatusBadGateway}, &memKV{m: map[string]string{}}
+	h := newHandler(t, g, &tokens{token: "t", from: contrib.FromEnv}, kv, fakeMeta{cov: cov()})
+	lib, path, other := int64(3), "Book", "Book (copy)"
+	if _, err := h.Run(ctx, jobs.Job{ID: 70, LibraryID: &lib, Path: &path, Params: json.RawMessage(params)}, jobs.LocalReporter()); !errors.Is(err, errNoAnswer) {
+		t.Fatalf("lost answer: %v", err)
+	}
+	batchMarkers := kv.markers()
+	g.mu.Lock()
+	g.status = 0
+	g.mu.Unlock()
+	p, _ := ParseParams(json.RawMessage(params))
+	p.Changes = p.Changes[1:]
+	smaller, _ := json.Marshal(p)
+	if out, err := h.Run(ctx, jobs.Job{ID: 71, LibraryID: &lib, Path: &other, Params: smaller}, jobs.LocalReporter()); err != nil || out.(Result).IssueNumber != 42 {
+		t.Fatalf("the same changes for another book: %+v %v", out, err)
+	}
+	out, err := h.Run(ctx, jobs.Job{ID: 72, LibraryID: &lib, Path: &path, Params: smaller}, jobs.LocalReporter())
+	if err != nil || out.(Result).IssueNumber != 42 || out.(Result).Changes != 2 || g.count() != 1 {
+		t.Fatalf("smaller retry: %+v %v, issues %d", out, err, g.count())
+	}
+	if r, ok, err := h.savedResult(ctx, jobs.Job{ID: 70}); err != nil || ok {
+		t.Fatalf("the earlier batch's result = %+v, %v, %v; want none", r, ok, err)
+	}
+	if got := kv.markers(); !maps.Equal(got, batchMarkers) {
+		t.Fatalf("markers = %v, want the earlier batch's %v", got, batchMarkers)
+	}
+}
+
+// A smaller retry whose lookup proves the earlier batch filed nothing drops
+// that batch's marker with its own filing.
+func TestCorrectSmallerRetryClearsAnEmptyBatchMarker(t *testing.T) {
+	ctx := context.Background()
+	g, kv := &gh{status: http.StatusBadGateway}, &memKV{m: map[string]string{}}
+	h := newHandler(t, g, &tokens{token: "t", from: contrib.FromEnv}, kv, fakeMeta{cov: cov()})
+	lib, path := int64(3), "Book"
+	if _, err := h.Run(ctx, jobs.Job{ID: 40, LibraryID: &lib, Path: &path, Params: json.RawMessage(params)}, jobs.LocalReporter()); !errors.Is(err, errNoAnswer) {
+		t.Fatalf("lost answer: %v", err)
+	}
+	g.mu.Lock()
+	g.status, g.date = 0, fakeNow.Add(2*contrib.FilingSettle)
+	g.mu.Unlock()
+	p, _ := ParseParams(json.RawMessage(params))
+	p.Changes = p.Changes[1:]
+	smaller, _ := json.Marshal(p)
+	out, err := h.Run(ctx, jobs.Job{ID: 41, LibraryID: &lib, Path: &path, Params: smaller}, jobs.LocalReporter())
+	if err != nil || g.count() != 1 || out.(Result).Changes != 2 || len(kv.markers()) != 0 {
+		t.Fatalf("smaller retry: %+v %v, issues %d, markers %v", out, err, g.count(), kv.markers())
 	}
 }

@@ -573,12 +573,12 @@ func TestContributeIssueHappyPath(t *testing.T) {
 		t.Errorf("expected both characters+recaps labelled issues (chars=%v recaps=%v)", gotChars, gotRecaps)
 	}
 
-	// Both rows recorded submitted against the community repo, no note.
+	// Both rows record the issue and its manual intake route.
 	rows := rowsByKind(t, db, b.ID)
 	for _, k := range []string{store.ContribKindCharacters, store.ContribKindRecaps} {
 		r := rows[k]
-		if r.Status != store.ContribStatusSubmitted || r.URL == "" || r.Note != "" || r.Repo != testCommunityRepo {
-			t.Errorf("%s row = %+v, want submitted with url and no note", k, r)
+		if r.Status != store.ContribStatusSubmitted || r.URL == "" || r.Note != contrib.ManualIntakeNote || r.Repo != testCommunityRepo {
+			t.Errorf("%s row = %+v, want submitted with URL and manual intake note", k, r)
 		}
 	}
 }
@@ -626,7 +626,7 @@ func TestContributeIssueAppFiledSkipsTheLabelCheck(t *testing.T) {
 		t.Fatalf("contribute: %v", err)
 	}
 	for kind, row := range rowsByKind(t, db, b.ID) {
-		if strings.Contains(row.Note, "labels missing") || row.Number == 0 {
+		if row.Note != "" || row.Number == 0 {
 			t.Errorf("%s row = %+v, want filed with no labels-missing note", kind, row)
 		}
 	}
@@ -740,18 +740,42 @@ func TestContributeCarriesAuditAcceptanceNote(t *testing.T) {
 
 func TestContributeLocalModeUnresolvedSlugUsesPlaceholder(t *testing.T) {
 	db := openContribDB(t)
-	export := t.TempDir()
+	t.Chdir(t.TempDir())
 
 	// No WorkID and no meta => local mode falls back to a title-derived placeholder slug.
 	b := contribBook(t, db, store.NewBook{Title: "Some Unknown Book"}, baseChars("x"), baseRecaps("x"))
-	cfg := contribConfig(t, db, contribModeLocal, "", "", export, nil)
+	cfg := contribConfig(t, db, contribModeLocal, "", "", "", nil)
 	if _, err := NewExecutor(cfg).Execute(context.Background(), b, state.Contributing, scheduler.StageReport{}); err != nil {
 		t.Fatalf("contribute: %v", err)
 	}
 	slug := "some-unknown-book"
-	p := filepath.Join(export, slug, charactersFileName)
-	if _, err := os.Stat(p); err != nil {
-		t.Errorf("placeholder export missing %s: %v", p, err)
+	if entries, err := os.ReadDir("."); err != nil || len(entries) != 0 {
+		t.Fatalf("Bridge local mode wrote an extra export: %v, %v", entries, err)
+	}
+	for _, name := range []string{charactersFileName, recapsFileName} {
+		var side struct {
+			Work    string
+			Sources []model.Source
+		}
+		raw, err := os.ReadFile(filepath.Join(b.WorkDir, sidecarsDir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The bare community source: no ref naming the placeholder, and still the
+		// one entry meta's schemas ask for.
+		if err := json.Unmarshal(raw, &side); err != nil || side.Work != slug ||
+			len(side.Sources) != 1 || side.Sources[0].Type != sourceTypeCommunity || side.Sources[0].Ref != "" {
+			t.Fatalf("%s: work %q, sources %+v, err %v", name, side.Work, side.Sources, err)
+		}
+	}
+	// The done pass re-composes the description with these sidecars' work and
+	// sources: they must still carry one.
+	chars, err := describeBasis(b.WorkDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkComposable(chars); err != nil {
+		t.Fatalf("an unmatched local book's sidecars can't carry a description: %v", err)
 	}
 	rows := rowsByKind(t, db, b.ID)
 	if note := rows[store.ContribKindCharacters].Note; note == "" {

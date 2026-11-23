@@ -174,8 +174,8 @@ folder is `/bridge-data` in the images (`AUDIOSILO_BRIDGE_DATA`), else
 | `agent.book_budget_usd` | `AUDIOSILO_BRIDGE_AGENT_BOOK_BUDGET_USD` | `75` | the agent spend cap for one book |
 | `podcasts.allow_networks` | `AUDIOSILO_BRIDGE_PODCASTS_ALLOW_NETWORKS` (comma-separated CIDRs) | | private networks podcast feeds and artwork may come from; only for trusted feed hosts on your LAN (a list warns at start and on Status). Applies at the next start |
 | `podcasts.max_feed_mb` | `AUDIOSILO_BRIDGE_PODCASTS_MAX_FEED_MB` | `32` | the largest podcast feed fetched, once decoded (1 to 64). Applies at the next start |
-| `transcripts.retention_days` | `AUDIOSILO_BRIDGE_TRANSCRIPTS_RETENTION_DAYS` | `30` | how long a finished book's transcripts are kept (`0`: deleted when its job ends); the facts and results stay |
-| | `AUDIOSILO_BRIDGE_GITHUB_TOKEN` | | a GitHub token that can open issues on the community repos, for jobs that contribute their results (`contribute: issue`); read live, never stored, and used instead of the Accounts tab's GitHub sign-in while set |
+| `transcripts.retention_days` | `AUDIOSILO_BRIDGE_TRANSCRIPTS_RETENTION_DAYS` | `30` | how long a finished book's transcripts are kept (`0`: deleted when its job ends); the facts and results stay. While kept, a regenerate reuses a whole run's transcripts and a chapters job a read-along's, if the audio and the ASR model and language they were made with still match |
+| | `AUDIOSILO_BRIDGE_GITHUB_TOKEN` | | a GitHub token that can open issues on the community repos, for jobs that contribute their results (`contribute: issue`) or suggest corrections; read live, never stored, and used instead of the Accounts tab's GitHub sign-in while set. An issue it (or the `gh` CLI) files waits for a maintainer to route it to intake; the Accounts tab's GitHub App routes its own |
 
 The engine's other settings (`tools`, `asr`, `supervisor`, `contribution`,
 `metadata`, the agent's models and timeout) are carried over from

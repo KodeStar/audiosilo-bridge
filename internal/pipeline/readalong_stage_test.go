@@ -427,22 +427,22 @@ func TestTranscriptionContinuableChapters(t *testing.T) {
 		t.Skip("ffmpeg not installed")
 	}
 	book, _ := raFixture(t, ffmpeg)
-	if !TranscriptionContinuable(book.WorkDir) {
+	if !TranscriptionContinuable(book.WorkDir, book.AudioSource()) {
 		t.Fatal("a files book before splitting's sentinel isn't continuable")
 	}
 	if err := scheduler.WriteSentinel(book.WorkDir, string(state.Splitting), scheduler.StageResult{}); err != nil {
 		t.Fatal(err)
 	}
-	if TranscriptionContinuable(book.WorkDir) {
+	if TranscriptionContinuable(book.WorkDir, book.AudioSource()) {
 		t.Fatal("continuable with neither a raw nor a FLAC for its chapters")
 	}
 	seedFLACs(t, book.WorkDir, 2)
-	if !TranscriptionContinuable(book.WorkDir) {
+	if !TranscriptionContinuable(book.WorkDir, book.AudioSource()) {
 		t.Fatal("not continuable with every FLAC there")
 	}
 	future := time.Now().Add(time.Hour)
 	_ = os.Chtimes(filepath.Join(book.SourcePath, "01.mp3"), future, future)
-	if TranscriptionContinuable(book.WorkDir) {
+	if TranscriptionContinuable(book.WorkDir, book.AudioSource()) {
 		t.Fatal("continuable with a file touched since it was inspected")
 	}
 }
