@@ -240,11 +240,16 @@ func (h *Handler) cleanTranscriptDir(ctx context.Context, key string) error {
 	if !ok {
 		return errors.New("transcript cleanup target is outside the work root")
 	}
-	rel, err := filepath.Rel(h.o.WorkRoot, wd)
+	// Confined answers an absolute path; a relative --data gives a relative root.
+	workRoot, err := filepath.Abs(h.o.WorkRoot)
 	if err != nil {
 		return err
 	}
-	root, err := os.OpenRoot(h.o.WorkRoot)
+	rel, err := filepath.Rel(workRoot, wd)
+	if err != nil {
+		return err
+	}
+	root, err := os.OpenRoot(workRoot)
 	if err != nil {
 		return err
 	}

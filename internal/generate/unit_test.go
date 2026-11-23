@@ -1899,3 +1899,31 @@ func TestRecoverInterruptedTranscriptReplacement(t *testing.T) {
 		}
 	}
 }
+
+// A relative --data makes a relative work root: the cleanup still removes the
+// folder recorded inside it.
+func TestTranscriptCleanupWithARelativeWorkRoot(t *testing.T) {
+	ctx := t.Context()
+	t.Chdir(t.TempDir())
+	db, err := store.Open(ctx, "bridge.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	h := New(Options{DB: db, WorkRoot: "work"})
+	dir := filepath.Join("work", "batch-staged")
+	mustWrite(t, filepath.Join(dir, "raw"), "staged")
+	key := store.TranscriptCleanupPrefix + "batch-staged"
+	if err := db.SetSetting(ctx, key, dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.RecoverTranscriptDirs(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("staged folder: %v", err)
+	}
+	if _, found, err := db.GetSetting(ctx, key); err != nil || found {
+		t.Fatalf("cleanup key kept: %v %v", found, err)
+	}
+}
