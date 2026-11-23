@@ -1204,6 +1204,44 @@ func TestGenerateFollowsAMovedBook(t *testing.T) {
 	}
 }
 
+// A lookup of the moved book that may answer if asked again (here a proxy's
+// sign-in page; a server restarting is the same) leaves the move pending: the job
+// parks nothing, and follows the book once the server answers.
+func TestGenerateMoveLookupThatMayAnswerParksNothing(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	gate := hr.exec.gate("auditing")
+	hr.srv.add(97, "Author/Book", `{}`)
+	stop := hr.runner(hr.h)
+	defer stop()
+	hr.waitFor("auditing", func() bool {
+		return hr.srv.saw(97, func(_ link.Update, p map[string]any) bool { return p["stage"] == "auditing" })
+	})
+	if err := os.Rename(filepath.Join(hr.root, "Author", "Book"), filepath.Join(hr.root, "Author", "Book (2026)")); err != nil {
+		t.Fatal(err)
+	}
+	hr.srv.set(func() {
+		hr.srv.books["Author/Book (2026)"] = link.Book{LibraryID: 1, Path: "Author/Book (2026)", Files: []link.BookFile{
+			{Path: "Author/Book (2026)/01.mp3", Size: 9}, {Path: "Author/Book (2026)/02.mp3", Size: 10}}}
+		delete(hr.srv.books, "Author/Book")
+		hr.srv.pages = 3
+		hr.srv.paths = map[int64]string{97: "Author/Book (2026)"}
+	})
+	newPath, err := filepath.EvalSymlinks(filepath.Join(hr.root, "Author", "Book (2026)"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hr.waitFor("the engine book to follow the move", func() bool { return hr.engineBook(97).AudioSource() == newPath })
+	if hr.srv.saw(97, func(_ link.Update, p map[string]any) bool {
+		park, _ := p["park"].(map[string]any)
+		return park["code"] == parkBookNotWritable
+	}) {
+		t.Fatal("the job parked on a lookup that may answer")
+	}
+	close(gate)
+	waitDone(hr, 97)
+}
+
 // The job's spend is on the budgets' basis: a run that reports no cost but a
 // complete estimate (codex priced from the table) counts its estimate, as the
 // per-book and monthly caps do; before, the job reported $0.

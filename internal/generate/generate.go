@@ -1897,8 +1897,17 @@ func (h *Handler) follow(ctx context.Context, eng Engine, r *run) (any, error) {
 // local files first.
 func (h *Handler) step(ctx context.Context, eng Engine, r *run, b store.Book) (any, bool, error) {
 	if err := h.adoptMove(ctx, r, true); err != nil {
-		h.park(r, parkBookNotWritable, "the Bridge can't follow the book to its new path: "+err.Error())
-		return nil, false, ctx.Err()
+		switch {
+		case ctx.Err() != nil:
+			return nil, false, ctx.Err()
+		case errors.Is(err, errMoveUnconfirmed):
+			// The server's answer may change (it is restarting, say): the move stays
+			// pending for the next look, and this one reports the book as it is.
+			h.o.Log.Warn("generate: asking the server for the moved book failed; trying again", "job", r.job.ID, "err", err)
+		default:
+			h.park(r, parkBookNotWritable, "the Bridge can't follow the book to its new path: "+err.Error())
+			return nil, false, nil
+		}
 	}
 	if r.kind == Kind && h.keepShareLocal(ctx, eng, r, &b) {
 		// The share's park lifted: the look goes on with the book as it is now,
@@ -2209,8 +2218,13 @@ func (r *run) relocate() error {
 	return nil
 }
 
+// errMoveUnconfirmed is adoptMove's lookup of the moved book with an answer that
+// may change if asked again (mapping.BookReadSettled): the move stays pending.
+var errMoveUnconfirmed = errors.New("the server couldn't confirm the moved book yet")
+
 // adoptMove takes the path in a report answer only after the server and the
-// checked mount agree on the new book. A failed lookup leaves it pending.
+// checked mount agree on the new book. A failed lookup leaves it pending
+// (errMoveUnconfirmed when asking again may answer).
 func (h *Handler) adoptMove(ctx context.Context, r *run, record bool) error {
 	cur := r.rep.Path()
 	if cur == "" || cur == r.jobPath {
@@ -2221,6 +2235,9 @@ func (h *Handler) adoptMove(ctx context.Context, r *run, record bool) error {
 	}
 	book, err := r.srv.Book(ctx, r.lib.ID, cur)
 	if err != nil {
+		if !mapping.BookReadSettled(err) {
+			return fmt.Errorf("%w: %w", errMoveUnconfirmed, err)
+		}
 		return err
 	}
 	rel := cmp.Or(book.Path, cur)
