@@ -1483,10 +1483,11 @@ internal/
             its confirmed issue is the result only while GitHub has it open (a
             closed one files afresh), its interrupted filing's marker is looked
             up as the request's own (an issue of the subset's own changes found
-            that way is the subset's result alone, the batch's marker kept). A 401 (contrib.Unauthorized), on
-            the lookup (even past a same-record batch on a page read before) or
-            the filing, is errRefused; a rate limit on either errRateLimited (a
-            lookup's keeps the marker); a lost or 5xx answer errNoAnswer
+            that way is the subset's result alone, the batch's marker kept). A
+            401 (contrib.Unauthorized), on the lookup (even past a same-record
+            batch on a page read before) or the filing, is errRefused; a rate
+            limit on either errRateLimited (a lookup's keeps the marker); a lost
+            or 5xx answer errNoAnswer
             (worded: the Bridge checks before filing again). Result {issue_url,
             issue_number, changes, auto, maintainer}: auto and maintainer as
             known at filing; the Bridge doesn't follow the issue (a batch meta
@@ -4342,7 +4343,9 @@ internal/
             book's source path, else LatestGenerateBookAt for library+path, else the
             generate run the book's own bridge.json names, for a book that moved
             after its job ended (that file moved with it, the Bridge's records did
-            not; the job's mapping then follows the book); never a run whose source
+            not; the job's mapping and the run's source path then follow the
+            book, unless a job still follows the run and records it itself);
+            never a run whose source
             lies outside this library's folder: library ids and paths repeat across
             servers): none is
             errDescribeNoNotes ("The Bridge has no notes for this book ..."), a

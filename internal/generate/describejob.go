@@ -241,7 +241,11 @@ func (h *Handler) namedRun(ctx context.Context, r *run) (store.Book, error) {
 		return store.Book{}, store.ErrNotFound
 	}
 	// The run's source moves with its mapping, so a later regenerate finds it
-	// (and its kept transcript) at the book's place.
+	// (and its kept transcript) at the book's place. A job still following the
+	// run records the move itself (adoptMove); notesBook then refuses.
+	if open, err := h.o.DB.OpenGenerateJobsForBook(ctx, b.ID, r.job.ID); err != nil || len(open) > 0 {
+		return b, err
+	}
 	source, ebook, err := movedSources(r.mount, r.place, b)
 	if err == nil {
 		err = h.o.DB.MoveGenerateBook(ctx, jobID, b.ID, r.rel, source, ebook)

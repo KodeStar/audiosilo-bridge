@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/pipeline"
 	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
@@ -514,6 +515,37 @@ func TestDescribeJobFindsARunThatMovedAfterItsJob(t *testing.T) {
 	}
 	if b := hr.engineBook(93); b.SourcePath != moved {
 		t.Fatalf("the run's source = %q, want %q", b.SourcePath, moved)
+	}
+}
+
+// A named run a job still follows is left where it is: that job's own move
+// records it.
+func TestNamedRunLeavesAFollowedRunToItsJob(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	ctx := context.Background()
+	hr.generated(95)
+	before := hr.engineBook(95)
+	if err := os.Rename(filepath.Join(hr.root, "Author", "Book"), filepath.Join(hr.root, "Author", "Book (2026)")); err != nil {
+		t.Fatal(err)
+	}
+	lib, path := int64(1), "Author/Book"
+	if err := hr.db.RecordClaim(ctx, store.ServerJob{ID: 95, Kind: Kind, LibraryID: &lib, Path: &path, Params: json.RawMessage(`{}`), Attempt: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := hr.db.ReopenGenerateBook(ctx, 95); err != nil {
+		t.Fatal(err)
+	}
+	p, err := locate(hr.root, "Author/Book (2026)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &run{job: jobs.Job{ID: 96}, lib: link.Library{ID: 1}, mount: hr.root, place: p, rel: "Author/Book (2026)"}
+	if b, err := hr.h.namedRun(ctx, r); err != nil || b.ID != before.ID {
+		t.Fatalf("namedRun = %+v, %v", b, err)
+	}
+	if b := hr.engineBook(95); b.SourcePath != before.SourcePath {
+		t.Fatalf("the followed run's source = %q, want %q", b.SourcePath, before.SourcePath)
 	}
 }
 
