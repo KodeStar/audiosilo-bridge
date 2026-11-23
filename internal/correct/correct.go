@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"slices"
 	"strconv"
 	"strings"
@@ -358,6 +359,44 @@ func (h *Handler) smallerRetry(ctx context.Context, job jobs.Job, p Params) (pri
 	return priorRequest{}, nil
 }
 
+// credential resolves the GitHub credential, a failure worded for the console.
+func (h *Handler) credential(ctx context.Context) (token, from string, err error) {
+	token, from, err = h.o.Tokens.Resolve(ctx)
+	switch {
+	case errors.Is(err, contrib.ErrSignInUnrefreshed):
+		return "", "", errUnrefreshed
+	case errors.Is(err, contrib.ErrNoCredential):
+		return "", "", errNoCredential
+	case err != nil:
+		return "", "", fmt.Errorf("resolve the GitHub credential: %w", err)
+	}
+	return token, from, nil
+}
+
+// issueOpen reports whether issue number on the core repo is still open: an
+// earlier batch's confirmed issue answers a smaller retry only while it is. One
+// GitHub no longer has (deleted, or moved away) is not.
+func (h *Handler) issueOpen(ctx context.Context, number int) (bool, error) {
+	token, from, err := h.credential(ctx)
+	if err != nil {
+		return false, err
+	}
+	is, err := contrib.NewClientFor(h.o.BaseURL, token, from, h.o.Tokens).GetIssue(ctx, h.o.CoreRepo, number)
+	var apiErr *contrib.APIError
+	var rateErr *contrib.RateLimitError
+	switch {
+	case err == nil:
+		return is.State != "closed", nil
+	case contrib.Unauthorized(err):
+		return false, errRefused
+	case errors.As(err, &rateErr):
+		return false, errRateLimited
+	case errors.As(err, &apiErr) && (apiErr.Status == http.StatusNotFound || apiErr.Status == http.StatusGone):
+		return false, nil
+	}
+	return false, fmt.Errorf("could not read the earlier batch's issue #%d: %w", number, err)
+}
+
 func containsChanges(all, remaining []contrib.Correction) bool {
 	for _, c := range remaining {
 		if !slices.ContainsFunc(all, func(old contrib.Correction) bool {
@@ -407,8 +446,18 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 			return nil, err
 		}
 		if prior.result.IssueNumber > 0 {
-			h.saveResult(ctx, job, prior.result)
-			return prior.result, nil
+			open, err := h.issueOpen(ctx, prior.result.IssueNumber)
+			if err != nil {
+				return nil, err
+			}
+			if open {
+				h.saveResult(ctx, job, prior.result)
+				return prior.result, nil
+			}
+			// Closed: a maintainer has dealt with that batch, so the changes
+			// suggested again are a new request, filed afresh.
+			h.o.Log.Info("correct: the earlier batch's issue is closed: filing these corrections again", "job", job.ID,
+				"issue", prior.result.IssueNumber)
 		}
 		if prior.key != "" {
 			lookupKey, marker, interrupted = prior.key, prior.marker, true
@@ -424,15 +473,9 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		return nil, errMetaOff
 	}
 	// The credential first: without one there is nothing to fetch the record for.
-	token, from, err := h.o.Tokens.Resolve(ctx)
-	if errors.Is(err, contrib.ErrSignInUnrefreshed) {
-		return nil, errUnrefreshed
-	}
-	if errors.Is(err, contrib.ErrNoCredential) {
-		return nil, errNoCredential
-	}
+	token, from, err := h.credential(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("resolve the GitHub credential: %w", err)
+		return nil, err
 	}
 	cov, err := h.o.Meta.FreshCoverageForWork(ctx, p.WorkID)
 	switch {

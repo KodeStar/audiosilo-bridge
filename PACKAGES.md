@@ -1475,7 +1475,14 @@ internal/
             it); and for an unreadable or incomplete list stops only while the
             marker is under a day old by GitHub's clock (contrib.FilingStale,
             Client.StaleFiling), past which it files again (meta's intake
-            catches a batch it has applied). A 401 (contrib.Unauthorized), on
+            catches a batch it has applied). A strict subset of an earlier
+            batch for the same book and record (the same corrected values; the
+            book's last batch kept under meta.correct.book/<server id>/<library
+            id>/<path> beyond the jobs list's pruning, the older claims read as
+            store.ServerJob rows through KV.EarlierBookJobs) is a retry of it:
+            its confirmed issue is the result only while GitHub has it open (a
+            closed one files afresh), its interrupted filing's marker is looked
+            up as the request's own. A 401 (contrib.Unauthorized), on
             the lookup (even past a same-record batch on a page read before) or
             the filing, is errRefused; a rate limit on either errRateLimited (a
             lookup's keeps the marker); a lost or 5xx answer errNoAnswer

@@ -108,6 +108,8 @@ type gh struct {
 	// date is GitHub's clock (every answer's Date; fakeNow when zero), so a
 	// marker's age doesn't depend on the day the tests run.
 	date time.Time
+	// closed are the issue numbers a maintainer closed (GET of one issue).
+	closed map[int]bool
 }
 
 // fakeNow is the fake GitHub's clock: shortly after the issues it made.
@@ -125,6 +127,18 @@ func (g *gh) server(t *testing.T) *httptest.Server {
 		w.Header().Set("Date", date.Format(http.TimeFormat))
 		if limited {
 			w.Header().Set("X-RateLimit-Remaining", "0")
+		}
+		if n, ok := strings.CutPrefix(r.URL.Path, "/repos/KodeStar/audiosilo-meta/issues/"); ok && r.Method == http.MethodGet {
+			number, _ := strconv.Atoi(n)
+			g.mu.Lock()
+			made, closed := number >= 42 && number < 42+len(g.issues), g.closed[number]
+			g.mu.Unlock()
+			if !made {
+				http.NotFound(w, r)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"number": number, "state": map[bool]string{false: "open", true: "closed"}[closed]})
+			return
 		}
 		if r.URL.Path != "/repos/KodeStar/audiosilo-meta/issues" {
 			http.NotFound(w, r)
@@ -904,6 +918,33 @@ func TestCorrectRetryAfterPartOfBatchApplied(t *testing.T) {
 				t.Fatalf("different correction: %v, %d issues", err, gh.count())
 			}
 		})
+	}
+}
+
+// A smaller retry reports an earlier batch's confirmed issue only while that
+// issue is open: once a maintainer has closed it, the changes suggested again
+// are filed afresh.
+func TestCorrectSmallerRetryFilesAgainOnceTheIssueIsClosed(t *testing.T) {
+	ctx := context.Background()
+	g, kv := &gh{}, &memKV{m: map[string]string{}}
+	h := newHandler(t, g, &tokens{token: "t", from: contrib.FromDevice}, kv, fakeMeta{cov: cov()})
+	lib, path := int64(3), "Book"
+	if out, err := h.Run(ctx, jobs.Job{ID: 50, LibraryID: &lib, Path: &path, Params: json.RawMessage(params)}, jobs.LocalReporter()); err != nil || out.(Result).IssueNumber != 42 {
+		t.Fatalf("the batch: %+v %v", out, err)
+	}
+	p, _ := ParseParams(json.RawMessage(params))
+	p.Changes = p.Changes[1:]
+	smaller, _ := json.Marshal(p)
+	if out, err := h.Run(ctx, jobs.Job{ID: 51, LibraryID: &lib, Path: &path, Params: smaller}, jobs.LocalReporter()); err != nil ||
+		out.(Result).IssueNumber != 42 || g.count() != 1 {
+		t.Fatalf("a smaller retry while the issue is open: %+v %v, issues %d", out, err, g.count())
+	}
+	g.mu.Lock()
+	g.closed = map[int]bool{42: true}
+	g.mu.Unlock()
+	out, err := h.Run(ctx, jobs.Job{ID: 52, LibraryID: &lib, Path: &path, Params: smaller}, jobs.LocalReporter())
+	if err != nil || g.count() != 2 || out.(Result).IssueNumber != 43 || out.(Result).Changes != 2 {
+		t.Fatalf("a smaller retry once the issue is closed: %+v %v, issues %d", out, err, g.count())
 	}
 }
 
