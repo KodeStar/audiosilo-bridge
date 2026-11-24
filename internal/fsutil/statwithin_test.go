@@ -168,7 +168,15 @@ func TestReadDirWithinAnswersEachCallerItsOwnSlice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for kind, out := range map[string]*looksOut[[]fs.DirEntry]{"ReadDirWithin": readDirs, "ReadDirNWithin": readDirNs} {
+	for _, tc := range []struct {
+		kind string
+		out  *looksOut[[]fs.DirEntry]
+		read func(string) ([]fs.DirEntry, error)
+	}{
+		{"ReadDirWithin", readDirs, func(p string) ([]fs.DirEntry, error) { return ReadDirWithin(p, 5*time.Second) }},
+		{"ReadDirNWithin", readDirNs, func(p string) ([]fs.DirEntry, error) { return ReadDirNWithin(p, 5, 5*time.Second) }},
+	} {
+		kind, out := tc.kind, tc.out
 		path := "/shared/" + kind
 		// One read out, answered: every caller that joins it gets its answer.
 		c := &lookCall[[]fs.DirEntry]{done: make(chan struct{}), started: time.Now(), val: read}
@@ -177,14 +185,7 @@ func TestReadDirWithinAnswersEachCallerItsOwnSlice(t *testing.T) {
 		out.calls[path] = c
 		out.mu.Unlock()
 		ask := func() []fs.DirEntry {
-			if kind == "ReadDirWithin" {
-				got, err := ReadDirWithin(path, 5*time.Second)
-				if err != nil {
-					t.Fatal(err)
-				}
-				return got
-			}
-			got, err := ReadDirNWithin(path, 5, 5*time.Second)
+			got, err := tc.read(path)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -223,6 +223,12 @@ func New(o Options) *Handler {
 	if o.Pairing == nil {
 		o.Pairing = func() jobs.Pairing { return jobs.Pairing{} }
 	}
+	if o.strayWait <= 0 {
+		o.strayWait = strayWorkWait
+	}
+	if o.strayWalkMax <= 0 {
+		o.strayWalkMax = strayWalkTime
+	}
 	return &Handler{o: o, active: map[key]bool{}, sweeping: map[int]bool{}}
 }
 

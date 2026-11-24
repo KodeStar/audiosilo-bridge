@@ -12,7 +12,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -227,16 +226,12 @@ const strayWalkEvery = 24 * time.Hour
 // it). A library that stops answering while one of its strays is looked at or
 // removed is left for the next walk (sweepStray). bridge#71.
 func (h *Handler) sweepStrays(now time.Time, held map[key]bool) {
-	budget := h.o.strayWalkMax
-	if budget <= 0 {
-		budget = strayWalkTime
-	}
 	for _, ls := range h.o.Libraries.Statuses() {
 		mount, ok := h.writableMount(ls.LibraryID)
 		if !ok {
 			continue
 		}
-		for _, s := range strayCandidates(mount, budget) {
+		for _, s := range strayCandidates(mount, h.o.strayWalkMax) {
 			if !h.sweepStray(mount, ls.LibraryID, s, now, held) {
 				break
 			}
@@ -286,12 +281,8 @@ func strayCandidates(mount string, budget time.Duration) []stray {
 			authors = append(authors, e.Name())
 		}
 	}
-	start := 0
-	if len(authors) > 0 {
-		start = rand.IntN(len(authors)) //nolint:gosec // G404: where a walk starts, no secret
-	}
-	for i := range authors {
-		name := authors[(start+i)%len(authors)]
+	rand.Shuffle(len(authors), func(i, j int) { authors[i], authors[j] = authors[j], authors[i] }) //nolint:gosec // G404: the walk's order, no secret
+	for _, name := range authors {
 		left := time.Until(until)
 		if left <= 0 {
 			return out
@@ -344,9 +335,14 @@ func (h *Handler) sweepStray(mount string, lib int64, s stray, now time.Time, he
 		h.endProject(s.id)
 		return true
 	}
-	var release sync.Once
-	end := func() { release.Do(func() { h.endProject(s.id) }) }
-	var stopped atomic.Bool
+	// released is set once, by whichever ends first: the look and removal, or
+	// the wait (which gives the removal up: clearStray stops once it is set).
+	var released atomic.Bool
+	release := func() {
+		if released.CompareAndSwap(false, true) {
+			h.endProject(s.id)
+		}
+	}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -355,21 +351,16 @@ func (h *Handler) sweepStray(mount string, lib int64, s stray, now time.Time, he
 				h.o.strayEnded(s.rel)
 			}
 		}()
-		defer end()
-		h.clearStray(mount, lib, s.rel, now, &stopped)
+		defer release()
+		h.clearStray(mount, lib, s.rel, now, &released)
 	}()
-	wait := h.o.strayWait
-	if wait <= 0 {
-		wait = strayWorkWait
-	}
-	t := time.NewTimer(wait)
+	t := time.NewTimer(h.o.strayWait)
 	defer t.Stop()
 	select {
 	case <-done:
 		return true
 	case <-t.C:
-		stopped.Store(true)
-		end()
+		release()
 		h.o.Log.Warn("librivox: a library stopped answering at a stray staging folder; its others wait for the next walk",
 			"library", lib, "path", s.rel)
 		return false

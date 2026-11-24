@@ -800,7 +800,7 @@ func TestStrayWalkStopsAtItsBudget(t *testing.T) {
 	if !x.exists("An Author/" + stagingName(71)) {
 		t.Fatal("an author folder was read past the walk's budget")
 	}
-	x.h.o.strayWalkMax = 0 // the default
+	x.h.o.strayWalkMax = strayWalkTime
 	x.h.Sweep(now.Add(strayWalkEvery), nil)
 	if x.exists("An Author/" + stagingName(71)) {
 		t.Fatal("the next walk within its budget left the author folder's stray")
