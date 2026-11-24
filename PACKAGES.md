@@ -2614,6 +2614,16 @@ internal/
             ProgressEvery, a keepalive otherwise), so a handler never waits on the
             network. Cancel is the page's own cancel. LocalReporter is a
             send-nothing Reporter for handler tests.
+            PROGRESS CODES (server#224): a handler names a fixed sentence by its
+            code (Progress.Code, a Say* constant in phrases.go, with Params for its
+            {{placeholders}}), sent as message_code + message_params beside the
+            English message (Text: Message, else the phrase filled in; the
+            reporter records it filled). The server console words the code in the
+            admin's language (bridge.progress.<code>) and shows message for a code
+            it doesn't know, and an older console shows message as before. Codes
+            are wire: never rename or reuse one; a new sentence gets a new code and
+            the console a locale key. Free text (an engine stage's label, a park
+            reason built from an error) goes uncoded in Message.
             Phase 1a: PARK/UNPARK. Reporter.Park(code, msg) reports the job
             needs_attention with msg as its error while it KEEPS RUNNING here (the
             server drops a parked job's lease, as needs_attention has none, and renews

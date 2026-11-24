@@ -137,7 +137,7 @@ func (d *DescribeJob) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter)
 	}
 	out := DescribeJobResult{LibraryID: r.lib.ID, Path: r.rel, Description: true, Files: files, CostUSD: Cents(spent),
 		CheckedAgainst: got.res.CheckedAgainst}
-	r.rep.Progress(jobs.Progress{Step: string(state.Done), Message: "Finished", Done: 1, Total: 1,
+	r.rep.Progress(jobs.Progress{Step: string(state.Done), Code: jobs.SayFinished, Done: 1, Total: 1,
 		Extra: map[string]any{"stage": string(state.Done), "source": r.source, "cost_usd": out.CostUSD}})
 	return out, nil
 }
@@ -324,7 +324,7 @@ func (h *Handler) describeParked(ctx context.Context, r *run, d Describer, bookI
 	defer h.dropLoopPark(r)
 	for {
 		if !parked {
-			r.rep.Progress(jobs.Progress{Step: pipeline.DescribeStage, Message: "Writing a description", Total: 1,
+			r.rep.Progress(jobs.Progress{Step: pipeline.DescribeStage, Code: jobs.SayDescribing, Total: 1,
 				Extra: r.describeExtra(spent)})
 		} else {
 			// The park let go of the book: another job may have replaced, removed or
@@ -358,7 +358,7 @@ func (h *Handler) describeParked(ctx context.Context, r *run, d Describer, bookI
 			return described{}, spent, errDescribeChecks
 		case errors.As(err, &park):
 			parked = true
-			pr := jobs.Progress{Step: pipeline.DescribeStage, Message: "Needs attention: Writing a description", Total: 1,
+			pr := jobs.Progress{Step: pipeline.DescribeStage, Code: jobs.SayDescribingParked, Total: 1,
 				Extra: r.describeExtra(spent)}
 			if h.parkInLoop(r, park, pr, mark) {
 				continue // woken while the try ran (the wake-up may have been drained)
@@ -421,7 +421,7 @@ func (h *Handler) saveDescription(ctx context.Context, r *run, got described, sp
 	err := h.save(ctx, r, saveSpec{
 		what: "the description",
 		wait: true,
-		progress: jobs.Progress{Step: stepWriting, Message: "Saving the description with the book", Done: 1, Total: 1,
+		progress: jobs.Progress{Step: stepWriting, Code: jobs.SaySavingDescription, Done: 1, Total: 1,
 			Extra: r.describeExtra(spent)},
 		files: func(p place) ([]attachFile, error) {
 			fresh := provenance(h.o.Version, DescribeKind, r.job.ID, h.now(), r.source, got.work, inputsOf(r.mount, r.files, r.epub))
@@ -437,7 +437,7 @@ func (h *Handler) saveDescription(ctx context.Context, r *run, got described, sp
 		return nil, err
 	}
 	h.o.Log.Info("generate: wrote the book's description", "job", r.job.ID, "path", r.rel)
-	r.rep.Progress(jobs.Progress{Step: stepRescanning, Message: "Asking the server to read it", Done: 1, Total: 1,
+	r.rep.Progress(jobs.Progress{Step: stepRescanning, Code: jobs.SayRescanIt, Done: 1, Total: 1,
 		Extra: r.describeExtra(spent)})
 	h.rescan(ctx, r)
 	return attachmentNames(r.place.prefix, sidecars{description: got.raw}), nil
@@ -480,7 +480,7 @@ func (h *Handler) describeOnce(ctx context.Context, r *run, b store.Book) bool {
 		r.descErr = "the Bridge's engine can't write descriptions"
 		return false
 	}
-	r.rep.Progress(jobs.Progress{Step: pipeline.DescribeStage, Message: "Writing a description",
+	r.rep.Progress(jobs.Progress{Step: pipeline.DescribeStage, Code: jobs.SayDescribing,
 		Extra: r.bookExtra(b)})
 	got, err := h.describeHeld(ctx, d, b.ID)
 	if err != nil && r.desc != nil {

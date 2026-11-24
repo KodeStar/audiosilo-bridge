@@ -836,7 +836,7 @@ func (h *Handler) startRun(job jobs.Job, rep *jobs.Reporter, kind string) (r *ru
 		r.rel, r.jobPath = p, p
 	}
 	h.setPoke(job.ID, r.poke, rep)
-	rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Starting"})
+	rep.Progress(jobs.Progress{Step: stepWaiting, Code: jobs.SayStarting})
 	return r, func() { h.dropPoke(job.ID, r.poke) }, nil
 }
 
@@ -1110,7 +1110,7 @@ func (h *Handler) waitEngine(ctx context.Context, r *run) (Engine, error) {
 		if eng := h.o.Engine(); eng != nil {
 			return eng, nil
 		}
-		r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Waiting for the engine to start"})
+		r.rep.Progress(jobs.Progress{Step: stepWaiting, Code: jobs.SayEngineStarting})
 		if err := agent.SleepCtx(ctx, h.o.Poll); err != nil {
 			if !jobs.Resumes(ctx) {
 				// Cancelled, or taken back, before the engine started: the run never
@@ -1205,20 +1205,20 @@ func (h *Handler) compareFiles(ctx context.Context, r *run, files []link.BookFil
 		case timeout == nil:
 			return errors.New("the Bridge's copy of the book doesn't match the server's: " + problem)
 		}
-		if err := h.folderWait(ctx, r, "Waiting for the library's folder to answer"); err != nil {
+		if err := h.folderWait(ctx, r, jobs.SayLibraryFolderWait); err != nil {
 			return err
 		}
 	}
 }
 
 // folderWait waits Poll (or for a Retry) before looking again at a folder that
-// didn't answer a look in time, reporting the wait as msg unless the job is
-// parked on a reason of the Bridge's own (its message stays). The mapping is
+// didn't answer a look in time, reporting the wait as phrase say unless the job
+// is parked on a reason of the Bridge's own (its message stays). The mapping is
 // read again after each wait: a library mapped to another folder meanwhile
 // ends it (errRemapped).
-func (h *Handler) folderWait(ctx context.Context, r *run, msg string) error {
+func (h *Handler) folderWait(ctx context.Context, r *run, say string) error {
 	if !r.ownPark {
-		r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: msg})
+		r.rep.Progress(jobs.Progress{Step: stepWaiting, Code: say})
 	}
 	return h.mountWait(ctx, r, time.Now().Add(h.o.Poll))
 }
@@ -1268,7 +1268,7 @@ func (h *Handler) fetchBook(ctx context.Context, r *run) (*link.Book, error) {
 	// last one wasn't).
 	var unusable time.Time
 	for {
-		r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Asking the server for the book"})
+		r.rep.Progress(jobs.Progress{Step: stepWaiting, Code: jobs.SayBookLookup})
 		book, err := r.srv.Book(ctx, r.lib.ID, r.rel)
 		switch {
 		case err == nil:
@@ -1314,7 +1314,7 @@ func (h *Handler) waitMapped(ctx context.Context, r *run, strict bool) error {
 			r.unparkOwn()
 			return nil
 		case !checked || st.MountPath != mount:
-			r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Waiting for the library's mapping check"})
+			r.rep.Progress(jobs.Progress{Step: stepWaiting, Code: jobs.SayMappingWait})
 		case strict:
 			why := "isn't mapped on the Bridge"
 			if st.Mapped {
@@ -1347,7 +1347,7 @@ func (h *Handler) waitWritable(ctx context.Context, r *run) error {
 			return nil
 		}
 		if errors.Is(err, fsutil.ErrStatTimeout) {
-			if err := h.folderWait(ctx, r, "Waiting for the book's folder to answer"); err != nil {
+			if err := h.folderWait(ctx, r, jobs.SayBookFolderWait); err != nil {
 				return err
 			}
 			continue
@@ -1578,7 +1578,7 @@ func (h *Handler) awaitOpenJobEnd(ctx context.Context, r *run, bookID int64) (in
 		if !time.Now().Before(deadline) {
 			return id, kind, nil
 		}
-		r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Waiting for the book's earlier job to end"})
+		r.rep.Progress(jobs.Progress{Step: stepWaiting, Code: jobs.SayEarlierJobWait})
 		if err := h.pollOrEnd(ctx, ended); err != nil {
 			return 0, "", err
 		}
@@ -1756,7 +1756,7 @@ func (h *Handler) deleteEarlier(ctx context.Context, eng Engine, r *run, id int6
 		if !errors.Is(err, scheduler.ErrBusy) || i == giveWayTries {
 			return err
 		}
-		r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Waiting for the engine to let go of the book's earlier run"})
+		r.rep.Progress(jobs.Progress{Step: stepWaiting, Code: jobs.SayEngineReleaseWait})
 		if err := agent.SleepCtx(ctx, h.o.Poll); err != nil {
 			return err
 		}
@@ -2067,7 +2067,7 @@ func (h *Handler) finish(ctx context.Context, r *run, b store.Book, cost float64
 		res.ShareSkipped = r.shareSkipped
 	}
 	h.doneJobs.Add(1)
-	r.rep.Progress(jobs.Progress{Step: string(state.Done), Message: "Finished",
+	r.rep.Progress(jobs.Progress{Step: string(state.Done), Code: jobs.SayFinished,
 		Extra: map[string]any{"stage": string(state.Done), "source": r.source, "cost_usd": res.CostUSD}})
 	return res, nil
 }
@@ -2121,7 +2121,7 @@ func (h *Handler) writeSidecars(ctx context.Context, r *run, b store.Book, wait 
 		what:   "the characters and recaps",
 		wait:   wait,
 		record: true,
-		progress: jobs.Progress{Step: stepWriting, Message: "Saving the characters and recaps with the book",
+		progress: jobs.Progress{Step: stepWriting, Code: jobs.SaySavingSidecars,
 			Extra: r.bookExtra(b)},
 		files: func(p place) ([]attachFile, error) {
 			prov := provenance(h.o.Version, Kind, r.job.ID, h.now(), r.source, workID, inputsOf(r.mount, r.files, r.epub))
@@ -2151,7 +2151,7 @@ func (h *Handler) writeSidecars(ctx context.Context, r *run, b store.Book, wait 
 	}
 	r.written = sum
 	h.o.Log.Info("generate: wrote the book's attachments", "job", r.job.ID, "path", r.rel, "files", attachmentNames(r.place.prefix, s))
-	r.rep.Progress(jobs.Progress{Step: stepRescanning, Message: "Asking the server to read them",
+	r.rep.Progress(jobs.Progress{Step: stepRescanning, Code: jobs.SayRescanThem,
 		Extra: r.bookExtra(b)})
 	h.rescan(ctx, r)
 	return s, nil

@@ -338,7 +338,7 @@ func (e *importEnv) said(msg string) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for _, p := range e.progress {
-		if strings.Contains(p.Message, msg) {
+		if strings.Contains(p.Text(), msg) {
 			return true
 		}
 	}
@@ -1197,7 +1197,7 @@ func TestImportOnePerAccount(t *testing.T) {
 	progress := e.opts.onProgress
 	e.opts.onProgress = func(p jobs.Progress) {
 		progress(p)
-		if strings.Contains(p.Message, "other backup") {
+		if strings.Contains(p.Text(), "other backup") {
 			once.Do(func() { close(waiting) })
 		}
 	}
@@ -1926,7 +1926,7 @@ func TestImportGateYieldsOnlyForAHolderThatYielded(t *testing.T) {
 	progress := e.opts.onProgress
 	e.opts.onProgress = func(p jobs.Progress) {
 		progress(p)
-		if strings.Contains(p.Message, "other backup") {
+		if strings.Contains(p.Text(), "other backup") {
 			waitOnce.Do(func() { close(waiting) })
 		}
 	}

@@ -108,7 +108,7 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	if job.LibraryID == nil {
 		return nil, errors.New("bridge.verify needs a library")
 	}
-	rep.Progress(jobs.Progress{Step: "mapping", Message: "Finding the library"})
+	rep.Progress(jobs.Progress{Step: "mapping", Code: jobs.SayFindingLibrary})
 	lib, ok := h.libs.Library(*job.LibraryID)
 	if !ok {
 		return nil, fmt.Errorf("library %d isn't one the server listed", *job.LibraryID)
@@ -127,7 +127,7 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		return nil, fmt.Errorf("could not get the book's files from the server: %w", err)
 	}
 	res := Result{LibraryID: lib.ID, MountPath: mount, Path: book.Path}
-	rep.Progress(jobs.Progress{Step: "stat", Message: "Comparing the files", Total: len(book.Files)})
+	rep.Progress(jobs.Progress{Step: "stat", Code: jobs.SayComparingFiles, Total: len(book.Files)})
 	var checks []mapping.FileCheck
 	var problem string
 	_ = h.whileSlow(ctx, job.ID, func() error {
@@ -139,10 +139,10 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		return nil, ctx.Err()
 	}
 	res.Files = checks
-	rep.Progress(jobs.Progress{Step: "stat", Message: "Compared the files", Done: len(checks), Total: len(book.Files)})
+	rep.Progress(jobs.Progress{Step: "stat", Code: jobs.SayComparedFiles, Done: len(checks), Total: len(book.Files)})
 
 	if ok {
-		rep.Progress(jobs.Progress{Step: "writable", Message: "Checking the book's folder can be written"})
+		rep.Progress(jobs.Progress{Step: "writable", Code: jobs.SayCheckingWritable})
 		derr := h.whileSlow(ctx, job.ID, func() error {
 			dir, err := bookFolder(mount, book)
 			if err == nil {
@@ -166,7 +166,7 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 			return res, ctx.Err()
 		case <-time.After(time.Second):
 		}
-		rep.Progress(jobs.Progress{Step: "hold", Message: "Holding, as asked", Done: i, Total: p.HoldSeconds})
+		rep.Progress(jobs.Progress{Step: "hold", Code: jobs.SayHolding, Done: i, Total: p.HoldSeconds})
 	}
 	res.ElapsedMS = time.Since(start).Milliseconds()
 	if !ok {
@@ -187,7 +187,7 @@ func (h *Handler) fetchBook(ctx context.Context, jobID int64, rep *jobs.Reporter
 			return !limited && !mapping.BookReadSettled(err)
 		},
 		func() (err error) {
-			rep.Progress(jobs.Progress{Step: "lookup", Message: "Asking the server for the book's files"})
+			rep.Progress(jobs.Progress{Step: "lookup", Code: jobs.SayBookFilesLookup})
 			book, err = src.Book(ctx, libraryID, path)
 			return err
 		})

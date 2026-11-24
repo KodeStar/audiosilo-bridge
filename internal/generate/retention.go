@@ -136,7 +136,7 @@ func (h *Handler) fromKeptTranscript(ctx context.Context, eng Engine, r *run, ol
 		return false, nil
 	}
 	release, err := h.holdWithin(ctx, old.ID, giveWayTries, func() {
-		r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Waiting for the engine to let go of the book's earlier run"})
+		r.rep.Progress(jobs.Progress{Step: stepWaiting, Code: jobs.SayEngineReleaseWait})
 	})
 	if errors.Is(err, errBookBusy) {
 		return false, errEarlierRunBusy

@@ -418,13 +418,9 @@ func (s *service) yieldSlot(rep *jobs.Reporter, lib link.Library, undecided erro
 // so downloads still go one at a time. ctx is the job's own, not a wait's
 // ceiling: the Bridge's other download may take long.
 func (s *service) reclaim(ctx context.Context, rep *jobs.Reporter) error {
-	rep.Progress(jobs.Progress{Step: "waiting", Message: "Waiting for the Bridge's other download to finish"})
+	rep.Progress(jobs.Progress{Step: "waiting", Code: jobs.SayDownloadWait})
 	return rep.Reclaim(ctx)
 }
-
-// mappingWait is the progress message of a job waiting for a mapping check
-// that stands (errMappingUnknown).
-const mappingWait = "Waiting for the library's mapping check"
 
 // errMappingUnknown is writable's answer while no check of the library's
 // mapping stands at the mount the job writes at (none yet, one the server
@@ -557,9 +553,9 @@ func (s *service) writeDecided(ctx context.Context, slot *jobs.Reporter, lib lin
 // stands, as library reports it.
 func waitingFor(undecided error) jobs.Progress {
 	if errors.Is(undecided, errFolderSlow) {
-		return jobs.Progress{Step: "waiting", Message: "Waiting for the folder"}
+		return jobs.Progress{Step: "waiting", Code: jobs.SayFolderWait}
 	}
-	return jobs.Progress{Step: "waiting", Message: mappingWait}
+	return jobs.Progress{Step: "waiting", Code: jobs.SayMappingWait}
 }
 
 // lockForWrite takes the lock at key (a show's, or a fetch's own) once rel's
@@ -668,7 +664,7 @@ func (h *Subscribe) run(parent context.Context, job jobs.Job, rep *jobs.Reporter
 			feedURL = norm
 		}
 	}
-	rep.Progress(jobs.Progress{Step: "fetching", Message: "Fetching the podcast feed"})
+	rep.Progress(jobs.Progress{Step: "fetching", Code: jobs.SayFetchingFeed})
 	resp, err := s.o.Fetcher.Fetch(ctx, netguard.Request{URL: feedURL, MaxBytes: s.o.MaxFeedBytes})
 	if err != nil {
 		return nil, err
@@ -676,7 +672,7 @@ func (h *Subscribe) run(parent context.Context, job jobs.Job, rep *jobs.Reporter
 	if resp.Status != 200 {
 		return nil, fail("not_a_feed", "The feed returned no podcast data.")
 	}
-	rep.Progress(jobs.Progress{Step: "parsing", Message: "Reading the podcast feed"})
+	rep.Progress(jobs.Progress{Step: "parsing", Code: jobs.SayReadingFeed})
 	parse := podcast.Parse
 	if !created {
 		parse = podcast.ParseExisting
@@ -751,12 +747,12 @@ func (h *Subscribe) run(parent context.Context, job jobs.Job, rep *jobs.Reporter
 	}
 	f.Private = f.Private || p.Private
 	newURL, _ := moveURL(f, feedURL, resp, parsed)
-	rep.Progress(jobs.Progress{Step: "writing", Message: "Saving the podcast show"})
+	rep.Progress(jobs.Progress{Step: "writing", Code: jobs.SaySavingShow})
 	if _, _, err := s.persist(ctx, root, lib, mount, show, f, parsed, newURL); err != nil {
 		return nil, err
 	}
 	done = true
-	rep.Progress(jobs.Progress{Step: "indexing", Message: "Indexing the podcast show"})
+	rep.Progress(jobs.Progress{Step: "indexing", Code: jobs.SayIndexingShow})
 	if err := s.rescan(ctx, lib.ID, show, false); err != nil {
 		return nil, err
 	}
@@ -810,7 +806,7 @@ func (h *Poll) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	if params.ShowID != "" && params.ShowID != f.ShowID {
 		return nil, fail("identity_changed", "The podcast show identity changed.")
 	}
-	rep.Progress(jobs.Progress{Step: "fetching", Message: "Checking the podcast feed"})
+	rep.Progress(jobs.Progress{Step: "fetching", Code: jobs.SayCheckingFeed})
 	resp, err := s.o.Fetcher.Fetch(ctx, netguard.Request{URL: feedURL, ETag: params.ETag, LastModified: params.LastModified, MaxBytes: s.o.MaxFeedBytes})
 	if err != nil {
 		return nil, err
@@ -825,21 +821,21 @@ func (h *Poll) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		if _, err := s.cache(ctx, root, lib, entries); err != nil {
 			return nil, err
 		}
-		rep.Progress(jobs.Progress{Step: "parsing", Message: "Reading the podcast feed"})
+		rep.Progress(jobs.Progress{Step: "parsing", Code: jobs.SayReadingFeed})
 		parsed, err := podcast.ParseExisting(resp.Body, resp.URL)
 		if err != nil {
 			return nil, err
 		}
 		skipped = parsed.Skipped
 		feedURL, moved = moveURL(f, feedURL, resp, parsed)
-		rep.Progress(jobs.Progress{Step: "writing", Message: "Saving changed podcast details"})
+		rep.Progress(jobs.Progress{Step: "writing", Code: jobs.SaySavingShowChanges})
 		added, changed, err = s.persist(ctx, root, lib, mount, show, f, parsed, feedURL)
 		if err != nil {
 			return nil, err
 		}
 	}
 	if !s.isIndexed(lib.ID, show) {
-		rep.Progress(jobs.Progress{Step: "indexing", Message: "Indexing the podcast show"})
+		rep.Progress(jobs.Progress{Step: "indexing", Code: jobs.SayIndexingShow})
 		if err := s.rescan(ctx, lib.ID, show, true); err != nil {
 			return nil, err
 		}

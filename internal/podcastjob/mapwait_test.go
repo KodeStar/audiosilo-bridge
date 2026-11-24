@@ -103,7 +103,7 @@ func TestFetchWaitsToPublishWithoutTheShowLockOrItsSlot(t *testing.T) {
 	if !showLockFree(s, h.mount, "Fixture Show") {
 		t.Fatal("the fetch holds its show's lock while it waits for the mapping")
 	}
-	if p := rep.Last(); p.Step != "waiting" || p.Message != mappingWait {
+	if p := rep.Last(); p.Step != "waiting" || p.Code != jobs.SayMappingWait {
 		t.Fatalf("a fetch waiting for its mapping reports %+v", p)
 	}
 	if _, err := os.Stat(filepath.Join(h.mount, *job.Path)); !errors.Is(err, os.ErrNotExist) {
@@ -220,7 +220,7 @@ func TestAFetchWaitingForItsFolderSaysSo(t *testing.T) {
 		done <- err
 	}()
 	awaitTrue(t, "the fetch waited on its folder", done, func() bool { return slowProbes.Load() >= 3 })
-	if p := rep.Last(); p.Step != "waiting" || p.Message != "Waiting for the folder" {
+	if p := rep.Last(); p.Step != "waiting" || p.Code != jobs.SayFolderWait {
 		t.Fatalf("a fetch waiting for its folder reports %+v", p)
 	}
 	slow.Store(false)

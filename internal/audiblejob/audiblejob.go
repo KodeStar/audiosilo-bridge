@@ -220,7 +220,7 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		return nil, errors.New("the Bridge isn't paired with a server")
 	}
 
-	rep.Progress(jobs.Progress{Step: "audible", Message: "Listing the Audible library"})
+	rep.Progress(jobs.Progress{Step: "audible", Code: jobs.SayListingAudibleLibrary})
 	recs, err := h.o.Accounts.Library(ctx, acct.ID)
 	if errors.Is(err, audibleacct.ErrRefused) {
 		return nil, h.refused(ctx, acct.ID) // recorded by the accounts
@@ -230,10 +230,10 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	}
 	// A pending preorder isn't in the library until it is released: the
 	// orders show it, and the accounts remember it.
-	rep.Progress(jobs.Progress{Step: "audible", Message: "Listing the Audible preorders"})
+	rep.Progress(jobs.Progress{Step: "audible", Code: jobs.SayListingPreorders})
 	recs = append(recs, h.o.Accounts.Preorders(ctx, acct.ID, recs)...)
 
-	rep.Progress(jobs.Progress{Step: "books", Message: "Reading the library's books on the server"})
+	rep.Progress(jobs.Progress{Step: "books", Code: jobs.SayReadingLibraryBooks})
 	books, err := allBooks(ctx, srv, acct.LibraryID)
 	if err != nil {
 		return nil, h.serverFailure(ctx, acct.ID, "could not read the library's books on the server", err)
@@ -243,7 +243,7 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		return nil, h.serverFailure(ctx, acct.ID, "could not read the account's rejected titles", err)
 	}
 
-	rep.Progress(jobs.Progress{Step: "matching", Message: "Matching the titles to the library", Total: len(recs)})
+	rep.Progress(jobs.Progress{Step: "matching", Code: jobs.SayMatchingTitles, Total: len(recs)})
 	res := Result{Account: acct.ID, PollID: pollID(job), Books: len(books)}
 	matcher := importjob.NewBookMatcher(books)
 	titles := make([]link.AudibleTitle, 0, len(recs))
@@ -353,14 +353,14 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		return nil, err
 	}
 
-	rep.Progress(jobs.Progress{Step: "reporting", Message: "Reporting the titles to the server", Total: len(titles)})
+	rep.Progress(jobs.Progress{Step: "reporting", Code: jobs.SayReportingTitles, Total: len(titles)})
 	for start := 0; ; start += link.MaxAudibleTitles {
 		end := min(start+link.MaxAudibleTitles, len(titles))
 		final := end == len(titles)
 		if _, err := srv.PutAudibleTitles(ctx, acct.ID, link.AudibleTitles{PollID: res.PollID, Final: final, Titles: titles[start:end]}); err != nil {
 			return nil, h.serverFailure(ctx, acct.ID, "could not report the titles to the server", err)
 		}
-		rep.Progress(jobs.Progress{Step: "reporting", Message: "Reporting the titles to the server", Done: end, Total: len(titles)})
+		rep.Progress(jobs.Progress{Step: "reporting", Code: jobs.SayReportingTitles, Done: end, Total: len(titles)})
 		if final {
 			break
 		}
