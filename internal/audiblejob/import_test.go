@@ -154,13 +154,16 @@ func (s *stubImportAccounts) Download(ctx context.Context, _ string, url, dest s
 }
 
 type stubImportServer struct {
-	mu        sync.Mutex
-	lists     int
-	books     []link.LibraryBook
-	rescanErr []error
-	rescanned []string
-	enriched  []string
-	rejected  map[string]bool
+	// id and pairing name the server the link reaches and the pairing it was
+	// made for (ServerID, PairingID: jobs.Link's check of a claimed job).
+	id, pairing string
+	mu          sync.Mutex
+	lists       int
+	books       []link.LibraryBook
+	rescanErr   []error
+	rescanned   []string
+	enriched    []string
+	rejected    map[string]bool
 	// rejectedErr answers the "Not this book" read.
 	rejectedErr error
 	enrichErr   error
@@ -169,6 +172,9 @@ type stubImportServer struct {
 	// bookOf is the book the rescan answers for a file (nil: its folder).
 	bookOf func(p string) string
 }
+
+func (s *stubImportServer) ServerID() string  { return s.id }
+func (s *stubImportServer) PairingID() string { return s.pairing }
 
 func (s *stubImportServer) RejectedAudibleTitles(context.Context, string) (map[string]bool, error) {
 	s.mu.Lock()
@@ -254,11 +260,28 @@ type importEnv struct {
 	decrypted []audible.License
 	waits     []time.Duration
 	mu        sync.Mutex
+	// pair is the Bridge's pairing now (ImportOptions.Pairing), srv1's with
+	// no pairing id unless a test sets another.
+	pairMu sync.Mutex
+	pair   jobs.Pairing
+}
+
+func (e *importEnv) pairing() jobs.Pairing {
+	e.pairMu.Lock()
+	defer e.pairMu.Unlock()
+	return e.pair
+}
+
+func (e *importEnv) setPairing(p jobs.Pairing) {
+	e.pairMu.Lock()
+	defer e.pairMu.Unlock()
+	e.pair = p
 }
 
 func newImportEnv(t *testing.T) *importEnv {
 	t.Helper()
-	e := &importEnv{root: t.TempDir(), tmp: filepath.Join(t.TempDir(), "audible", "tmp"), logs: &bytes.Buffer{}}
+	e := &importEnv{root: t.TempDir(), tmp: filepath.Join(t.TempDir(), "audible", "tmp"), logs: &bytes.Buffer{},
+		pair: jobs.Pairing{ServerID: "srv1"}}
 	e.accts = &stubImportAccounts{
 		acct:  store.AudibleAccount{ID: "acct0001", LibraryID: 1, ServerID: "srv1"},
 		title: rec("B0FAKE0002", "The Copper Grove", "Mara Quill", "Orchard Cycle", 2),
@@ -269,9 +292,10 @@ func newImportEnv(t *testing.T) *importEnv {
 		status: link.LibraryStatus{LibraryID: 1, MountPath: e.root, Mapped: true, Writable: true}}
 	e.opts = ImportOptions{
 		Accounts: e.accts, ServerID: func() string { return "srv1" }, Libraries: e.libs,
-		Server: func() ImportServer { return e.srv },
-		Mount:  func(int64, string) (string, bool) { return e.root, true },
-		TmpDir: e.tmp, Log: slog.New(slog.NewTextHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		Pairing: func() jobs.Pairing { return e.pairing() },
+		Server:  func() ImportServer { return e.srv },
+		Mount:   func(int64, string) (string, bool) { return e.root, true },
+		TmpDir:  e.tmp, Log: slog.New(slog.NewTextHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		Decrypt: func(_ context.Context, _, in, out string, lic audible.License) error {
 			e.mu.Lock()
 			e.decrypted = append(e.decrypted, lic)
@@ -478,6 +502,51 @@ func TestImportBacksATitleUp(t *testing.T) {
 		if _, ok := wire[k]; !ok {
 			t.Fatalf("result lacks %q: %v", k, wire)
 		}
+	}
+}
+
+// An import is bound to the pairing its job was claimed under: once the
+// Bridge is paired otherwise (unpaired, paired again with the same server, or
+// with another server whose library 1 shares the id), it writes nothing to the
+// library the registry lists now (denied); under its own pairing it places
+// the book (allowed).
+func TestImportWritesOnlyUnderItsPairing(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		now   jobs.Pairing
+		place bool
+	}{
+		{"the same pairing", jobs.Pairing{ID: "p1", ServerID: "srv1"}, true},
+		{"unpaired", jobs.Pairing{}, false},
+		{"paired again with the same server", jobs.Pairing{ID: "p2", ServerID: "srv1"}, false},
+		{"paired with another server", jobs.Pairing{ID: "p3", ServerID: "other"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newImportEnv(t)
+			e.srv.id, e.srv.pairing = "srv1", "p1"
+			e.setPairing(jobs.Pairing{ID: "p1", ServerID: "srv1"})
+			progress := e.opts.onProgress
+			e.opts.onProgress = func(p jobs.Progress) {
+				progress(p)
+				if p.Step == StepDecrypt {
+					e.setPairing(tc.now)
+				}
+			}
+			job := jobs.ClaimedUnder(jobs.Job{ID: 7, Kind: ImportKind, Params: e.params(nil), Attempt: 1}, "srv1", "p1")
+			_, err := NewImport(e.opts).Run(context.Background(), job, jobs.LocalReporter())
+			if tc.place {
+				if err != nil || len(e.libraryFiles()) == 0 {
+					t.Fatalf("allowed: the import under its own pairing placed nothing: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, errImportPairingGone) {
+				t.Fatalf("denied: the import went on after its pairing ended: %v", err)
+			}
+			if files := e.libraryFiles(); len(files) != 0 {
+				t.Fatalf("denied: the import wrote %v to the library after its pairing ended", files)
+			}
+		})
 	}
 }
 

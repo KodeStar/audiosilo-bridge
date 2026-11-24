@@ -2764,7 +2764,8 @@ internal/
             and take the server's link only while it reaches that server under
             the job's pairing (jobs.Link: generate, verify, podcastjob, librivox,
             audible; Job.Under is the same rule against a Pairing value, for a
-            handler that holds the Bridge's pairing rather than a link: librivox),
+            handler that holds the Bridge's pairing rather than a link: librivox
+            and the Audible import, in their mapping looks),
             so a job of a server the Bridge is no longer paired with,
             or of a pairing ended since, writes nothing under, files nothing for
             and sends nothing to the new one. ABANDONER: a handler whose jobs
@@ -3612,7 +3613,11 @@ internal/
             an unwritable mapping refuses a NEW job at once, while a resumed job,
             and any job at the place step (checked again before the copy), parks
             not_writable (progress.park.code, Reporter.Park) and waits for it to
-            come back, then runs on unparked. Then the title (preorder
+            come back, then runs on unparked. Each of those mapping looks first
+            asks whether the Bridge is still paired as when it claimed the job
+            (Job.Under(ImportOptions.Pairing())); once not, the import ends
+            (errImportPairingGone) without writing to the library listed now,
+            which may be another server's of the same id. Then the title (preorder
             not_released, no rights / not in the library no_rights, a refusal
             audible_refused; a license denied as audible.ErrThrottled, the device on
             an older profile, is audible_refused with ThrottledText: "Audible
