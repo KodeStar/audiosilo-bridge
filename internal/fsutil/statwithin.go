@@ -5,6 +5,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"slices"
 	"sync"
 	"time"
 )
@@ -99,9 +100,12 @@ func LstatWithin(path string, d time.Duration) (fs.FileInfo, error) {
 }
 
 // ReadDirWithin is os.ReadDir bounded by d, as StatWithin is os.Stat: a folder
-// read a hung mount holds past d is ErrStatTimeout (bridge#65).
+// read a hung mount holds past d is ErrStatTimeout (bridge#65). Each caller
+// gets a slice of its own: callers waiting on one read share its answer, and
+// one that sorts or trims what it got must not change another's.
 func ReadDirWithin(path string, d time.Duration) ([]fs.DirEntry, error) {
-	return readDirs.within("readdir", path, d, os.ReadDir)
+	entries, err := readDirs.within("readdir", path, d, os.ReadDir)
+	return slices.Clone(entries), err
 }
 
 // LookWithin is look(path) bounded by d, as StatWithin is os.Stat, for a look
@@ -120,9 +124,9 @@ func LookWithin[T any](op, path string, d time.Duration, look func(string) (T, e
 // looks through no more than n-1 learns there are more from n coming back.
 // A read in flight answers a later one of the same path whatever its n, so
 // each path is read with one n (the endpoint's agent service's mount check,
-// agentrun).
+// agentrun). Each caller gets a slice of its own, as from ReadDirWithin.
 func ReadDirNWithin(path string, n int, d time.Duration) ([]fs.DirEntry, error) {
-	return readDirNs.within("readdir", path, d, func(p string) ([]fs.DirEntry, error) {
+	entries, err := readDirNs.within("readdir", path, d, func(p string) ([]fs.DirEntry, error) {
 		f, err := os.Open(p) //nolint:gosec // the caller's folder, only listed
 		if err != nil {
 			return nil, err
@@ -134,6 +138,7 @@ func ReadDirNWithin(path string, n int, d time.Duration) ([]fs.DirEntry, error) 
 		}
 		return entries, err
 	})
+	return slices.Clone(entries), err
 }
 
 // change is one ChangeWithin call out: done is closed (under changesMu) once

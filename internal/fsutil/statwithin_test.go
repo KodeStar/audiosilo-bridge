@@ -154,6 +154,56 @@ func TestReadDirNWithin(t *testing.T) {
 	}
 }
 
+// Callers that wait on one folder read each get a slice of their own: one
+// that sorts or trims what it got changes nothing another got (bridge#65).
+func TestReadDirWithinAnswersEachCallerItsOwnSlice(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	for _, name := range []string{"a", "b"} {
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for kind, out := range map[string]*looksOut[[]fs.DirEntry]{"ReadDirWithin": readDirs, "ReadDirNWithin": readDirNs} {
+		path := "/shared/" + kind
+		// One read out, answered: every caller that joins it gets its answer.
+		c := &lookCall[[]fs.DirEntry]{done: make(chan struct{}), started: time.Now(), val: read}
+		close(c.done)
+		out.mu.Lock()
+		out.calls[path] = c
+		out.mu.Unlock()
+		ask := func() []fs.DirEntry {
+			if kind == "ReadDirWithin" {
+				got, err := ReadDirWithin(path, 5*time.Second)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return got
+			}
+			got, err := ReadDirNWithin(path, 5, 5*time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return got
+		}
+		first, second := ask(), ask()
+		out.mu.Lock()
+		delete(out.calls, path)
+		out.mu.Unlock()
+		if len(first) != 2 || len(second) != 2 {
+			t.Fatalf("%s: %d and %d entries, want 2 each", kind, len(first), len(second))
+		}
+		first[0], first[1] = first[1], first[0]
+		if second[0].Name() != "a" || read[0].Name() != "a" {
+			t.Fatalf("%s: one caller's reorder changed another's slice", kind)
+		}
+	}
+}
+
 // LookWithin answers as its look does, and a look a hung mount holds is
 // ErrStatTimeout naming the path: a second ask of the same op and path waits on
 // the look already out, while another op at that path starts its own.
