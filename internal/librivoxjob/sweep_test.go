@@ -710,39 +710,100 @@ func TestSweepRemovesOnlyWhatItSawInAStray(t *testing.T) {
 
 // A library that stops answering once a stray is found doesn't hold the
 // sweep: it goes on after its wait, the library's other strays left for the
-// next walk, and the project stays reserved until the removal still out ends
-// (bridge#71).
+// next walk, and the removal is given up: the project is free again at once
+// (a fetch of it runs rather than failing as already running), and nothing
+// is removed once the mount answers (bridge#71).
 func TestSweepDoesNotWaitOnAStrayItsMountHolds(t *testing.T) {
 	x := newHarness(t)
 	now := time.Now()
 	old := now.Add(-StagingMaxAge - time.Hour)
 	x.mkStray(t, stagingName(50), old)
 	x.mkStray(t, stagingName(51), old)
-	hung, answer := make(chan struct{}), make(chan struct{})
+	hung, answer, ended := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	x.h.o.strayWait = 20 * time.Millisecond
 	x.h.o.strayLooked = func(string) {
 		close(hung)
 		<-answer
 	}
+	x.h.o.strayEnded = func(string) { close(ended) }
 	x.h.Sweep(now, nil) // returns: the mount holds the removal
 	<-hung
 	k := key{lib: 3, id: 50}
-	if x.h.begin(k) {
-		t.Fatal("the project wasn't reserved while its stray's removal was out")
+	if !x.h.begin(k) {
+		t.Fatal("the project stayed reserved after the sweep gave its removal up")
 	}
 	if !x.exists(stagingName(50)) || !x.exists(stagingName(51)) {
 		t.Fatal("a stray went while the mount held, or the walk went on in a library not answering")
 	}
 	close(answer)
-	for deadline := time.Now().Add(5 * time.Second); !x.h.begin(k); {
-		if time.Now().After(deadline) {
-			t.Fatal("the reservation outlived the removal")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	<-ended
 	x.h.end(k)
-	if x.exists(stagingName(50)) {
-		t.Fatal("the removal the mount held didn't go on once it answered")
+	for _, kept := range []string{stagingName(50), stagingName(50) + "/" + coverName, stagingName(50) + "/" + markerRel} {
+		if !x.exists(kept) {
+			t.Fatalf("%s went: the removal the sweep gave up went on once the mount answered", kept)
+		}
+	}
+}
+
+// While the sweep looks at a stray staging folder and removes it, no fetch of
+// its project starts in any library (another library's mount may reach the
+// folder), and the sweep leaves a stray whose project a fetch of another
+// library holds (bridge#71).
+func TestStraySweepHoldsTheProjectInEveryLibrary(t *testing.T) {
+	x := newHarness(t)
+	x.libs.second = t.TempDir()
+	now := time.Now()
+	old := now.Add(-StagingMaxAge - time.Hour)
+	x.mkStray(t, stagingName(50), old)
+	x.mkStray(t, stagingName(51), old)
+	other := key{lib: 4, id: 51}
+	if !x.h.begin(other) { // a fetch of project 51 into library 4
+		t.Fatal("begin")
+	}
+	looked := 0
+	x.h.o.strayLooked = func(rel string) {
+		looked++
+		for _, k := range []key{{lib: 3, id: 50}, {lib: 4, id: 50}} {
+			if x.h.begin(k) {
+				t.Errorf("denied: a fetch of project 50 into library %d started while the sweep removed its stray", k.lib)
+				x.h.end(k)
+			}
+		}
+	}
+	x.h.Sweep(now, nil)
+	if looked != 1 || x.exists(stagingName(50)) {
+		t.Fatalf("allowed: the stray of a project no fetch knows stayed (%d looks)", looked)
+	}
+	if !x.exists(stagingName(51)) {
+		t.Fatal("denied: the stray of a project another library's fetch holds went")
+	}
+	x.h.end(other)
+	if !x.h.begin(key{lib: 4, id: 50}) {
+		t.Fatal("the project stayed held after the sweep")
+	}
+}
+
+// The walk for stray staging folders reads the author folders within its
+// budget only: past it, the strays in the library's own folder still go and
+// the author folders wait for the next walk (bridge#65).
+func TestStrayWalkStopsAtItsBudget(t *testing.T) {
+	x := newHarness(t)
+	now := time.Now()
+	old := now.Add(-StagingMaxAge - time.Hour)
+	x.mkStray(t, stagingName(70), old)
+	x.mkStray(t, "An Author/"+stagingName(71), old)
+	x.h.o.strayWalkMax = time.Nanosecond
+	x.h.Sweep(now, nil)
+	if x.exists(stagingName(70)) {
+		t.Fatal("the stray in the library's own folder stayed")
+	}
+	if !x.exists("An Author/" + stagingName(71)) {
+		t.Fatal("an author folder was read past the walk's budget")
+	}
+	x.h.o.strayWalkMax = 0 // the default
+	x.h.Sweep(now.Add(strayWalkEvery), nil)
+	if x.exists("An Author/" + stagingName(71)) {
+		t.Fatal("the next walk within its budget left the author folder's stray")
 	}
 }
 
@@ -830,7 +891,7 @@ func TestMappingGoneNeedsADefiniteAnswer(t *testing.T) {
 	reg := mapping.NewRegistry()
 	reg.SetLibraries([]link.Library{{ID: 1, Root: root}})
 	mount := func(int64, string) (string, bool) { return root, true }
-	h := &Handler{o: Options{Libraries: reg}}
+	h := &Handler{o: Options{Libraries: reg, Mount: mount}}
 	reg.Check(context.Background(), bookErr{&link.APIError{Status: 429}}, mount, time.Now)
 	if h.mappingGone(1) {
 		t.Fatal("denied: a check the server didn't answer counts as the mapping gone")
@@ -838,5 +899,60 @@ func TestMappingGoneNeedsADefiniteAnswer(t *testing.T) {
 	reg.Check(context.Background(), bookErr{link.ErrNoBook}, mount, time.Now)
 	if !h.mappingGone(1) {
 		t.Fatal("allowed: the server's definite answer doesn't count as the mapping gone")
+	}
+
+	// A check that failed to look at the folder (a share not mounted now)
+	// isn't gone (denied, bridge#65); with no mapping configured here any
+	// more it is (allowed).
+	missing := filepath.Join(root, "unmounted")
+	reg.SetLibraries([]link.Library{{ID: 1, Root: missing}})
+	configured := true
+	mount = func(int64, string) (string, bool) { return missing, configured }
+	h.o.Mount = mount
+	reg.Check(context.Background(), bookErr{link.ErrNoBook}, mount, time.Now)
+	if st, checked := reg.Status(1); !checked || st.Mapped {
+		t.Fatalf("the missing folder's check = %+v, %v; want a standing unmapped", st, checked)
+	}
+	if h.mappingGone(1) {
+		t.Fatal("denied: a check that couldn't look at the folder counts as the mapping gone")
+	}
+	configured = false
+	if !h.mappingGone(1) {
+		t.Fatal("allowed: a library no mapping is configured for, found unmapped, isn't gone")
+	}
+}
+
+// A fetch whose library came back mapped but not writable forgets when its
+// mapping went, keeping its age: a later unmapping counts from its own start
+// (bridge#65).
+func TestSweepForgetsUnmappedOnceMappedAgain(t *testing.T) {
+	x := newHarness(t)
+	x.stageAndStop(t)
+	x.age(t, StagingMaxAge+time.Hour)
+	mount := x.libs.mount
+	x.libs.mount = ""
+	now := time.Now()
+	x.h.Sweep(now, nil)
+	if x.loadRaw(t).Unmapped.IsZero() {
+		t.Fatal("the sweep didn't record the time the mapping went")
+	}
+	x.libs.mount, x.libs.writable = mount, false
+	x.age(t, StagingMaxAge+time.Hour)
+	info, err := os.Stat(x.h.statePath(3, testID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	x.h.Sweep(now.Add(StagingMaxAge+2*time.Hour), nil)
+	if !x.loadRaw(t).Unmapped.IsZero() {
+		t.Fatal("a library mapped again (unwritable) kept the time its mapping went")
+	}
+	if after, err := os.Stat(x.h.statePath(3, testID)); err != nil || !after.ModTime().Equal(info.ModTime()) {
+		t.Fatalf("forgetting the time aged the state anew: %v", err)
+	}
+	// Unmapped again: a new time is recorded, the state not ended at once.
+	x.libs.mount = ""
+	x.h.Sweep(now.Add(StagingMaxAge+3*time.Hour), nil)
+	if !x.hasState() || x.loadRaw(t).Unmapped.IsZero() {
+		t.Fatal("a fetch unmapped again ended at once, or no new time was recorded")
 	}
 }

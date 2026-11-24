@@ -174,7 +174,8 @@ internal/
             stats the audio through it (pipeline.SourceStatWait, 10 s), and so does a
             generate job's look at where the book is now before it (bookFileNow).
             bridge#65: ReadDirWithin(path, d) is os.ReadDir bounded the same way (one
-            read in flight per path), and audio.ResolveSourceWithin resolves a book's
+            read in flight per path; each caller gets its own copy of the entries,
+            as from ReadDirNWithin), and audio.ResolveSourceWithin resolves a book's
             audio through both, as the generate job's markersFile does.
             BR-OPENAI-2: LstatWithin(path, d) is os.Lstat bounded the same way, and
             ReadDirNWithin(path, n, d) a folder read of at most n entries (never
@@ -4019,16 +4020,24 @@ internal/
             fetch whose library's mapping is gone (not listed by the server, or
             checked unmapped; an unwritable one isn't gone) gets the time in the
             state (Unmapped, forgotten when a run finds it mapped again) and
-            ends StagingMaxAge later, its staging folder left in place; once a
+            ends StagingMaxAge later, its staging folder left in place (bridge#65:
+            "gone" needs a definite look: a check that failed to look at the
+            folder, a share not mounted now, isn't gone unless no mapping is
+            configured for the library any more; the time is forgotten once a
+            check finds the library mapped again, writable or not, the state
+            keeping its age); once a
             day (strayWalkEvery) sweepStrays looks in every checked writable
             books library's root and author folders (each folder read bounded,
-            fsutil.ReadDirWithin) for folders named exactly
+            fsutil.ReadDirWithin, the author folders' reads together by
+            strayWalkTime, 2 min, from one picked at random) for folders named exactly
             .audiosilo-librivox-<id> of a project no state in any library, run
             or held job knows (projectKnown), holding only what a fetch writes
             there (stagingContents: "NN - title.ext" sections and their .part,
             cover.jpg, .audiosilo/librivox.json, atomic-write temps; no folder
             or symlink), its newest entry older than StagingMaxAge, and removes
-            them (the mapping checked again first; never the author folder):
+            them (the project held in every library first, beginProject, so no
+            fetch of it starts anywhere between projectKnown and the removal;
+            the mapping checked again first; never the author folder):
             clearStray opens the folder once, through the mount's root, and
             looks and removes through that (a root of its own, so nothing
             outside the folder looked at can go), the mapping checked once more
@@ -4036,9 +4045,11 @@ internal/
             when empty and never recursively, so a file put there since the
             look stays, and a folder that is no longer the one looked at
             (renamed away, a symlink in its place) is left. The look
-            and the removal run aside holding the project's reservation, the
-            sweep waiting strayWorkWait for them: a library that hangs after the
-            walk listed it is left for the next walk.
+            and the removal run aside, the sweep waiting strayWorkWait for them:
+            a library that hangs after the walk listed it is left for the next
+            walk, and the removal is given up (bridge#71): it removes nothing
+            more once the mount answers, and the project is free again at once,
+            so a fetch of it runs rather than failing as already running.
             Steps manifest, download (done/total = sections), cover, place,
             rescan. Result {library_id, path (the rescan's), librivox_id, files,
             bytes, adopted} (files and bytes: the sections and the cover;

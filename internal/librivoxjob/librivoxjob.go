@@ -177,10 +177,13 @@ type Options struct {
 	Wait func(ctx context.Context, d time.Duration) error
 	// onProgress sees every progress the job reports (tests).
 	onProgress func(jobs.Progress)
-	// strayWait replaces strayWorkWait, and strayLooked runs between the
-	// sweep's look at a stray staging folder and its removal (tests).
-	strayWait   time.Duration
-	strayLooked func(rel string)
+	// strayWait replaces strayWorkWait and strayWalkMax strayWalkTime;
+	// strayLooked runs between the sweep's look at a stray staging folder and
+	// its removal, and strayEnded once that look and removal end (tests).
+	strayWait    time.Duration
+	strayWalkMax time.Duration
+	strayLooked  func(rel string)
+	strayEnded   func(rel string)
 }
 
 // Handler runs librivox.fetch on the download lane (capacity 1, shared with
@@ -190,9 +193,12 @@ type Handler struct {
 
 	// mu guards active: the fetches running here (Run), which Abandon and
 	// Sweep leave alone, and which a second claim of the same fetch can't join;
-	// and strayWalk, when Sweep last looked for staging folders no state names.
+	// sweeping: the projects the sweep of stray staging folders holds in every
+	// library (beginProject); and strayWalk, when Sweep last looked for staging
+	// folders no state names.
 	mu        sync.Mutex
 	active    map[key]bool
+	sweeping  map[int]bool
 	strayWalk time.Time
 }
 
@@ -210,7 +216,7 @@ func New(o Options) *Handler {
 	if o.ServerID == nil {
 		o.ServerID = func() string { return "" }
 	}
-	return &Handler{o: o, active: map[key]bool{}}
+	return &Handler{o: o, active: map[key]bool{}, sweeping: map[int]bool{}}
 }
 
 // Kind is librivox.fetch.
@@ -317,12 +323,13 @@ type key struct {
 }
 
 // begin marks the fetch of k as held here (a run, an Abandon or the sweep at
-// work on it), false when it already is: the sweep and Abandon leave a running
-// fetch's staging alone.
+// work on it), false when it already is, or while the sweep of stray staging
+// folders holds the project in every library (beginProject): the sweep and
+// Abandon leave a running fetch's staging alone, and a run waits (await).
 func (h *Handler) begin(k key) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.active[k] {
+	if h.active[k] || h.sweeping[k.id] {
 		return false
 	}
 	h.active[k] = true
