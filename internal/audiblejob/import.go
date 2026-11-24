@@ -555,7 +555,7 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 	}
 	audible.RemovePartial(part)
 
-	h.report(rep, jobs.Progress{Step: StepPlace, Message: "Copying the book into the library"})
+	h.report(rep, jobs.Progress{Step: StepPlace, Code: jobs.SayCopyingBook})
 	// Checked again before the copy: the mapping may have changed during the
 	// download. Not writable now, the job parks with its decrypted copy and
 	// waits for it to come back rather than throwing the download away.
@@ -565,7 +565,7 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 	placed, err := h.local.Place(ctx, transfer.PlaceRequest{Root: mount, RelPath: rel, SrcPath: decrypted, LinkSource: true,
 		BeforeInstall: rep.ConfirmLease,
 		Progress: func(copied, total int64) {
-			h.report(rep, jobs.Progress{Step: StepPlace, Message: "Copying the book into the library", Done: int(copied), Total: int(total)})
+			h.report(rep, jobs.Progress{Step: StepPlace, Code: jobs.SayCopyingBook, Done: int(copied), Total: int(total)})
 		}})
 	switch {
 	case err != nil && ctx.Err() != nil:
@@ -650,7 +650,7 @@ func readStaged(file string, library importLibrary, asin string) *stagedBook {
 }
 
 func (h *Importer) readTitle(ctx context.Context, p ImportParams, rep *jobs.Reporter) (source.Record, error) {
-	h.report(rep, jobs.Progress{Step: StepLicense, Message: "Reading the title from Audible"})
+	h.report(rep, jobs.Progress{Step: StepLicense, Code: jobs.SayReadingAudibleTitle})
 	rec, err := h.o.Accounts.Title(ctx, p.Account, p.ASIN)
 	switch {
 	case errors.Is(err, audibleacct.ErrRefused):
@@ -678,12 +678,12 @@ func (h *Importer) prepare(ctx context.Context, p ImportParams, part, decrypted,
 	if err != nil {
 		return err
 	}
-	h.report(rep, jobs.Progress{Step: StepDownload, Message: "Downloading from Audible"})
+	h.report(rep, jobs.Progress{Step: StepDownload, Code: jobs.SayDownloadingAudible})
 	if lic, err = h.download(ctx, p.Account, p.ASIN, lic, part, mount, rel, rep); err != nil {
 		return err
 	}
 
-	h.report(rep, jobs.Progress{Step: StepDecrypt, Message: "Removing the DRM (a lossless copy)"})
+	h.report(rep, jobs.Progress{Step: StepDecrypt, Code: jobs.SayRemovingDRM})
 	// A stopped ffmpeg can leave a valid-looking but incomplete MP4. Keep its
 	// output separate until it has closed successfully.
 	work := decrypted + ".partial"
@@ -798,7 +798,7 @@ func (h *Importer) finish(ctx context.Context, rep *jobs.Reporter, srv ImportSer
 	in installed, marker string) (*ImportResult, error) {
 	libraryID := library.id
 	rel, size := in.rel, in.size
-	h.report(rep, jobs.Progress{Step: StepRescan, Message: "Asking the server to index the book"})
+	h.report(rep, jobs.Progress{Step: StepRescan, Code: jobs.SayIndexingBook})
 	bookPath, err := h.rescan(ctx, srv, libraryID, rel)
 	if err != nil {
 		return nil, fmt.Errorf("the book is in the library at %s, but the server couldn't index it: %w", rel, err)
@@ -826,7 +826,7 @@ func (h *Importer) finish(ctx context.Context, rep *jobs.Reporter, srv ImportSer
 	}
 	enriched := false
 	if enrich {
-		h.report(rep, jobs.Progress{Step: StepEnrich, Message: "Adding the title's ASIN to the book"})
+		h.report(rep, jobs.Progress{Step: StepEnrich, Code: jobs.SayAddingASIN})
 		if enriched, err = h.enrichPlaced(ctx, rep, srv, account, libraryID, bookPath, asin); err != nil {
 			return nil, err
 		}
@@ -848,7 +848,7 @@ func (h *Importer) enrichPlaced(ctx context.Context, rep *jobs.Reporter, srv Imp
 	bookPath, asin string) (bool, error) {
 	var waitErr error
 	err := enrichLimit.Do(ctx, func(ctx context.Context, wait time.Duration) error {
-		h.report(rep, jobs.Progress{Step: StepEnrich, Message: "The server asked the Bridge to slow down: waiting"})
+		h.report(rep, jobs.Progress{Step: StepEnrich, Code: jobs.SayServerSlowDown})
 		waitErr = h.o.Wait(ctx, wait)
 		return waitErr
 	}, func(ctx context.Context) error {
@@ -1000,7 +1000,7 @@ func (h *Importer) gate(ctx context.Context, account string, rep *jobs.Reporter)
 		return release, nil
 	}
 	g := h.gateOf(account)
-	h.report(rep, jobs.Progress{Step: StepLicense, Message: "Waiting for this account's other backup to finish"})
+	h.report(rep, jobs.Progress{Step: StepLicense, Code: jobs.SayAccountBackupWait})
 	tick := time.NewTicker(gatePoll)
 	defer tick.Stop()
 	for {
@@ -1065,27 +1065,28 @@ func (h *Importer) mapped(ctx context.Context, id int64, rep *jobs.Reporter, ste
 		}
 		mount, _ := h.o.Mount(lib.ID, lib.Root)
 		st, checked := h.o.Libraries.Status(lib.ID)
-		why := fmt.Sprintf("Library %s must be mapped and writable on the Bridge: check its mapping on the Bridge's Status tab.", lib.Name)
 		switch {
 		case checked && st.MountPath == mount && st.Mapped && st.Writable:
 			rep.Unpark()
 			if !rep.Yielded() {
 				return lib, mount, nil
 			}
-			h.report(rep, jobs.Progress{Step: step, Message: "Waiting for the Bridge's other download to finish"})
+			h.report(rep, jobs.Progress{Step: step, Code: jobs.SayDownloadWait})
 			if err := rep.Reclaim(ctx); err != nil {
 				return link.Library{}, "", err
 			}
 			continue // the mapping may have changed while reclaiming the slot
 		case !checked || st.MountPath != mount:
-			h.report(rep, jobs.Progress{Step: step, Message: "Waiting for the library's mapping check"})
+			h.report(rep, jobs.Progress{Step: step, Code: jobs.SayMappingWait})
 			if !checked && st.Error != "" {
 				rep.Yield()
 			}
 		case strict:
+			_, why := jobs.LibraryNotWritable(lib.Name)
 			return link.Library{}, "", fail(CodeNotWritable, "%s", why)
 		default:
-			h.report(rep, jobs.Progress{Step: step, Message: "Needs attention: " + why,
+			said, why := jobs.LibraryNotWritable(lib.Name)
+			h.report(rep, jobs.Progress{Step: step, Code: jobs.SayLibraryNotWritable, Params: said,
 				Extra: map[string]any{"park": map[string]any{"code": CodeNotWritable}}})
 			rep.Park(CodeNotWritable, why)
 			rep.Yield()
@@ -1356,7 +1357,7 @@ func (h *Importer) download(ctx context.Context, account, asin string, lic audib
 			return nil
 		},
 		OnProgress: func(copied, total int64) {
-			h.report(rep, jobs.Progress{Step: StepDownload, Message: "Downloading from Audible", Done: int(copied), Total: int(max(total, 0))})
+			h.report(rep, jobs.Progress{Step: StepDownload, Code: jobs.SayDownloadingAudible, Done: int(copied), Total: int(max(total, 0))})
 		},
 	}
 	failures := 0 // attempts in a row that failed adding nothing to the partial
@@ -1383,11 +1384,11 @@ func (h *Importer) download(ctx context.Context, account, asin string, lic audib
 				return audible.License{}, fail(CodeURLExpired, "Audible's download link expired again after a new license (HTTP %d): try again later.", status)
 			}
 			relicensed = true
-			h.report(rep, jobs.Progress{Step: StepLicense, Message: "The download link expired: asking Audible for a new license"})
+			h.report(rep, jobs.Progress{Step: StepLicense, Code: jobs.SayRenewingLicense})
 			if lic, err = h.license(ctx, account, asin); err != nil {
 				return audible.License{}, err
 			}
-			h.report(rep, jobs.Progress{Step: StepDownload, Message: "Downloading from Audible"})
+			h.report(rep, jobs.Progress{Step: StepDownload, Code: jobs.SayDownloadingAudible})
 			failures = 0
 			continue
 		case status == 0 || status >= 500:

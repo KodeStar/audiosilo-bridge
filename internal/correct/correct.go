@@ -468,7 +468,7 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		h.clearFiling(ctx, lookupKey, marker)
 		return nil, errFiledBefore
 	}
-	rep.Progress(jobs.Progress{Step: "checking", Message: "Reading the book's community record", Total: 2})
+	rep.Progress(jobs.Progress{Step: "checking", Code: jobs.SayReadingCommunity, Total: 2})
 	if h.o.Meta == nil {
 		return nil, errMetaOff
 	}
@@ -493,7 +493,7 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		return nil, failure("The corrections can't be filed: " + err.Error() + ".")
 	}
 	cli := contrib.NewClientFor(h.o.BaseURL, token, from, h.o.Tokens)
-	rep.Progress(jobs.Progress{Step: "filing", Message: "Filing the corrections", Done: 1, Total: 2})
+	rep.Progress(jobs.Progress{Step: "filing", Code: jobs.SayFilingCorrections, Done: 1, Total: 2})
 	sum := contrib.IssueSum(title, body)
 	if interrupted {
 		// The request's own sum: filedSince adopts the marker's (an earlier, larger
@@ -668,7 +668,7 @@ func (h *Handler) done(ctx context.Context, job jobs.Job, fkey string, f filing,
 	if saved {
 		h.clearFiling(ctx, fkey, f)
 	}
-	rep.Progress(jobs.Progress{Step: "done", Message: "Filed", Done: 2, Total: 2})
+	rep.Progress(jobs.Progress{Step: "done", Code: jobs.SayFiled, Done: 2, Total: 2})
 	return out
 }
 

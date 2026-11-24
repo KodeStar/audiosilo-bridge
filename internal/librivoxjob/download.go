@@ -56,13 +56,13 @@ func (h *Handler) download(ctx context.Context, f *fetch, sections []metaops.Lib
 		if err := h.recheck(ctx, f, StepDownload); err != nil {
 			return err
 		}
-		h.report(f.rep, jobs.Progress{Step: StepDownload, Message: fmt.Sprintf("Downloading section %d of %d from archive.org", i+1, n),
-			Done: i, Total: n})
+		h.report(f.rep, jobs.Progress{Step: StepDownload, Code: jobs.SayDownloadingSection,
+			Params: map[string]any{"section": i + 1, "sections": n}, Done: i, Total: n})
 		if err := h.fetchSection(ctx, f, i, s.ListenURL, names[i]); err != nil {
 			return err
 		}
 	}
-	h.report(f.rep, jobs.Progress{Step: StepDownload, Message: "Downloaded from archive.org", Done: n, Total: n})
+	h.report(f.rep, jobs.Progress{Step: StepDownload, Code: jobs.SayDownloadedArchive, Done: n, Total: n})
 	return nil
 }
 
@@ -368,7 +368,7 @@ func (h *Handler) cover(ctx context.Context, f *fetch, book metaops.LibrivoxBook
 	if _, err := root.Lstat(path.Join(f.staging(), coverName)); err == nil {
 		return
 	}
-	h.report(f.rep, jobs.Progress{Step: StepCover, Message: "Downloading the cover from archive.org"})
+	h.report(f.rep, jobs.Progress{Step: StepCover, Code: jobs.SayDownloadingCover})
 	log := h.o.Log.With("librivox_id", f.p.LibrivoxID)
 	if !allowedRaw(*book.CoverartJPG) {
 		log.Info("librivox: the cover isn't on archive.org; the book goes without one")

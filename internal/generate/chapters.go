@@ -284,7 +284,7 @@ func (h *Handler) saveChapters(ctx context.Context, r *run, wait, record bool, e
 		what:     "the chapters",
 		wait:     wait,
 		record:   record,
-		progress: jobs.Progress{Step: stepWriting, Message: "Saving the chapters with the book", Extra: extra},
+		progress: jobs.Progress{Step: stepWriting, Code: jobs.SaySavingChapters, Extra: extra},
 		files: func(p place) ([]attachFile, error) {
 			raw, err := r.chaptersJSON(p.single)
 			if err != nil {
@@ -304,7 +304,7 @@ func (h *Handler) saveChapters(ctx context.Context, r *run, wait, record bool, e
 	}
 	r.chaptersSaved = r.chaptersSum
 	h.o.Log.Info("generate: wrote the book's chapters", "job", r.job.ID, "path", r.rel)
-	r.rep.Progress(jobs.Progress{Step: stepRescanning, Message: "Asking the server to read them", Extra: extra})
+	r.rep.Progress(jobs.Progress{Step: stepRescanning, Code: jobs.SayRescanThem, Extra: extra})
 	h.rescan(ctx, r)
 	return nil
 }
@@ -630,7 +630,7 @@ func (h *Handler) awaitChaptersGivingWay(ctx context.Context, r *run, b store.Bo
 			}
 			return b, openID, kind, err
 		}
-		r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Waiting for the book's chapters job to give way"})
+		r.rep.Progress(jobs.Progress{Step: stepWaiting, Code: jobs.SayChaptersJobWait})
 		if err := h.pollOrEnd(ctx, ended); err != nil {
 			return b, 0, "", err
 		}
@@ -916,6 +916,6 @@ func (h *Handler) writeDetected(ctx context.Context, r *run, b store.Book, recor
 		}
 		files = []string{r.place.prefix + chaptersName, r.place.prefix + provenanceName}
 	}
-	r.rep.Progress(jobs.Progress{Step: string(state.Done), Message: "Finished", Done: 1, Total: 1, Extra: extra})
+	r.rep.Progress(jobs.Progress{Step: string(state.Done), Code: jobs.SayFinished, Done: 1, Total: 1, Extra: extra})
 	return ChaptersJobResult{LibraryID: r.lib.ID, Path: r.rel, Chapters: len(d.Chapters), Files: files, Source: SourceAudio}, nil
 }

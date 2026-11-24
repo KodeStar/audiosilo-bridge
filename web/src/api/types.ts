@@ -258,7 +258,12 @@ export type GenerateSource = 'audio' | 'ebook';
 // chapters.detect the same but cost_usd).
 export interface Progress {
   step?: string;
+  // The English sentence, which this page shows (the code's, filled in).
   message?: string;
+  // The sentence's phrase code and its values (Progress.Code and Params,
+  // jobs/phrases.go): the server's console words them in the admin's language.
+  message_code?: string;
+  message_params?: Record<string, unknown>;
   done?: number;
   total?: number;
   // The engine's stage (state.State).

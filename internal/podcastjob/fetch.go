@@ -428,7 +428,7 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 		// where the show is, rather than stay under a folder that is gone.
 		s.adoptOwn(job, root, claimedAt, params, c.Temp)
 	}()
-	rep.Progress(jobs.Progress{Step: "resolving", Message: "Resolving the episode"})
+	rep.Progress(jobs.Progress{Step: "resolving", Code: jobs.SayResolvingEpisode})
 	// The episode's enclosure, resolved once per job (a private feed's is
 	// fetched): before the loop for a kept partial its record names the
 	// source of, else when a download needs it. A failure that may pass (the
@@ -532,7 +532,7 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 		}
 		tag = ""
 	}
-	rep.Progress(jobs.Progress{Step: "probing", Message: "Checking episode audio"})
+	rep.Progress(jobs.Progress{Step: "probing", Code: jobs.SayCheckingEpisodeAudio})
 	rd, err := podcast.OpenRegular(root, c.partialName())
 	if err != nil {
 		return nil, err
@@ -563,7 +563,7 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	}
 	chapters := podcast.ReadCHAP(rd, e.Path, received)
 	_ = rd.Close()
-	rep.Progress(jobs.Progress{Step: "writing", Message: "Saving the episode"})
+	rep.Progress(jobs.Progress{Step: "writing", Code: jobs.SaySavingEpisode})
 	// A case-only rename by hand since the follow above: the show lock is
 	// taken under the folder's spelling on disk, as every other job takes it.
 	if realPath(root, e.Path) != e.Path {
@@ -627,7 +627,7 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	}
 	committed = true
 	s.setIndexed(lib.ID, path.Dir(e.Path), false)
-	rep.Progress(jobs.Progress{Step: "indexing", Message: "Indexing the episode"})
+	rep.Progress(jobs.Progress{Step: "indexing", Code: jobs.SayIndexingEpisode})
 	if err := s.episodeRescan(ctx, lib.ID, e.Path); err != nil {
 		return nil, err
 	}
@@ -1439,7 +1439,7 @@ func (w *downloadWriter) progress() {
 	if w.total >= 0 {
 		total = w.total
 	}
-	w.rep.Progress(jobs.Progress{Step: "fetching", Message: "Fetching episode", Extra: map[string]any{"bytes_received": w.received, "bytes_total": total}})
+	w.rep.Progress(jobs.Progress{Step: "fetching", Code: jobs.SayFetchingEpisode, Extra: map[string]any{"bytes_received": w.received, "bytes_total": total}})
 	w.last = time.Now()
 }
 

@@ -45,8 +45,7 @@ func (h *Handler) enrich(ctx context.Context, srv Server, acct store.AudibleAcco
 	if len(hits) == 0 {
 		return nil
 	}
-	msg := "Adding the ASINs of the matched books"
-	rep.Progress(jobs.Progress{Step: "enriching", Message: msg, Total: len(hits)})
+	rep.Progress(jobs.Progress{Step: "enriching", Code: jobs.SayAddingASINs, Total: len(hits)})
 	// Enrichment is the last network step. Leave the light lane available
 	// for polls and verify jobs throughout the backfill, including its waits.
 	// One backfill at a time keeps the combined PUT rate within the same pace.
@@ -74,7 +73,7 @@ func (h *Handler) enrich(ctx context.Context, srv Server, acct store.AudibleAcco
 		var waitErr error
 		err := enrichLimit.Do(ctx, func(ctx context.Context, wait time.Duration) error {
 			gap = min(gap*2, enrichMaxGap)
-			rep.Progress(jobs.Progress{Step: "enriching", Message: "The server asked the Bridge to slow down: waiting", Done: i, Total: len(hits)})
+			rep.Progress(jobs.Progress{Step: "enriching", Code: jobs.SayServerSlowDown, Done: i, Total: len(hits)})
 			waitErr = h.sleep(ctx, wait)
 			return waitErr
 		}, func(ctx context.Context) error {
@@ -101,7 +100,7 @@ func (h *Handler) enrich(ctx context.Context, srv Server, acct store.AudibleAcco
 			res.EnrichFailed++
 			h.o.Log.Warn("audible: adding a book's ASIN failed", "account", acct.ID, "library", acct.LibraryID, "err", err)
 		}
-		rep.Progress(jobs.Progress{Step: "enriching", Message: msg, Done: i + 1, Total: len(hits)})
+		rep.Progress(jobs.Progress{Step: "enriching", Code: jobs.SayAddingASINs, Done: i + 1, Total: len(hits)})
 	}
 	if res.EnrichDeferred > 0 {
 		h.o.Log.Info("audible: the rest of the ASIN backfill waits for the next poll", "account", acct.ID,

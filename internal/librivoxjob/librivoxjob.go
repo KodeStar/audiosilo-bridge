@@ -385,7 +385,7 @@ func (h *Handler) await(ctx context.Context, k key, rep *jobs.Reporter) error {
 			return errors.New("the Bridge is already adding this recording to this library")
 		}
 		if poll == 0 {
-			h.report(rep, jobs.Progress{Step: StepManifest, Message: "Waiting for the Bridge's earlier run of this fetch to end"})
+			h.report(rep, jobs.Progress{Step: StepManifest, Code: jobs.SayEarlierFetchWait})
 		}
 		if err := h.o.Wait(ctx, mappingPoll); err != nil {
 			return err
@@ -489,7 +489,7 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, p Params, rep *jobs.Rep
 		f.st = nil
 	}
 
-	h.report(rep, jobs.Progress{Step: StepManifest, Message: "Reading the recording from the metadata database"})
+	h.report(rep, jobs.Progress{Step: StepManifest, Code: jobs.SayReadingRecording})
 	book, work, err := h.manifest(ctx, p, rep)
 	if err != nil {
 		return nil, err
@@ -610,7 +610,7 @@ func metaRead[T any](ctx context.Context, h *Handler, rep *jobs.Reporter, read f
 		if attempt == metaAttempts {
 			return v, &keepStaging{err: err}
 		}
-		h.report(rep, jobs.Progress{Step: StepManifest, Message: "The metadata database isn't answering: trying again"})
+		h.report(rep, jobs.Progress{Step: StepManifest, Code: jobs.SayMetadataRetrying})
 		if werr := h.o.Wait(ctx, wait); werr != nil {
 			return v, werr
 		}
@@ -857,7 +857,7 @@ func countFiles(root *os.Root, rel string) (n int, bytes int64) {
 // and waits with what it downloaded). A folder that turned up at the
 // destination meanwhile moves the book to the fallback name once, else exists.
 func (h *Handler) place(ctx context.Context, f *fetch, names []string) error {
-	h.report(f.rep, jobs.Progress{Step: StepPlace, Message: "Placing the book in the library"})
+	h.report(f.rep, jobs.Progress{Step: StepPlace, Code: jobs.SayPlacingBook})
 	if err := h.recheck(ctx, f, StepPlace); err != nil {
 		return err
 	}
@@ -980,7 +980,7 @@ const rescanAttempts = 3
 // finish asks the server to index the placed book and makes the result; the
 // state goes once it is made.
 func (h *Handler) finish(ctx context.Context, f *fetch, srv Server) (*Result, error) {
-	h.report(f.rep, jobs.Progress{Step: StepRescan, Message: "Asking the server to index the book"})
+	h.report(f.rep, jobs.Progress{Step: StepRescan, Code: jobs.SayIndexingBook})
 	var bookPath string
 	var err error
 	for attempt := 1; attempt <= rescanAttempts; attempt++ {
@@ -1056,7 +1056,6 @@ func (h *Handler) mapped(ctx context.Context, job jobs.Job, id int64, rep *jobs.
 		}
 		mount, _ := h.o.Mount(lib.ID, lib.Root)
 		st, checked := h.o.Libraries.Status(lib.ID)
-		why := fmt.Sprintf("Library %s must be mapped and writable on the Bridge: check its mapping on the Bridge's Status tab.", lib.Name)
 		switch {
 		case checked && st.MountPath == mount && st.Mapped && st.Writable:
 			rep.Unpark()
@@ -1065,13 +1064,13 @@ func (h *Handler) mapped(ctx context.Context, job jobs.Job, id int64, rep *jobs.
 			}
 			// Back, but without a slot: take one, then look at the mapping
 			// again, since the wait for the slot may have been long.
-			h.report(rep, jobs.Progress{Step: step, Message: "Waiting for the Bridge's other download to finish"})
+			h.report(rep, jobs.Progress{Step: step, Code: jobs.SayDownloadWait})
 			if err := rep.Reclaim(ctx); err != nil {
 				return link.Library{}, "", err
 			}
 			continue
 		case !checked || st.MountPath != mount:
-			h.report(rep, jobs.Progress{Step: step, Message: "Waiting for the library's mapping check"})
+			h.report(rep, jobs.Progress{Step: step, Code: jobs.SayMappingWait})
 			if !checked && st.Error != "" {
 				// A check that doesn't stand (the server didn't answer it, or
 				// it is too old) may wait out an outage: the lane is free
@@ -1079,9 +1078,11 @@ func (h *Handler) mapped(ctx context.Context, job jobs.Job, id int64, rep *jobs.
 				rep.Yield()
 			}
 		case strict:
+			_, why := jobs.LibraryNotWritable(lib.Name)
 			return link.Library{}, "", fail(CodeNotWritable, "%s", why)
 		default:
-			h.report(rep, jobs.Progress{Step: step, Message: "Needs attention: " + why,
+			said, why := jobs.LibraryNotWritable(lib.Name)
+			h.report(rep, jobs.Progress{Step: step, Code: jobs.SayLibraryNotWritable, Params: said,
 				Extra: map[string]any{"park": map[string]any{"code": CodeNotWritable}}})
 			rep.Park(CodeNotWritable, why)
 			rep.Yield()

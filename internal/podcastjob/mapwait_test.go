@@ -103,7 +103,7 @@ func TestFetchWaitsToPublishWithoutTheShowLockOrItsSlot(t *testing.T) {
 	if !showLockFree(s, h.mount, "Fixture Show") {
 		t.Fatal("the fetch holds its show's lock while it waits for the mapping")
 	}
-	if p := rep.Last(); p.Step != "waiting" || p.Message != mappingWait {
+	if p := rep.Last(); p.Step != "waiting" || p.Code != jobs.SayMappingWait {
 		t.Fatalf("a fetch waiting for its mapping reports %+v", p)
 	}
 	if _, err := os.Stat(filepath.Join(h.mount, *job.Path)); !errors.Is(err, os.ErrNotExist) {
@@ -220,7 +220,7 @@ func TestAFetchWaitingForItsFolderSaysSo(t *testing.T) {
 		done <- err
 	}()
 	awaitTrue(t, "the fetch waited on its folder", done, func() bool { return slowProbes.Load() >= 3 })
-	if p := rep.Last(); p.Step != "waiting" || p.Message != "Waiting for the folder" {
+	if p := rep.Last(); p.Step != "waiting" || p.Code != jobs.SayFolderWait {
 		t.Fatalf("a fetch waiting for its folder reports %+v", p)
 	}
 	slow.Store(false)
@@ -240,7 +240,7 @@ func TestAWaitReportsTheStepItInterruptedAgain(t *testing.T) {
 	s := h.handler.s
 	s.o.CheckPoll = 2 * time.Millisecond
 	lib, _ := s.o.Libraries.Library(*job.LibraryID)
-	saving := jobs.Progress{Step: "writing", Message: "Saving the episode"}
+	saving := jobs.Progress{Step: "writing", Code: jobs.SaySavingEpisode}
 	for _, tc := range []struct {
 		at    jobs.Progress
 		again bool
@@ -266,7 +266,7 @@ func TestAWaitReportsTheStepItInterruptedAgain(t *testing.T) {
 		if p, _ := seen.Load().(jobs.Progress); p.Step != "waiting" {
 			t.Fatalf("at %+v: the look after a slow one saw %+v; want the wait reported", tc.at, p)
 		}
-		if p := rep.Last(); (p.Step == tc.at.Step && p.Message == tc.at.Message) != tc.again {
+		if p := rep.Last(); (p.Step == tc.at.Step && p.Code == tc.at.Code && p.Text() == tc.at.Text()) != tc.again {
 			t.Fatalf("at %+v: after the wait the fetch reports %+v; reported again: want %v", tc.at, p, tc.again)
 		}
 	}

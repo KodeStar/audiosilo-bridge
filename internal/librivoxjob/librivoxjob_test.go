@@ -919,7 +919,7 @@ func TestFetchRechecksAfterReclaim(t *testing.T) {
 	progress := x.h.o.onProgress
 	x.h.o.onProgress = func(p jobs.Progress) {
 		progress(p)
-		if p.Message == "Waiting for the Bridge's other download to finish" && !flipped {
+		if p.Code == jobs.SayDownloadWait && !flipped {
 			flipped = true
 			x.libs.writable = false
 		}
@@ -940,7 +940,7 @@ func TestFetchRechecksAfterReclaim(t *testing.T) {
 	// downloaded in between.
 	next := jobs.Progress{}
 	for i, p := range x.progress {
-		if p.Message == "Waiting for the Bridge's other download to finish" && i+1 < len(x.progress) {
+		if p.Code == jobs.SayDownloadWait && i+1 < len(x.progress) {
 			next = x.progress[i+1]
 			break
 		}

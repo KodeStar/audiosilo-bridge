@@ -1933,35 +1933,56 @@ func (p *Reporter) onLink() error {
 }
 
 // Progress is a job's progress as the server shows it: a step, a sentence, and
-// a count where there is one. Extra carries a kind's own fields (sidecars.generate's
-// stage, eta_seconds, cost_usd, source, park), sent in the same object beside
-// them; the four fields above always win over an Extra key of the same name.
+// a count where there is one. Code names the sentence when it is one of the
+// Bridge's phrases (phrases.go), with Params filling its placeholders: the
+// console words it in the admin's language, and Message (the English, filled
+// from the code when left empty) is what an older console shows. Extra carries
+// a kind's own fields (sidecars.generate's stage, eta_seconds, cost_usd,
+// source, park), sent in the same object beside them; the fields above always
+// win over an Extra key of the same name.
 type Progress struct {
 	Step    string         `json:"step"`
 	Message string         `json:"message,omitempty"`
+	Code    string         `json:"message_code,omitempty"`
+	Params  map[string]any `json:"message_params,omitempty"`
 	Done    int            `json:"done,omitempty"`
 	Total   int            `json:"total,omitempty"`
 	Extra   map[string]any `json:"-"`
 }
 
-// MarshalJSON writes the progress as one flat object: Extra's keys beside step,
-// message, done and total. An object over the server's 16 KiB is sent without
-// Extra, which the server would otherwise refuse for good.
-func (p Progress) MarshalJSON() ([]byte, error) {
-	type base Progress
-	if len(p.Extra) == 0 {
-		return json.Marshal(base(p))
+// Text is the progress's English sentence: Message, else its code's phrase.
+func (p Progress) Text() string {
+	if p.Message != "" {
+		return p.Message
 	}
-	out := make(map[string]any, len(p.Extra)+4)
+	return Phrase(p.Code, p.Params)
+}
+
+// MarshalJSON writes the progress as one flat object: Extra's keys beside step,
+// message (Text), message_code, message_params, done and total. An object over
+// the server's 16 KiB is sent without Extra (and without message_params when
+// they alone take it over), which the server would otherwise refuse for good.
+func (p Progress) MarshalJSON() ([]byte, error) {
+	p.Message = p.Text()
+	if len(p.Extra) == 0 {
+		return marshalPlain(p)
+	}
+	out := make(map[string]any, len(p.Extra)+6)
 	for k, v := range p.Extra {
 		out[k] = v
 	}
-	delete(out, "message")
-	delete(out, "done")
-	delete(out, "total")
+	for _, k := range progressFields {
+		delete(out, k)
+	}
 	out["step"] = p.Step
 	if p.Message != "" {
 		out["message"] = p.Message
+	}
+	if p.Code != "" {
+		out["message_code"] = p.Code
+	}
+	if len(p.Params) > 0 {
+		out["message_params"] = p.Params
 	}
 	if p.Done != 0 {
 		out["done"] = p.Done
@@ -1971,10 +1992,26 @@ func (p Progress) MarshalJSON() ([]byte, error) {
 	}
 	b, err := json.Marshal(out)
 	if err != nil || len(b) > maxProgressBytes {
-		return json.Marshal(base(p))
+		return marshalPlain(p)
 	}
 	return b, nil
 }
+
+// marshalPlain is p without Extra, and without its Params too when they alone
+// take it past the server's cap (a param is never clipped, as message is): the
+// console then shows the coded sentence's English message.
+func marshalPlain(p Progress) ([]byte, error) {
+	type base Progress
+	b, err := json.Marshal(base(p))
+	if err == nil && len(b) > maxProgressBytes && len(p.Params) > 0 {
+		p.Params = nil
+		return json.Marshal(base(p))
+	}
+	return b, err
+}
+
+// progressFields are Progress's own keys in its flat object, never Extra's.
+var progressFields = []string{"step", "message", "message_code", "message_params", "done", "total"}
 
 // decodeProgress reads a stored progress object back (MarshalJSON's flat shape);
 // one it can't read is the zero Progress.
@@ -1985,7 +2022,7 @@ func decodeProgress(raw json.RawMessage) Progress {
 	if len(raw) == 0 || json.Unmarshal(raw, (*base)(&p)) != nil || json.Unmarshal(raw, &m) != nil {
 		return Progress{}
 	}
-	for _, k := range []string{"step", "message", "done", "total"} {
+	for _, k := range progressFields {
 		delete(m, k)
 	}
 	if len(m) > 0 {
@@ -2158,8 +2195,9 @@ func (p *Reporter) Last() Progress {
 // job is parked, a progress that names no park keeps the one before it (a job
 // resumed after a restart reports its first steps before it hears its engine's
 // park again): the server would hear a park without its code as a new one.
+// A coded progress is recorded with its English Message filled in (Text).
 func (p *Reporter) Progress(pr Progress) {
-	pr.Step, pr.Message = clip(pr.Step, maxStepText), clip(pr.Message, maxMessageText)
+	pr.Step, pr.Message = clip(pr.Step, maxStepText), clip(pr.Text(), maxMessageText)
 	p.mu.Lock()
 	// A null park names none, as the server reads it (bridge.parkOf).
 	named := pr.Extra["park"] != nil
