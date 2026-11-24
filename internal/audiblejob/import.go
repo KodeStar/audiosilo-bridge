@@ -406,7 +406,11 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 	defer release()
 	part, decrypted := h.partPaths(p.Account, p.ASIN)
 	defer func() {
-		if err != nil && ctx.Err() != nil && (jobs.Resumes(ctx) || jobs.Lost(ctx)) {
+		// A stop the next start resumes, and a lost claim the server hands out
+		// again, keep the temp files; an import whose pairing ended
+		// (errImportPairingGone) resumes under no claim, so it never does.
+		pairingGone := errors.Is(err, errImportPairingGone)
+		if err != nil && ctx.Err() != nil && (jobs.Resumes(ctx) || jobs.Lost(ctx)) && !pairingGone {
 			return
 		}
 		// A failure placing the book can be retried with the same decrypt.
@@ -414,7 +418,7 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 		// A 404 for the job is no refusal: a proxy in front of a restarting
 		// server answers one too, and a title queued again (by this account)
 		// reuses the decrypt. The start-up sweep bounds what a removed job leaves.
-		if err == nil || ctx.Err() != nil || bookRefused(err) || errors.Is(err, errImportPairingGone) {
+		if err == nil || ctx.Err() != nil || bookRefused(err) || pairingGone {
 			removeStaged(decrypted)
 		}
 		audible.RemovePartial(part)
@@ -1066,10 +1070,10 @@ func (h *Importer) tryGate(account string, rep *jobs.Reporter) (func(), bool) {
 // waits), keeping what it holds. The job runs on (unparked) once it is back.
 //
 // The import is bound to the pairing that claimed job (jobs.Job.Under): once
-// the Bridge is paired otherwise (unpaired, paired again, or with another
-// server, whose libraries share ids with this one's), it ends
+// the Bridge is paired otherwise (unpaired, paired again after that, or with
+// another server, whose libraries share ids with this one's), it ends
 // (errImportPairingGone) without writing to the library the registry lists
-// now.
+// now, and run's defer removes its temp files.
 func (h *Importer) mapped(ctx context.Context, job jobs.Job, id int64, rep *jobs.Reporter, step string, strict bool) (link.Library, string, error) {
 	for {
 		if !job.Under(h.o.Pairing()) {
