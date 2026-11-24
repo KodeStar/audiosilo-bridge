@@ -59,10 +59,9 @@ func RetryAfter(value string, now time.Time, source RetryAfterSource) (time.Dura
 	if err != nil {
 		return 0, false
 	}
-	delay := date.Sub(now)
+	delay := min(max(date.Sub(now), 0), limit)
 	if source == Feed {
-		seconds := min(max(int(delay.Seconds()), 0), int(limit/time.Second))
-		return time.Duration(seconds) * time.Second, true
+		delay = delay.Truncate(time.Second)
 	}
-	return min(max(delay, 0), limit), true
+	return delay, true
 }
