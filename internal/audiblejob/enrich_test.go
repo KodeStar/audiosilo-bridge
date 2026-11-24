@@ -311,13 +311,18 @@ func TestPollContestedKeepsTheBest(t *testing.T) {
 // folder is enriched.
 func TestPollPackOnVolumeNotEnriched(t *testing.T) {
 	t.Parallel()
+	const boxPath = "Quill/Orchard Cycle/OC01-03"
 	fs := &fakeServer{pageSize: 500, books: []link.LibraryBook{
+		{Path: boxPath, Title: "The Orchard Cycle", Authors: []string{"Mara Quill"},
+			Series: []link.SeriesRef{{Name: "Orchard Cycle", Position: "1-3"}}},
 		{Path: "Fell/Iron Vale/IV05 - Ash Road", Title: "Ash Road", Authors: []string{"Ona Fell"},
 			Series: []link.SeriesRef{{Name: "Iron Vale", Position: "5"}}},
 		{Path: "Fell/Iron Vale/IV07-08", Title: "Iron Vale", Authors: []string{"Ona Fell"},
 			Series: []link.SeriesRef{{Name: "Iron Vale", Position: "7-8"}}},
 	}}
 	accts := &stubAccounts{acct: account(), recs: []source.Record{
+		{ASIN: "B0PACK0001", Title: "The Orchard Cycle Box Set", Author: "Mara Quill", Series: "Orchard Cycle"},
+		{ASIN: "B0SOLO0001", Title: "The Orchard Cycle", Author: "Mara Quill", Series: "Orchard Cycle"},
 		{ASIN: "B0PACK0056", Title: "Iron Vale: Books 5-6", Author: "Ona Fell", Series: "Iron Vale", SeriesPosition: "5-6"},
 		{ASIN: "B0PACK0078", Title: "Iron Vale: Books 7-8", Author: "Ona Fell", Series: "Iron Vale", SeriesPosition: "7-8"},
 	}}
@@ -326,10 +331,10 @@ func TestPollPackOnVolumeNotEnriched(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Matched != 2 || res.Enriched != 1 {
+	if res.Matched != 3 || res.Enriched != 2 {
 		t.Fatalf("result = %+v, enriched %v", res, fs.enrichedNow())
 	}
-	if want := map[string]string{"Fell/Iron Vale/IV07-08": "B0PACK0078"}; fmt.Sprint(fs.enrichedNow()) != fmt.Sprint(want) {
+	if want := map[string]string{boxPath: "B0PACK0001", "Fell/Iron Vale/IV07-08": "B0PACK0078"}; fmt.Sprint(fs.enrichedNow()) != fmt.Sprint(want) {
 		t.Fatalf("enriched %v, want %v", fs.enrichedNow(), want)
 	}
 }
