@@ -38,7 +38,7 @@ import (
 
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
-	"github.com/kodestar/audiosilo-bridge/internal/netguard"
+	"github.com/kodestar/audiosilo-bridge/internal/timeutil"
 )
 
 // MaxFilesChecked bounds how many of the sample book's files are stat-ed.
@@ -562,6 +562,12 @@ func (r *Registry) Status(id int64) (link.LibraryStatus, bool) {
 	return r.view(res, r.clock())
 }
 
+// WritableAt reports whether a check (Status's, with whether it stands) lets a
+// job write at mount: standing, for that mount, mapped AND writable there.
+func WritableAt(st link.LibraryStatus, checked bool, mount string) bool {
+	return checked && st.MountPath == mount && st.Mapped && st.Writable
+}
+
 // Statuses returns the last check of every library that has one, for the
 // heartbeat: the state as recorded, not aged (view). A state too old to stand
 // lets nothing write here (Status), but the server takes an unmapped one as
@@ -827,7 +833,7 @@ type pacer struct {
 // wait waits out the spacing since the run's last read, or ctx's error.
 func (p *pacer) wait(ctx context.Context) error {
 	if !p.last.IsZero() {
-		if err := netguard.Wait(ctx, time.Until(p.last.Add(p.spacing))); err != nil {
+		if err := timeutil.SleepCtx(ctx, time.Until(p.last.Add(p.spacing))); err != nil {
 			return err
 		}
 	}

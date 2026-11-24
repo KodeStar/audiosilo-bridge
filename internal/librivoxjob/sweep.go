@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"io/fs"
-	"math/rand/v2"
 	"os"
 	"path"
 	"path/filepath"
@@ -25,7 +24,7 @@ import (
 // after the state was last used (audible.import's PartialMaxAge): a lost claim
 // the server never handed out again, a run that failed while meta or
 // archive.org was down and was never retried.
-const StagingMaxAge = 7 * 24 * time.Hour
+const StagingMaxAge = transfer.StagingMaxAge
 
 // parseStateName reads <library_id>-<librivox_id>.json.
 func parseStateName(name string) (key, bool) {
@@ -81,29 +80,26 @@ func (h *Handler) Sweep(now time.Time, open []json.RawMessage) {
 
 // sweepStates is Sweep over the state folder.
 func (h *Handler) sweepStates(now time.Time, held map[key]bool) {
-	entries, err := os.ReadDir(h.o.StateDir)
-	if err != nil {
-		return
-	}
-	for _, e := range entries {
+	_ = transfer.PrivateDir(h.o.StateDir).Sweep(nil, func(file string, e fs.DirEntry) error {
 		if !e.Type().IsRegular() {
-			continue
+			return nil
 		}
 		info, err := e.Info()
 		if err != nil || now.Sub(info.ModTime()) < StagingMaxAge {
-			continue
+			return nil
 		}
 		k, ok := parseStateName(e.Name())
 		if !ok || e.Name() != filepath.Base(h.statePath(k.lib, k.id)) {
-			if err := os.Remove(filepath.Join(h.o.StateDir, e.Name())); err != nil {
+			if err := os.Remove(file); err != nil {
 				h.o.Log.Warn("librivox: sweeping the state folder failed", "name", e.Name(), "err", err)
 			}
-			continue
+			return nil
 		}
 		if !held[k] {
 			h.sweepOne(k, now)
 		}
-	}
+		return nil
+	})
 }
 
 // sweepOne is Sweep for one old state.
@@ -254,7 +250,7 @@ func (h *Handler) sweepStrays(now time.Time, held map[key]bool) {
 		if !ok {
 			continue
 		}
-		for _, s := range strayCandidates(mount, h.o.strayWalkMax) {
+		for _, s := range transfer.StagedProjects(mount, h.o.strayWalkMax) {
 			if !h.sweepStray(mount, ls.LibraryID, s, now, held) {
 				break
 			}
@@ -262,76 +258,11 @@ func (h *Handler) sweepStrays(now time.Time, held map[key]bool) {
 	}
 }
 
-// strayLookWait bounds each folder read of the walk for stray staging folders
-// (fsutil.ReadDirWithin): a library on a mount that hangs is left for the next
-// walk rather than holding the sweep (strayWorkWait once a stray is found).
-const strayLookWait = 10 * time.Second
-
 // strayWalkTime bounds the walk of one library's author folders for stray
 // staging folders, all of its folder reads together: a library of many author
 // folders on a slow mount is walked only so far, the rest left for the next
 // walk, which takes them in another random order (bridge#65).
 const strayWalkTime = 2 * time.Minute
-
-// stray is a staging-named folder the walk found: rel in the library, the
-// project id its name carries.
-type stray struct {
-	rel string
-	id  int
-}
-
-// strayCandidates are the staging-named folders in the library's top folder
-// (mount) and in each folder directly in it. Each read is bounded by
-// strayLookWait, and the author folders' reads together by budget, in an
-// order picked at random each walk, so a walk cut short reaches others next
-// time; the first read that doesn't answer ends the walk of this library. A
-// symlink is never followed (its entry isn't a folder).
-func strayCandidates(mount string, budget time.Duration) []stray {
-	until := time.Now().Add(budget)
-	top, err := fsutil.ReadDirWithin(mount, strayLookWait)
-	if err != nil {
-		return nil
-	}
-	var out []stray
-	var authors []string
-	for _, e := range top {
-		if !e.IsDir() {
-			continue
-		}
-		if id, ok := stagingID(e.Name()); ok {
-			out = append(out, stray{rel: e.Name(), id: id})
-		} else if !strings.HasPrefix(e.Name(), ".") {
-			authors = append(authors, e.Name())
-		}
-	}
-	rand.Shuffle(len(authors), func(i, j int) { authors[i], authors[j] = authors[j], authors[i] }) //nolint:gosec // G404: the walk's order, no secret
-	for _, name := range authors {
-		left := time.Until(until)
-		if left <= 0 {
-			return out
-		}
-		inner, err := fsutil.ReadDirWithin(filepath.Join(mount, name), min(strayLookWait, left))
-		if errors.Is(err, fsutil.ErrStatTimeout) {
-			return out
-		}
-		for _, f := range inner {
-			if id, ok := stagingID(f.Name()); ok && f.IsDir() {
-				out = append(out, stray{rel: path.Join(name, f.Name()), id: id})
-			}
-		}
-	}
-	return out
-}
-
-// stagingID is the LibriVox project id a staging folder's name carries.
-func stagingID(name string) (int, bool) {
-	rest, ok := strings.CutPrefix(name, stagingPrefix)
-	if !ok {
-		return 0, false
-	}
-	id, err := strconv.Atoi(rest)
-	return id, err == nil && id > 0 && stagingName(id) == name
-}
 
 // strayWorkWait bounds the sweep's wait for the look at one stray staging
 // folder and its removal (sweepStray).
@@ -350,12 +281,12 @@ const strayWorkWait = time.Minute
 // rather than failing as already running after awaitPolls (bridge#71). Only a
 // removal already under way as the wait ended may still land; a fetch never
 // places a book missing a section (sweep looks again).
-func (h *Handler) sweepStray(mount string, lib int64, s stray, now time.Time, held map[key]bool) (answered bool) {
-	if !h.beginProject(s.id) {
+func (h *Handler) sweepStray(mount string, lib int64, s transfer.StagedProject, now time.Time, held map[key]bool) (answered bool) {
+	if !h.beginProject(s.ID) {
 		return true
 	}
-	if m, ok := h.writableMount(lib); !ok || m != mount || h.projectKnown(s.id, held) {
-		h.endProject(s.id)
+	if m, ok := h.writableMount(lib); !ok || m != mount || h.projectKnown(s.ID, held) {
+		h.endProject(s.ID)
 		return true
 	}
 	// released is set once, by whichever ends first: the look and removal, or
@@ -363,7 +294,7 @@ func (h *Handler) sweepStray(mount string, lib int64, s stray, now time.Time, he
 	var released atomic.Bool
 	release := func() {
 		if released.CompareAndSwap(false, true) {
-			h.endProject(s.id)
+			h.endProject(s.ID)
 		}
 	}
 	done := make(chan struct{})
@@ -371,11 +302,11 @@ func (h *Handler) sweepStray(mount string, lib int64, s stray, now time.Time, he
 		defer close(done)
 		defer func() {
 			if h.o.strayEnded != nil {
-				h.o.strayEnded(s.rel)
+				h.o.strayEnded(s.Path)
 			}
 		}()
 		defer release()
-		h.clearStray(mount, lib, s.rel, now, &released)
+		h.clearStray(mount, lib, s.Path, now, &released)
 	}()
 	t := time.NewTimer(h.o.strayWait)
 	defer t.Stop()
@@ -387,9 +318,9 @@ func (h *Handler) sweepStray(mount string, lib int64, s stray, now time.Time, he
 			<-done // the look and removal ended as the wait did: not a hang
 			return true
 		}
-		h.endProject(s.id)
+		h.endProject(s.ID)
 		h.o.Log.Warn("librivox: a library stopped answering at a stray staging folder; its others wait for the next walk",
-			"library", lib, "path", s.rel)
+			"library", lib, "path", s.Path)
 		return false
 	}
 }
@@ -603,7 +534,7 @@ func (h *Handler) writableMount(id int64) (string, bool) {
 	}
 	mount, _ := h.o.Mount(lib.ID, lib.Root)
 	st, checked := h.o.Libraries.Status(lib.ID)
-	if mount == "" || !checked || st.MountPath != mount || !st.Mapped || !st.Writable {
+	if mount == "" || !mapping.WritableAt(st, checked, mount) {
 		return "", false
 	}
 	return mount, true

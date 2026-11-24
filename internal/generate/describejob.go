@@ -9,13 +9,13 @@ import (
 	"slices"
 	"time"
 
-	"github.com/kodestar/audiosilo-bridge/internal/agent"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/metaops"
 	"github.com/kodestar/audiosilo-bridge/internal/pipeline"
 	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
+	"github.com/kodestar/audiosilo-bridge/internal/timeutil"
 )
 
 // DescribeKind is the description-only job (BRIDGE-PLAN.md Phase 1c): an
@@ -306,7 +306,7 @@ func (h *Handler) holdWithin(ctx context.Context, bookID int64, tries int, waiti
 		if waiting != nil {
 			waiting()
 		}
-		if err := agent.SleepCtx(ctx, h.o.Poll); err != nil {
+		if err := timeutil.SleepCtx(ctx, h.o.Poll); err != nil {
 			return nil, err
 		}
 	}

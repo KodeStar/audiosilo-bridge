@@ -13,6 +13,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/mapping"
 	"github.com/kodestar/audiosilo-bridge/internal/metaops"
+	"github.com/kodestar/audiosilo-bridge/internal/transfer"
 )
 
 // stageAndStop leaves a fetch's staging folder and state: archive.org cuts
@@ -616,7 +617,7 @@ func TestSweepRemovesStrayStaging(t *testing.T) {
 	x.mkStray(t, "An Author/"+stagingName(78), old)
 	x.mkStray(t, stagingName(79), young)
 	x.mkStray(t, stagingName(80), old)
-	x.mkStray(t, stagingPrefix+"x", old)
+	x.mkStray(t, transfer.LibrivoxStagePrefix+"x", old)
 	x.mkStray(t, "An Author/Book/"+stagingName(81), old) // deeper than a staging folder goes
 	open := []json.RawMessage{json.RawMessage(`{"librivox_id":80,"work_id":"w","recording_id":"r","library_id":3}`)}
 	x.h.Sweep(now, open)
@@ -628,7 +629,7 @@ func TestSweepRemovesStrayStaging(t *testing.T) {
 	if !x.exists("An Author") {
 		t.Fatal("the author folder of a stray went")
 	}
-	for _, kept := range []string{stagingDir, stagingName(79), stagingName(80), stagingPrefix + "x", "An Author/Book/" + stagingName(81)} {
+	for _, kept := range []string{stagingDir, stagingName(79), stagingName(80), transfer.LibrivoxStagePrefix + "x", "An Author/Book/" + stagingName(81)} {
 		if !x.exists(kept) {
 			t.Fatalf("%s went", kept)
 		}

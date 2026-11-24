@@ -336,7 +336,7 @@ func NewBookMatcher(books []link.LibraryBook) *BookMatcher {
 			c := base
 			c.Series = s.Name
 			var ok bool
-			if c.SeriesIndex, ok = parsePosition(s.Position); !ok {
+			if c.SeriesIndex, ok = source.ParsePosition(s.Position); !ok {
 				// A range is placed at its start, as a range title is.
 				c.SeriesIndex, _ = rangeStart(s.Position)
 			}
@@ -447,7 +447,7 @@ type Claim struct {
 // number (a franchise's, "Cosmere 7" for "Mistborn 1") says nothing about
 // rec's (bridge#43).
 func PositionAgrees(rec source.Record, b link.LibraryBook) (agrees, disagrees bool) {
-	want, ok := parsePosition(rec.SeriesPosition)
+	want, ok := source.ParsePosition(rec.SeriesPosition)
 	if !ok || len(b.Series) == 0 {
 		return false, false
 	}
@@ -464,7 +464,7 @@ func PositionAgrees(rec source.Record, b link.LibraryBook) (agrees, disagrees bo
 			return false, false
 		}
 	}
-	got, ok := parsePosition(pos)
+	got, ok := source.ParsePosition(pos)
 	if !ok {
 		return false, false
 	}
@@ -485,7 +485,7 @@ var folderCode = regexp.MustCompile(`^([A-Za-z]{1,5}) ?(\d{1,3}(?:\.\d+)?)`)
 // 15), a number joined on makes it a range or nothing, never its first number
 // ("LAM05-06" is 5 to 6, "LAM05-06-07" no code), and 0 is no position.
 func folderCodeIs(p, series, pos string) bool {
-	want, ok := parsePosition(pos)
+	want, ok := source.ParsePosition(pos)
 	if !ok {
 		return false
 	}
@@ -497,7 +497,7 @@ func folderCodeIs(p, series, pos string) bool {
 	if rest := name[len(m[0]):]; !wordEndsAt(rest) || joinsNumber(rest) {
 		return false
 	}
-	got, ok := parsePosition(m[2])
+	got, ok := source.ParsePosition(m[2])
 	return ok && got != 0 && got == want
 }
 
@@ -741,7 +741,7 @@ func SeriesPosition(b link.LibraryBook, series string) (float64, bool) {
 	target := match.NormalizeSeries(series)
 	for _, s := range b.Series {
 		if match.NormalizeSeries(s.Name) == target {
-			return parsePosition(s.Position)
+			return source.ParsePosition(s.Position)
 		}
 	}
 	return 0, false
@@ -751,18 +751,8 @@ func SeriesPosition(b link.LibraryBook, series string) (float64, bool) {
 // value ("1" and "1.0" are one position, bridge#64), anything else (a range,
 // none) as written.
 func positionKey(s string) string {
-	if v, ok := parsePosition(s); ok {
+	if v, ok := source.ParsePosition(s); ok {
 		return strconv.FormatFloat(v, 'f', -1, 64)
 	}
 	return strings.TrimSpace(s)
-}
-
-// parsePosition reads a server series position ("3", "2.5"); anything else, and
-// "", is no position.
-func parsePosition(s string) (float64, bool) {
-	v, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
-	if err != nil {
-		return 0, false
-	}
-	return v, true
 }

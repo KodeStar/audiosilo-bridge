@@ -7,6 +7,7 @@ import (
 
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
+	"github.com/kodestar/audiosilo-bridge/internal/timeutil"
 )
 
 // ProgressFunc reports within-stage progress (chapter i/N, chunk i/N) so the
@@ -170,10 +171,8 @@ func (e *StubExecutor) Execute(ctx context.Context, book store.Book, stage state
 		r.Progress(0, ticks)
 	}
 	for i := 1; i <= ticks; i++ {
-		select {
-		case <-ctx.Done():
-			return StageResult{}, ctx.Err()
-		case <-time.After(total / ticks):
+		if err := timeutil.SleepCtx(ctx, total/ticks); err != nil {
+			return StageResult{}, err
 		}
 		if r.Progress != nil {
 			r.Progress(i, ticks)

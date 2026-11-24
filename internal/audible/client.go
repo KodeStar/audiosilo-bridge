@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/kodestar/audiosilo-bridge/internal/timeutil"
 )
 
 // Client is an authenticated Audible API client for one registered device. Calls
@@ -74,7 +76,7 @@ func (c *Client) doSigned(ctx context.Context, method, path string, body []byte,
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		he := &httpError{StatusCode: resp.StatusCode, Method: method, Path: pathOnly(path), Body: snippet(data)}
 		if retryable(resp.StatusCode) {
-			he.RetryAfter, _ = retryAfter(resp.Header.Get("Retry-After"), time.Now())
+			he.RetryAfter, _ = timeutil.RetryAfter(resp.Header.Get("Retry-After"), time.Now(), timeutil.Audible)
 		}
 		return he
 	}

@@ -15,6 +15,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/audiblejob"
 	"github.com/kodestar/audiosilo-bridge/internal/audiblesync"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
+	"github.com/kodestar/audiosilo-bridge/internal/mapping"
 	"github.com/kodestar/audiosilo-bridge/internal/secrets"
 	"github.com/kodestar/audiosilo-bridge/internal/setup"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
@@ -79,8 +80,8 @@ func (b *Bridge) sweepAudible(ctx context.Context, cl *link.Client) {
 	for _, entry := range b.libs.Entries(b.mount) {
 		st := entry.Status
 		folders, wanted := libraries[entry.Library.ID]
-		if !wanted || ctx.Err() != nil || entry.Library.LibraryKind() != "books" || entry.Unknown || st == nil ||
-			!st.Mapped || !st.Writable || st.MountPath != entry.MountPath {
+		if !wanted || ctx.Err() != nil || entry.Library.LibraryKind() != "books" || st == nil ||
+			!mapping.WritableAt(*st, !entry.Unknown, entry.MountPath) {
 			continue
 		}
 		// Two libraries mapped to one mount can have different recorded folders.
@@ -94,7 +95,7 @@ func (b *Bridge) sweepAudible(ctx context.Context, cl *link.Client) {
 		stillMapped := func() bool {
 			cur, known := b.libs.Status(entry.Library.ID)
 			mount, _ := b.mount(entry.Library.ID, entry.Library.Root)
-			return b.conn.Client() == cl && mount == entry.MountPath && known && cur.MountPath == mount && cur.Mapped && cur.Writable
+			return b.conn.Client() == cl && mount == entry.MountPath && mapping.WritableAt(cur, known, mount)
 		}
 		if err := transfer.SweepStaged(ctx, entry.MountPath, time.Now().Add(-audiblejob.PartialMaxAge), stillMapped, folders...); err != nil {
 			if errors.Is(err, context.Canceled) {

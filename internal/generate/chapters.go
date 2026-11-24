@@ -346,7 +346,7 @@ func (h *Handler) saveChaptersEarly(ctx context.Context, r *run, b store.Book) b
 func (h *Handler) mappedNow(r *run) bool {
 	mount, _ := h.o.Mount(r.lib.ID, r.lib.Root)
 	st, checked := h.o.Libraries.Status(r.lib.ID)
-	return checked && st.Mapped && st.Writable && st.MountPath == mount
+	return mapping.WritableAt(st, checked, mount)
 }
 
 // sidecarsWithoutChapters reports whether the book's .audiosilo/ (at p) holds

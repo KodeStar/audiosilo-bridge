@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/kodestar/audiosilo-bridge/internal/timeutil"
 )
 
 // maxOutputRetries is the number of RETRIES (not total attempts) allowed for an
@@ -101,7 +103,7 @@ func RunWithBackoff(ctx context.Context, r Runner, req Request, validate func(Re
 				}
 				delay := backoff[rateLimitRounds]
 				rateLimitRounds++
-				if werr := SleepCtx(ctx, delay); werr != nil {
+				if werr := timeutil.SleepCtx(ctx, delay); werr != nil {
 					return Result{}, slept, werr
 				}
 				slept += delay
@@ -114,7 +116,7 @@ func RunWithBackoff(ctx context.Context, r Runner, req Request, validate func(Re
 				}
 				delay := notAvailableBackoff[notAvailRetries]
 				notAvailRetries++
-				if werr := SleepCtx(ctx, delay); werr != nil {
+				if werr := timeutil.SleepCtx(ctx, delay); werr != nil {
 					return Result{}, slept, werr
 				}
 				slept += delay
@@ -139,20 +141,5 @@ func RunWithBackoff(ctx context.Context, r Runner, req Request, validate func(Re
 		}
 
 		return res, slept, nil
-	}
-}
-
-// SleepCtx waits for d or until ctx is done, whichever first. It uses a timer (not
-// time.Sleep) so a cancelled context returns immediately. Exported because every
-// backoff in the daemon wants exactly this, not a bare time.Sleep: internal/pipeline
-// uses it between split retries.
-func SleepCtx(ctx context.Context, d time.Duration) error {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.C:
-		return nil
 	}
 }

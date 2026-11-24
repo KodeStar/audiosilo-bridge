@@ -51,6 +51,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/secrets"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
+	"github.com/kodestar/audiosilo-bridge/internal/timeutil"
 	"github.com/kodestar/audiosilo-bridge/internal/toolfetch"
 	"github.com/kodestar/audiosilo-bridge/internal/transcript"
 )
@@ -712,7 +713,7 @@ func splitWithRetries(ctx context.Context, m audio.Manifest, book store.Book, ff
 			r.Note(fmt.Sprintf("splitting: source read was interrupted; retrying resumable split (%d/%d)", attempt+1, splitTransientMaxAttempts))
 		}
 		delay := time.Duration(attempt) * splitTransientRetryDelay
-		if werr := agent.SleepCtx(ctx, delay); werr != nil {
+		if werr := timeutil.SleepCtx(ctx, delay); werr != nil {
 			return slept, werr
 		}
 		slept += delay

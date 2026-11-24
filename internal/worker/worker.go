@@ -31,6 +31,7 @@ import (
 
 	"github.com/kodestar/audiosilo-bridge/internal/asr"
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
+	"github.com/kodestar/audiosilo-bridge/internal/timeutil"
 	"github.com/kodestar/audiosilo-bridge/internal/workerproto"
 )
 
@@ -103,7 +104,7 @@ func Run(ctx context.Context, o Options) error {
 		}
 		w.log.Error("worker: the speech recognition can't be set up; fix it and the worker carries on by itself",
 			"err", err, "retry_in", retrySetUp)
-		w.wait(ctx, retrySetUp)
+		_ = timeutil.SleepCtx(ctx, retrySetUp)
 	}
 	return w.loop(ctx)
 }
@@ -166,7 +167,7 @@ func (w *worker) loop(ctx context.Context) error {
 	// retry waits out err; a refusal or a version change says hello again.
 	retry := func(err error) {
 		greeted = greeted && !needsHello(err)
-		w.wait(ctx, w.pause(ctx, err, &backoff))
+		_ = timeutil.SleepCtx(ctx, w.pause(ctx, err, &backoff))
 	}
 	for ctx.Err() == nil {
 		if !greeted {
@@ -233,15 +234,6 @@ func (w *worker) pause(ctx context.Context, err error, backoff *time.Duration) t
 	*backoff = min(*backoff*2, retryErrorMax)
 	w.log.Warn("worker: can't reach the Bridge", "err", err, "retry_in", d)
 	return d
-}
-
-func (w *worker) wait(ctx context.Context, d time.Duration) {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-	case <-t.C:
-	}
 }
 
 // resume carries on with the segment in hand after a restart: the Bridge gives

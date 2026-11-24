@@ -6,9 +6,10 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kodestar/audiosilo-bridge/internal/timeutil"
 )
 
 // Backoff for an answer that asks the caller to slow down (429 Too Many Requests,
@@ -54,7 +55,7 @@ func sendWithBackoff(ctx context.Context, hc *http.Client, sleep func(context.Co
 		if !retryable(resp.StatusCode) || attempt == maxAttempts {
 			return resp, nil
 		}
-		wait, ok := retryAfter(resp.Header.Get("Retry-After"), time.Now())
+		wait, ok := timeutil.RetryAfter(resp.Header.Get("Retry-After"), time.Now(), timeutil.Audible)
 		if !ok {
 			wait = backoffBase << (attempt - 1)
 		}
@@ -94,32 +95,6 @@ func withoutQuery(err error) error {
 
 // errURLInCause stands in for a request error's cause that quoted a URL.
 var errURLInCause = errors.New("the request failed (its error quoted a URL, left out)")
-
-// retryAfter reads a Retry-After value: delay seconds or an HTTP date. A date in
-// the past is no wait; anything unreadable is no answer. A wait past
-// maxRetryAfter reads as maxRetryAfter (a call fails past maxBackoff anyway,
-// and a caller that backs off for longer, the position sync, waits a day at
-// most); clamping first keeps a huge value from overflowing into a short (or
-// negative) wait.
-func retryAfter(v string, now time.Time) (time.Duration, bool) {
-	v = strings.TrimSpace(v)
-	if v == "" {
-		return 0, false
-	}
-	if n, err := strconv.Atoi(v); err == nil {
-		if n < 0 {
-			return 0, false
-		}
-		return time.Duration(min(n, int(maxRetryAfter/time.Second))) * time.Second, true
-	}
-	if t, err := http.ParseTime(v); err == nil {
-		return min(max(t.Sub(now), 0), maxRetryAfter), true
-	}
-	return 0, false
-}
-
-// maxRetryAfter is the longest Retry-After read.
-const maxRetryAfter = 24 * time.Hour
 
 // HTTPStatus is the Audible or Amazon status code behind err, or 0 when err
 // isn't an HTTP answer (a network failure, a cancelled context).

@@ -27,6 +27,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/mapping"
 	"github.com/kodestar/audiosilo-bridge/internal/metaops"
 	"github.com/kodestar/audiosilo-bridge/internal/netguard"
+	"github.com/kodestar/audiosilo-bridge/internal/timeutil"
 	"github.com/kodestar/audiosilo-bridge/internal/transfer"
 )
 
@@ -46,12 +47,12 @@ const (
 // The codes a failed fetch reports (its result {code, message}); any other
 // failure has none, only its error.
 const (
-	CodeNotWritable        = "not_writable"        // not a checked writable books mapping, or no valid path there
-	CodeExists             = "exists"              // the title's folder and its fallback are both taken
-	CodeDiskFull           = "disk_full"           // the library is short of room
-	CodeNotFound           = "not_found"           // meta has no such project (or it lists no files)
-	CodeArchiveUnavailable = "archive_unavailable" // a file isn't on archive.org, or archive.org can't be reached
-	CodeMetadataOff        = "metadata_off"        // the Bridge has no metadata base URL
+	CodeNotWritable        = transfer.CodeNotWritable // not a checked writable books mapping, or no valid path there
+	CodeExists             = "exists"                 // the title's folder and its fallback are both taken
+	CodeDiskFull           = "disk_full"              // the library is short of room
+	CodeNotFound           = "not_found"              // meta has no such project (or it lists no files)
+	CodeArchiveUnavailable = "archive_unavailable"    // a file isn't on archive.org, or archive.org can't be reached
+	CodeMetadataOff        = "metadata_off"           // the Bridge has no metadata base URL
 )
 
 // Failure is a failed fetch's result and error: a code from the list above and
@@ -151,8 +152,7 @@ type Server interface {
 
 // Libraries is the mapping registry a fetch checks (*mapping.Registry).
 type Libraries interface {
-	Library(id int64) (link.Library, bool)
-	Status(id int64) (link.LibraryStatus, bool)
+	transfer.Libraries
 	Statuses() []link.LibraryStatus
 }
 
@@ -215,7 +215,7 @@ func New(o Options) *Handler {
 		o.Free = fsutil.FreeBytes
 	}
 	if o.Wait == nil {
-		o.Wait = netguard.Wait
+		o.Wait = timeutil.SleepCtx
 	}
 	if o.ServerID == nil {
 		o.ServerID = func() string { return "" }
@@ -242,7 +242,7 @@ func (h *Handler) ServerQueued() bool { return true }
 func (h *Handler) Lane() string { return jobs.LaneDownload }
 
 // mappingPoll is how often a job waiting on its library's mapping looks again.
-const mappingPoll = time.Second
+const mappingPoll = transfer.MappingPoll
 
 // Abandon removes the staging folder of a job the runner ended without
 // running it (cancelled before it resumed, or dropped: its pairing ended). A
@@ -737,17 +737,12 @@ func (h *Handler) prepare(f *fetch) error {
 		return err
 	}
 	defer func() { _ = root.Close() }()
-	if f.st.Parent != "" {
-		if err := root.MkdirAll(f.st.Parent, 0o755); err != nil {
-			return writeFailure(err, f.st.Parent)
-		}
+	rel, err := transfer.PrepareProjectDir(root, f.staging())
+	if errors.Is(err, transfer.ErrStagingDir) {
+		return fail(CodeNotWritable, "The Bridge can't use %s in the library as its staging folder.", rel)
 	}
-	staging := f.staging()
-	if err := root.Mkdir(staging, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
-		return writeFailure(err, staging)
-	}
-	if st, err := root.Lstat(staging); err != nil || !st.IsDir() {
-		return fail(CodeNotWritable, "The Bridge can't use %s in the library as its staging folder.", staging)
+	if err != nil {
+		return writeFailure(err, rel)
 	}
 	return nil
 }
@@ -1027,68 +1022,14 @@ func (h *Handler) recheck(ctx context.Context, f *fetch, step string) error {
 	return nil
 }
 
-// mapped is the fetch's books library and its mount once the library is a
-// checked, writable mapping there (audiblejob's rule): a job claimed before
-// the check waits for it; a mapping that isn't writable fails a new job
-// (strict) and parks a resumed one, or one past its download, not_writable
-// until it comes back.
-//
-// A parked fetch, or one waiting on a check that doesn't stand (the server
-// didn't answer it, or it is too old), gives its download-lane slot back
-// (jobs.Reporter.Yield), so
-// the Audible imports and podcast downloads that share the lane run while it
-// waits; once the mapping is back it takes a slot again (Reclaim) before it
-// writes anything, so downloads still go one at a time.
-//
-// The run is bound to the pairing that claimed job (stillPaired): once the
-// Bridge is paired otherwise (unpaired on its page, paired again after that,
-// or with another server, whose libraries share ids with this one's), the run
-// ends without a write (errPairingGone, its own staging folder and state
-// removed on the way out), even before the runner drops the job (bridge#71).
+// mapped waits for this job's library and download slot under its claim's
+// pairing (transfer.MappingWait.Mapped). A run whose pairing ended returns
+// errPairingGone, its own staging folder and state removed on the way out (bridge#71).
 func (h *Handler) mapped(ctx context.Context, job jobs.Job, id int64, rep *jobs.Reporter, step string, strict bool) (link.Library, string, error) {
-	for {
-		if !h.stillPaired(job) {
-			return link.Library{}, "", errPairingGone
-		}
-		lib, ok := h.o.Libraries.Library(id)
-		if !ok || lib.LibraryKind() != "books" {
-			return link.Library{}, "", fail(CodeNotWritable, "The server lists no books library %d for the Bridge.", id)
-		}
-		mount, _ := h.o.Mount(lib.ID, lib.Root)
-		st, checked := h.o.Libraries.Status(lib.ID)
-		switch {
-		case checked && st.MountPath == mount && st.Mapped && st.Writable:
-			rep.Unpark()
-			if !rep.Yielded() {
-				return lib, mount, nil
-			}
-			// Back, but without a slot: take one, then look at the mapping
-			// again, since the wait for the slot may have been long.
-			h.report(rep, jobs.Progress{Step: step, Code: jobs.SayDownloadWait})
-			if err := rep.Reclaim(ctx); err != nil {
-				return link.Library{}, "", err
-			}
-			continue
-		case !checked || st.MountPath != mount:
-			h.report(rep, jobs.Progress{Step: step, Code: jobs.SayMappingWait})
-			if !checked && st.Error != "" {
-				// A check that doesn't stand (the server didn't answer it, or
-				// it is too old) may wait out an outage: the lane is free
-				// meanwhile, as for a park.
-				rep.Yield()
-			}
-		case strict:
-			_, why := jobs.LibraryNotWritable(lib.Name)
-			return link.Library{}, "", fail(CodeNotWritable, "%s", why)
-		default:
-			said, why := jobs.LibraryNotWritable(lib.Name)
-			h.report(rep, jobs.Progress{Step: step, Code: jobs.SayLibraryNotWritable, Params: said,
-				Extra: map[string]any{"park": map[string]any{"code": CodeNotWritable}}})
-			rep.Park(CodeNotWritable, why)
-			rep.Yield()
-		}
-		if err := h.o.Wait(ctx, mappingPoll); err != nil {
-			return link.Library{}, "", err
-		}
+	w := transfer.MappingWait{
+		Libraries: h.o.Libraries, Mount: h.o.Mount, Pairing: h.o.Pairing, PairingGone: errPairingGone,
+		NotWritable: func(why string) error { return fail(CodeNotWritable, "%s", why) },
+		Wait:        h.o.Wait, Report: h.report,
 	}
+	return w.Mapped(ctx, job, id, rep, step, strict)
 }

@@ -17,10 +17,10 @@ import (
 
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
-	"github.com/kodestar/audiosilo-bridge/internal/netguard"
 	"github.com/kodestar/audiosilo-bridge/internal/podcast"
 	"github.com/kodestar/audiosilo-bridge/internal/secrets"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
+	"github.com/kodestar/audiosilo-bridge/internal/timeutil"
 )
 
 func TestOwnedCleanupHonorsAgeLiveJobAndForeignFiles(t *testing.T) {
@@ -89,7 +89,7 @@ func TestOwnedCleanupHonorsAgeLiveJobAndForeignFiles(t *testing.T) {
 func TestFileLockExclusiveAcrossHandlersAndCancellation(t *testing.T) {
 	h, job := audioHarness(t)
 	s := h.handler.s
-	s.o.Wait = netguard.Wait
+	s.o.Wait = timeutil.SleepCtx
 	root, _ := os.OpenRoot(h.mount)
 	defer root.Close()
 	release, err := s.fileLock(context.Background(), root, *job.Path)
@@ -112,7 +112,7 @@ func TestFileLockExclusiveAcrossHandlersAndCancellation(t *testing.T) {
 func TestFileLockRemovesItsFileAndStaysExclusive(t *testing.T) {
 	h, job := audioHarness(t)
 	s := h.handler.s
-	s.o.Wait = netguard.Wait
+	s.o.Wait = timeutil.SleepCtx
 	root, _ := os.OpenRoot(h.mount)
 	defer root.Close()
 	lockFile := podcast.AttachmentPath(*job.Path, ".fetch.lock")

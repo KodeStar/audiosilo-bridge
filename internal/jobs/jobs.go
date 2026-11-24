@@ -28,6 +28,7 @@ import (
 
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
+	"github.com/kodestar/audiosilo-bridge/internal/timeutil"
 )
 
 // Job is a claimed server job as a Handler sees it.
@@ -603,7 +604,7 @@ func (r *Runner) Run(ctx context.Context) {
 		changed := r.wakeChan()
 		if !sweep() {
 			// Nothing of an earlier pairing is resumed before it is dropped.
-			sleep(ctx, 5*time.Second)
+			_ = timeutil.SleepCtx(ctx, 5*time.Second)
 			continue
 		}
 		srv, id := r.paired()
@@ -651,7 +652,7 @@ func (r *Runner) recover(ctx context.Context, srv Server, id string, wg *sync.Wa
 	open, err := r.store.OpenServerJobs(ctx)
 	if err != nil {
 		r.log.Warn("bridge: reading the open jobs failed", "err", err)
-		sleep(ctx, 5*time.Second)
+		_ = timeutil.SleepCtx(ctx, 5*time.Second)
 		return false
 	}
 	var drops []drop
@@ -1355,7 +1356,7 @@ func (r *Runner) recordClaim(ctx context.Context, sj store.ServerJob) error {
 			return err
 		}
 		r.log.Debug("bridge: recording a claim failed; trying again", "job", sj.ID, "err", err)
-		sleep(ctx, wait)
+		_ = timeutil.SleepCtx(ctx, wait)
 		wait *= 2
 	}
 }
@@ -2881,13 +2882,4 @@ func clip(s string, n int) string {
 		return s
 	}
 	return strings.ToValidUTF8(s[:n], "")
-}
-
-func sleep(ctx context.Context, d time.Duration) {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-	case <-t.C:
-	}
 }

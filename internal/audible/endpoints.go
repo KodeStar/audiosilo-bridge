@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/kodestar/audiosilo-bridge/internal/timeutil"
 )
 
 // Endpoints are the three hosts the client talks to, as base URLs with a scheme
@@ -115,7 +117,7 @@ func resolve(mp Marketplace, timeout time.Duration, opts []Option) settings {
 		s.http = &http.Client{Timeout: timeout, Transport: wrapTransport(http.DefaultTransport)}
 	}
 	if s.sleep == nil {
-		s.sleep = sleepCtx
+		s.sleep = timeutil.SleepCtx
 	}
 	if s.stall <= 0 {
 		s.stall = downloadStall
@@ -124,16 +126,4 @@ func resolve(mp Marketplace, timeout time.Duration, opts []Option) settings {
 		s.oddDates = oddDatesLogged
 	}
 	return s
-}
-
-// sleepCtx waits d, or until ctx ends.
-func sleepCtx(ctx context.Context, d time.Duration) error {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.C:
-		return nil
-	}
 }

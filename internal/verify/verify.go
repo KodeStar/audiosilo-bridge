@@ -19,6 +19,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/mapping"
+	"github.com/kodestar/audiosilo-bridge/internal/timeutil"
 )
 
 // Kind is the job kind.
@@ -160,11 +161,9 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	}
 
 	for i := 1; i <= p.HoldSeconds; i++ {
-		select {
-		case <-ctx.Done():
+		if err := timeutil.SleepCtx(ctx, time.Second); err != nil {
 			res.ElapsedMS = time.Since(start).Milliseconds()
-			return res, ctx.Err()
-		case <-time.After(time.Second):
+			return res, err
 		}
 		rep.Progress(jobs.Progress{Step: "hold", Code: jobs.SayHolding, Done: i, Total: p.HoldSeconds})
 	}
@@ -221,10 +220,8 @@ func (h *Handler) retrying(ctx context.Context, jobID int64, msg string, again f
 			return err
 		}
 		h.log.Warn(msg, "job", jobID, "err", err)
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(min(wait, left)):
+		if err := timeutil.SleepCtx(ctx, min(wait, left)); err != nil {
+			return err
 		}
 		wait = min(wait*2, bookRetryMax)
 	}

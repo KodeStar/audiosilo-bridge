@@ -48,14 +48,14 @@ const (
 // The codes a failed import reports (its result {code, message}); any other
 // failure has none, only its error.
 const (
-	CodeNotReleased    = "not_released"        // a preorder, or Audible says it isn't out
-	CodeNoRights       = "no_rights"           // not owned, no download rights, a show or periodical
-	CodeRefused        = "audible_refused"     // Audible refused the sign-in, the device (throttled), or the license for another reason
-	CodeNotWritable    = "not_writable"        // not the account's library, not a checked writable mapping, or no valid path there
-	CodeExists         = "exists"              // a different file is at the destination
-	CodeDiskFull       = "disk_full"           // the Bridge's temp space or the library is short of room
-	CodeURLExpired     = "offline_url_expired" // the download URL expired again after one new license
-	CodeUnknownAccount = "unknown_account"     // not this Bridge's account, or mapped on another server
+	CodeNotReleased    = "not_released"           // a preorder, or Audible says it isn't out
+	CodeNoRights       = "no_rights"              // not owned, no download rights, a show or periodical
+	CodeRefused        = "audible_refused"        // Audible refused the sign-in, the device (throttled), or the license for another reason
+	CodeNotWritable    = transfer.CodeNotWritable // not the account's library, not a checked writable mapping, or no valid path there
+	CodeExists         = "exists"                 // a different file is at the destination
+	CodeDiskFull       = "disk_full"              // the Bridge's temp space or the library is short of room
+	CodeURLExpired     = "offline_url_expired"    // the download URL expired again after one new license
+	CodeUnknownAccount = "unknown_account"        // not this Bridge's account, or mapped on another server
 	// CodeDRMFree: Audible offers the title only as a DRM-free MP3, which the
 	// Bridge doesn't back up yet (bridge#46).
 	CodeDRMFree = "drm_free"
@@ -71,7 +71,7 @@ const tmpHeadroom = 2.2
 
 // PartialMaxAge is how long the start-up sweep keeps a partial download (a
 // job that never resumed: cancelled while the Bridge was down, or lost).
-const PartialMaxAge = 7 * 24 * time.Hour
+const PartialMaxAge = transfer.StagingMaxAge
 
 // Only a successful decrypt is renamed to this suffix. Older .m4b files can be incomplete.
 const readySuffix = ".ready.m4b"
@@ -80,10 +80,6 @@ const readySuffix = ".ready.m4b"
 // nothing to the partial (a dropped connection resumes from it each time; an
 // attempt that added to it starts the count again).
 const downloadAttempts = 3
-
-// mappingPoll is how often a job waiting on its library's mapping (a check not
-// made yet, or a mapping to come back) looks again.
-const mappingPoll = time.Second
 
 // Failure is a failed import's result and error: a code from the list above
 // and a sentence for the console, and for CodeExists what is in the way
@@ -223,10 +219,7 @@ type ImportServer interface {
 }
 
 // Libraries is the mapping registry an import checks (*mapping.Registry).
-type Libraries interface {
-	Library(id int64) (link.Library, bool)
-	Status(id int64) (link.LibraryStatus, bool)
-}
+type Libraries = transfer.Libraries
 
 // ImportOptions wire the import handler.
 type ImportOptions struct {
@@ -319,7 +312,7 @@ func (h *Importer) Lane() string { return jobs.LaneDownload }
 
 // tmpBase is the name every temp file of the account's title starts with.
 func (h *Importer) tmpBase(account, asin string) string {
-	return filepath.Join(h.o.TmpDir, account+"-"+asin)
+	return transfer.PrivateDir(h.o.TmpDir).Base(account, asin)
 }
 
 // partPaths are the job's temp files: the partial AAXC (kept across a restart,
@@ -451,7 +444,7 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(h.o.TmpDir, 0o700); err != nil {
+	if err := transfer.PrivateDir(h.o.TmpDir).Create(); err != nil {
 		return nil, fmt.Errorf("the Bridge's temp folder: %w", err)
 	}
 
@@ -1062,60 +1055,16 @@ func (h *Importer) tryGate(account string, rep *jobs.Reporter) (func(), bool) {
 	}
 }
 
-// mapped is the import's books library and its mount once the library is a
-// checked, writable mapping there. A job claimed before the library's mapping
-// check has a result for that mount (the first claims after a start) waits for
-// it. A mapping that isn't writable then fails a new job before it downloads
-// (strict); a resumed job, or one past its download, parks not_writable and
-// waits for the mapping to come back (CLAUDE.md: a resumed write job parks and
-// waits), keeping what it holds. The job runs on (unparked) once it is back.
-//
-// The import is bound to the pairing that claimed job (jobs.Job.Under): once
-// the Bridge is paired otherwise (unpaired, paired again after that, or with
-// another server, whose libraries share ids with this one's), it ends
-// (errImportPairingGone) without writing to the library the registry lists
-// now, and run's defer removes its temp files.
+// mapped waits for this job's library and download slot under its claim's
+// pairing (transfer.MappingWait.Mapped). An import whose pairing ended returns
+// errImportPairingGone, and run's defer removes its temp files.
 func (h *Importer) mapped(ctx context.Context, job jobs.Job, id int64, rep *jobs.Reporter, step string, strict bool) (link.Library, string, error) {
-	for {
-		if !job.Under(h.o.Pairing()) {
-			return link.Library{}, "", errImportPairingGone
-		}
-		lib, ok := h.o.Libraries.Library(id)
-		if !ok || lib.LibraryKind() != "books" {
-			return link.Library{}, "", fail(CodeNotWritable, "The server lists no books library %d for the Bridge.", id)
-		}
-		mount, _ := h.o.Mount(lib.ID, lib.Root)
-		st, checked := h.o.Libraries.Status(lib.ID)
-		switch {
-		case checked && st.MountPath == mount && st.Mapped && st.Writable:
-			rep.Unpark()
-			if !rep.Yielded() {
-				return lib, mount, nil
-			}
-			h.report(rep, jobs.Progress{Step: step, Code: jobs.SayDownloadWait})
-			if err := rep.Reclaim(ctx); err != nil {
-				return link.Library{}, "", err
-			}
-			continue // the mapping may have changed while reclaiming the slot
-		case !checked || st.MountPath != mount:
-			h.report(rep, jobs.Progress{Step: step, Code: jobs.SayMappingWait})
-			if !checked && st.Error != "" {
-				rep.Yield()
-			}
-		case strict:
-			_, why := jobs.LibraryNotWritable(lib.Name)
-			return link.Library{}, "", fail(CodeNotWritable, "%s", why)
-		default:
-			said, why := jobs.LibraryNotWritable(lib.Name)
-			h.report(rep, jobs.Progress{Step: step, Code: jobs.SayLibraryNotWritable, Params: said,
-				Extra: map[string]any{"park": map[string]any{"code": CodeNotWritable}}})
-			rep.Park(CodeNotWritable, why)
-			rep.Yield()
-		}
-		if err := h.o.Wait(ctx, mappingPoll); err != nil {
-			return link.Library{}, "", err
-		}
+	w := transfer.MappingWait{
+		Libraries: h.o.Libraries, Mount: h.o.Mount, Pairing: h.o.Pairing, PairingGone: errImportPairingGone,
+		NotWritable: func(why string) error { return fail(CodeNotWritable, "%s", why) },
+		Wait:        h.o.Wait, Report: h.report,
 	}
+	return w.Mapped(ctx, job, id, rep, step, strict)
 }
 
 // errImportPairingGone ends an import whose pairing ended under it (mapped).
@@ -1592,28 +1541,18 @@ func recordedFolder(file, server string) (PlacementFolder, bool) {
 // Before expiring records, collect the placement folders for the library sweep.
 // Placement markers carry only a library ID, scoped here to the paired server.
 func SweepTmp(dir string, now time.Time, server string) ([]PlacementFolder, error) {
-	entries, err := os.ReadDir(dir)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
 	var folders []PlacementFolder
 	keep := map[string]bool{}
-	for _, e := range entries {
-		if !e.Type().IsRegular() {
-			continue
-		}
+	inspect := func(file string, e fs.DirEntry) {
 		name := e.Name()
 		marker, part, ready := strings.HasSuffix(name, placedSuffix), strings.HasSuffix(name, ".aaxc.part"), strings.HasSuffix(name, readySuffix)
 		if marker || strings.HasSuffix(name, stagedMeta(readySuffix)) {
-			if f, ok := recordedFolder(filepath.Join(dir, name), server); ok {
+			if f, ok := recordedFolder(file, server); ok {
 				folders = append(folders, f)
 			}
 		}
 		if !marker && !part && !ready {
-			continue
+			return
 		}
 		if info, err := e.Info(); err == nil && now.Sub(info.ModTime()) < PartialMaxAge {
 			keep[e.Name()] = true
@@ -1625,14 +1564,11 @@ func SweepTmp(dir string, now time.Time, server string) ([]PlacementFolder, erro
 			}
 		}
 	}
-	var errs []error
-	for _, e := range entries {
+	err := transfer.PrivateDir(dir).Sweep(inspect, func(file string, e fs.DirEntry) error {
 		if keep[e.Name()] {
-			continue
+			return nil
 		}
-		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	return folders, errors.Join(errs...)
+		return os.RemoveAll(file)
+	})
+	return folders, err
 }

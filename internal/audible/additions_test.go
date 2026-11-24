@@ -139,32 +139,6 @@ func TestRetryWait(t *testing.T) {
 	}
 }
 
-func TestRetryAfter(t *testing.T) {
-	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
-	for in, want := range map[string]time.Duration{
-		"0":                             0,
-		"30":                            30 * time.Second,
-		"Mon, 02 Nov 2026 12:01:00 GMT": time.Minute,
-		"Mon, 02 Nov 2026 11:00:00 GMT": 0, // in the past
-	} {
-		if got, ok := retryAfter(in, now); !ok || got != want {
-			t.Errorf("retryAfter(%q) = %v, %v; want %v", in, got, ok, want)
-		}
-	}
-	for _, in := range []string{"", "-5", "soon"} {
-		if _, ok := retryAfter(in, now); ok {
-			t.Errorf("retryAfter(%q) read as a wait", in)
-		}
-	}
-	// A huge value is longer than the Bridge waits, never an overflow into a
-	// short or negative wait.
-	for _, in := range []string{"9999999999", "18446744074", "9223372036854775807"} {
-		if got, ok := retryAfter(in, now); !ok || got <= maxBackoff {
-			t.Errorf("retryAfter(%q) = %v, %v; want more than %v", in, got, ok, maxBackoff)
-		}
-	}
-}
-
 func TestRefusedStatus(t *testing.T) {
 	for status, want := range map[int]bool{401: true, 403: true, 400: false, 404: false, 500: false} {
 		err := error(&httpError{StatusCode: status})
