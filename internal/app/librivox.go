@@ -21,7 +21,7 @@ import (
 func (b *Bridge) newLibrivox(meta *metaops.Client, log *slog.Logger, serverID func() string) *librivoxjob.Handler {
 	b.librivoxHTTP = netguard.New(netguard.Options{Version: b.version})
 	b.librivox = librivoxjob.New(librivoxjob.Options{Meta: meta, Fetcher: b.librivoxHTTP, Libraries: b.libs, Mount: b.mount,
-		StateDir: filepath.Join(b.dataDir, "librivox"), ServerID: serverID, Log: log,
+		StateDir: filepath.Join(b.dataDir, "librivox"), ServerID: serverID, Pairing: b.conn.jobsPairing, Log: log,
 		Server: func() librivoxjob.Server {
 			if cl := b.conn.Client(); cl != nil {
 				return cl

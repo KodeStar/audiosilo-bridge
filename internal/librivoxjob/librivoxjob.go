@@ -169,7 +169,11 @@ type Options struct {
 	// ServerID is the paired server's id ("" when unknown), recorded in each
 	// state: a state of another server is never acted on.
 	ServerID func() string
-	Log      *slog.Logger
+	// Pairing is the Bridge's pairing now (jobs.Options.Pairing's): a run
+	// writes to a library only while it is the one its job was claimed under
+	// (stillPaired). nil is always the zero Pairing.
+	Pairing func() jobs.Pairing
+	Log     *slog.Logger
 
 	// Seams (tests): the free-space reader and the wait between attempts and
 	// between looks at the library's mapping.
@@ -215,6 +219,9 @@ func New(o Options) *Handler {
 	}
 	if o.ServerID == nil {
 		o.ServerID = func() string { return "" }
+	}
+	if o.Pairing == nil {
+		o.Pairing = func() jobs.Pairing { return jobs.Pairing{} }
 	}
 	return &Handler{o: o, active: map[key]bool{}, sweeping: map[int]bool{}}
 }
@@ -316,6 +323,29 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	return res, nil
 }
 
+// stillPaired reports whether the Bridge is still paired as when it claimed
+// job: the same server and the same pairing (Options.Pairing; a token the
+// server refuses meanwhile ends neither), as jobs.Link has it. Always so for
+// a job no runner claimed. The mapping registry lists the libraries of the
+// pairing now, so a run writes to a library only while this holds.
+func (h *Handler) stillPaired(job jobs.Job) bool {
+	if job.ServerID() == "" {
+		return true
+	}
+	p := h.o.Pairing()
+	return p.ServerID == job.ServerID() && (job.Pairing() == "" || p.ID == job.Pairing())
+}
+
+// errPairingGone ends a run whose pairing ended under it (stillPaired).
+var errPairingGone = errors.New("the Bridge's pairing that claimed this fetch has ended, so it writes nothing more to the library")
+
+// pairingGone is errPairingGone keeping the staging folder and the state as
+// they are: nothing is written (or removed) in a library the pairing no longer
+// vouches for. The same server's job, claimed under the next pairing, resumes
+// from them; otherwise the sweep ends them (another server's state is dropped,
+// its folder swept as a stray).
+func pairingGone() error { return &keepStaging{err: errPairingGone} }
+
 // key is one fetch's state: a library and a project.
 type key struct {
 	lib int64
@@ -402,7 +432,7 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, p Params, rep *jobs.Rep
 	if srv == nil {
 		return nil, errors.New("the Bridge isn't paired with a server")
 	}
-	lib, mount, err := h.mapped(ctx, p.LibraryID, rep, StepManifest, !job.Resumed)
+	lib, mount, err := h.mapped(ctx, job, p.LibraryID, rep, StepManifest, !job.Resumed)
 	if err != nil {
 		return nil, err
 	}
@@ -433,6 +463,11 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, p Params, rep *jobs.Rep
 			return
 		}
 		if ctx.Err() != nil && (jobs.Resumes(ctx) || jobs.Lost(ctx)) {
+			return
+		}
+		// A run whose pairing ended (the job dropped: an unpair, a pairing
+		// with another server) touches the library no more (pairingGone).
+		if !h.stillPaired(job) {
 			return
 		}
 		// A folder that can't be removed now (a cancel while the mount is
@@ -470,6 +505,11 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, p Params, rep *jobs.Rep
 		if f.st.Placed {
 			return h.finish(ctx, f, srv) // the folder is already this project's
 		}
+	}
+	// The pairing again before the first write: the manifest's reads may
+	// have taken long (recheck looks before each later one).
+	if !h.stillPaired(job) {
+		return nil, pairingGone()
 	}
 	if err := h.prepare(f); err != nil {
 		return nil, err
@@ -978,7 +1018,7 @@ func (h *Handler) report(rep *jobs.Reporter, pr jobs.Progress) {
 // and at the mount the staging folder is in. A mapping moved to another mount
 // fails the fetch: what it staged isn't there.
 func (h *Handler) recheck(ctx context.Context, f *fetch, step string) error {
-	_, mount, err := h.mapped(ctx, f.lib.ID, f.rep, step, false)
+	_, mount, err := h.mapped(ctx, f.job, f.lib.ID, f.rep, step, false)
 	if err != nil {
 		return err
 	}
@@ -1000,8 +1040,17 @@ func (h *Handler) recheck(ctx context.Context, f *fetch, step string) error {
 // the Audible imports and podcast downloads that share the lane run while it
 // waits; once the mapping is back it takes a slot again (Reclaim) before it
 // writes anything, so downloads still go one at a time.
-func (h *Handler) mapped(ctx context.Context, id int64, rep *jobs.Reporter, step string, strict bool) (link.Library, string, error) {
+//
+// The run is bound to the pairing that claimed job (stillPaired): once the
+// Bridge is paired otherwise (unpaired on its page, paired again after that,
+// or with another server, whose libraries share ids with this one's), the run
+// ends without a write, its staging folder and state kept (pairingGone), even
+// before the runner drops the job (bridge#71).
+func (h *Handler) mapped(ctx context.Context, job jobs.Job, id int64, rep *jobs.Reporter, step string, strict bool) (link.Library, string, error) {
 	for {
+		if !h.stillPaired(job) {
+			return link.Library{}, "", pairingGone()
+		}
 		lib, ok := h.o.Libraries.Library(id)
 		if !ok || lib.LibraryKind() != "books" {
 			return link.Library{}, "", fail(CodeNotWritable, "The server lists no books library %d for the Bridge.", id)

@@ -332,6 +332,74 @@ func TestFetchCancelAndLost(t *testing.T) {
 	}
 }
 
+// A run is bound to the pairing its job was claimed under: once the Bridge is
+// paired otherwise (unpaired, paired again after an unpair, another server,
+// whose libraries share ids with this one's), it writes nothing more, before
+// the next section too, and keeps its staging folder and state for the same
+// server's next claim (denied); paired again with the same server under the
+// same pairing, it goes on and places the book (allowed). bridge#71.
+func TestRunStopsWritingOnceItsPairingEnds(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		pairing, server string
+		goesOn          bool
+	}{
+		{"the same pairing", "p1", testServer, true},
+		{"unpaired", "", "", false},
+		{"paired again after an unpair", "p2", testServer, false},
+		{"paired with another server", "p3", "other", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			x := newHarness(t)
+			x.pairing, x.srv.id, x.srv.pairing = "p1", testServer, "p1"
+			job := jobs.ClaimedUnder(x.job(false), testServer, "p1")
+			x.h.o.onProgress = func(p jobs.Progress) {
+				if p.Step == StepDownload && p.Done == 1 && p.Total == 3 {
+					x.pairing, x.serverID = tc.pairing, tc.server
+				}
+			}
+			_, err := x.h.Run(context.Background(), job, jobs.LocalReporter())
+			if tc.goesOn {
+				if err != nil || !x.exists(bookDir) {
+					t.Fatalf("allowed: the run under its own pairing didn't place the book: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, errPairingGone) {
+				t.Fatalf("denied: the run went on after its pairing ended: %v", err)
+			}
+			if x.exists(bookDir) || x.exists(stagingDir+"/03 - Johnny Crow's New Garden.mp3") {
+				t.Fatal("denied: the run wrote to the library after its pairing ended")
+			}
+			for _, r := range x.fetch.seen() {
+				if r.url == sectionURL(3) {
+					t.Fatal("denied: the run fetched the next section after its pairing ended")
+				}
+			}
+			if !x.exists(stagingDir+"/02 - Johnny Crow's Party.mp3") || !x.hasState() {
+				t.Fatal("the staging folder or the state went with the pairing")
+			}
+		})
+	}
+
+	// Dropped by the runner (its context ended for good) once the pairing
+	// ended: the library isn't touched on the way out either.
+	x := newHarness(t)
+	x.pairing, x.srv.id, x.srv.pairing = "p1", testServer, "p1"
+	ctx, drop := jobs.DropContext(context.Background())
+	x.fetch.files[sectionURL(2)].cut = []int{100}
+	x.fetch.files[sectionURL(2)].onCut = func() {
+		x.pairing, x.serverID = "", ""
+		drop()
+	}
+	if _, err := x.h.Run(ctx, jobs.ClaimedUnder(x.job(false), testServer, "p1"), jobs.LocalReporter()); err == nil {
+		t.Fatal("a dropped run succeeded")
+	}
+	if !x.exists(stagingDir+"/02 - Johnny Crow's Party.mp3.part") || !x.hasState() {
+		t.Fatal("a run dropped after its pairing ended removed its staging folder")
+	}
+}
+
 func TestAbandon(t *testing.T) {
 	x := newHarness(t)
 	ctx, stop := context.WithCancel(context.Background())

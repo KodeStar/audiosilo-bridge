@@ -4050,6 +4050,14 @@ internal/
             walk, and the removal is given up (bridge#71): it removes nothing
             more once the mount answers, and the project is free again at once,
             so a fetch of it runs rather than failing as already running.
+            Pairing (bridge#71): a run writes to the library only while the
+            Bridge is still paired as when it claimed the job (stillPaired,
+            Options.Pairing: the same server and pairing; a refused token ends
+            neither), looked at before the first write and in every mapping
+            look (mapped, so before each section, the cover and the rename, and
+            while parked); once not, it ends with its staging folder and state
+            kept (pairingGone), and a run the runner drops after its pairing
+            ended removes nothing on the way out.
             Steps manifest, download (done/total = sections), cover, place,
             rescan. Result {library_id, path (the rescan's), librivox_id, files,
             bytes, adopted} (files and bytes: the sections and the cover;
