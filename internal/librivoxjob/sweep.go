@@ -266,7 +266,7 @@ const strayLookWait = 10 * time.Second
 // strayWalkTime bounds the walk of one library's author folders for stray
 // staging folders, all of its folder reads together: a library of many author
 // folders on a slow mount is walked only so far, the rest left for the next
-// walk, which starts at another author folder (bridge#65).
+// walk, which takes them in another random order (bridge#65).
 const strayWalkTime = 2 * time.Minute
 
 // stray is a staging-named folder the walk found: rel in the library, the
@@ -278,8 +278,8 @@ type stray struct {
 
 // strayCandidates are the staging-named folders in the library's top folder
 // (mount) and in each folder directly in it. Each read is bounded by
-// strayLookWait, and the author folders' reads together by budget, from an
-// author folder picked at random, so a walk cut short reaches others next
+// strayLookWait, and the author folders' reads together by budget, in an
+// order picked at random each walk, so a walk cut short reaches others next
 // time; the first read that doesn't answer ends the walk of this library. A
 // symlink is never followed (its entry isn't a folder).
 func strayCandidates(mount string, budget time.Duration) []stray {
@@ -379,7 +379,11 @@ func (h *Handler) sweepStray(mount string, lib int64, s stray, now time.Time, he
 	case <-done:
 		return true
 	case <-t.C:
-		release()
+		if !released.CompareAndSwap(false, true) {
+			<-done // the look and removal ended as the wait did: not a hang
+			return true
+		}
+		h.endProject(s.id)
 		h.o.Log.Warn("librivox: a library stopped answering at a stray staging folder; its others wait for the next walk",
 			"library", lib, "path", s.rel)
 		return false
@@ -473,8 +477,9 @@ func (h *Handler) clearStray(mount string, lib int64, rel string, now time.Time,
 	}
 	if failed == nil {
 		// The folder itself goes by its name in the library, so only while that
-		// name is still it (and only empty).
-		if stopped.Load() || !sameFolder(root, rel, dir) {
+		// name is still it (and only empty), and not once stopped meanwhile
+		// (asked after the look, which a hung mount may hold past the wait).
+		if !sameFolder(root, rel, dir) || stopped.Load() {
 			return
 		}
 		failed = root.Remove(rel)

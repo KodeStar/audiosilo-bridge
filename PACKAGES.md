@@ -4032,7 +4032,7 @@ internal/
             day (strayWalkEvery) sweepStrays looks in every checked writable
             books library's root and author folders (each folder read bounded,
             fsutil.ReadDirWithin, the author folders' reads together by
-            strayWalkTime, 2 min, from one picked at random) for folders named exactly
+            strayWalkTime, 2 min, in a random order each walk) for folders named exactly
             .audiosilo-librivox-<id> of a project no state in any library, run
             or held job knows (projectKnown), holding only what a fetch writes
             there (stagingContents: "NN - title.ext" sections and their .part,
