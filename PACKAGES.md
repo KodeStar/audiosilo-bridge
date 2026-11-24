@@ -2614,6 +2614,19 @@ internal/
             ProgressEvery, a keepalive otherwise), so a handler never waits on the
             network. Cancel is the page's own cancel. LocalReporter is a
             send-nothing Reporter for handler tests.
+            PROGRESS CODES (server#224): a handler names a fixed sentence by its
+            code (Progress.Code, a Say* constant in phrases.go, with Params for its
+            {{placeholders}}), sent as message_code + message_params beside the
+            English message (Text: Message, else the phrase filled in; the
+            reporter records it filled). The server console words the code in the
+            admin's language (bridge.progress.<code>) and shows message for a code
+            it doesn't know, and an older console shows message as before. Codes
+            are wire: never rename or reuse one; a new sentence gets a new code and
+            the console a locale key (testdata/phrases.json pins the shipped
+            codes and their English, TestPhrasesShipped). Free text (an engine
+            stage's label, a park reason built from an error) goes uncoded in
+            Message. LibraryNotWritable gives library_not_writable's params and
+            the park reason it words, for audiblejob's and librivoxjob's parks.
             Phase 1a: PARK/UNPARK. Reporter.Park(code, msg) reports the job
             needs_attention with msg as its error while it KEEPS RUNNING here (the
             server drops a parked job's lease, as needs_attention has none, and renews
@@ -2627,9 +2640,11 @@ internal/
             never reports running between two parks. The same progress again changes
             nothing (DeepEqual), so a handler may report on every poll. Progress.Extra
             is a kind's own fields (sidecars.generate's stage, eta_seconds, cost_usd,
-            source, park), marshalled FLAT beside step/message/done/total (those four
-            win over an Extra key of the same name); an object over the server's 16
-            KiB is sent without Extra rather than refused for good. Reporter.Path()
+            source, park), marshalled FLAT beside step/message/message_code/
+            message_params/done/total (those win over an Extra key of the same
+            name); an object over the server's 16 KiB is sent without Extra (and
+            without message_params when they alone take it over: a param is never
+            clipped) rather than refused for good. Reporter.Path()
             is the job's path as the server's last answer gave it ("" until one did):
             the server moves an open job with its book. SERVER IDENTITY, THE ONE
             RULE (BR-LINK-RULE; it replaced three: AskShareOff by address,

@@ -541,7 +541,7 @@ func (h *Handler) finishReadalong(ctx context.Context, r *run, b store.Book) (an
 		what:     "the read-along",
 		wait:     true,
 		record:   true,
-		progress: jobs.Progress{Step: stepWriting, Message: "Saving the read-along with the book", Extra: extra},
+		progress: jobs.Progress{Step: stepWriting, Code: jobs.SaySavingReadalong, Extra: extra},
 		files: func(place) ([]attachFile, error) {
 			return []attachFile{{readalongName, raw}}, nil
 		},
@@ -550,7 +550,7 @@ func (h *Handler) finishReadalong(ctx context.Context, r *run, b store.Book) (an
 		return nil, err
 	}
 	h.o.Log.Info("readalong: wrote the book's read-along", "job", r.job.ID, "path", r.rel, "coverage", m.Coverage.Text)
-	r.rep.Progress(jobs.Progress{Step: stepRescanning, Message: "Asking the server to read it", Extra: extra})
+	r.rep.Progress(jobs.Progress{Step: stepRescanning, Code: jobs.SayRescanIt, Extra: extra})
 	h.rescan(ctx, r)
 	res := ReadalongResult{LibraryID: r.lib.ID, Path: r.rel, File: r.place.prefix + readalongName, Coverage: m.Coverage,
 		Sections: len(m.Sections), Spans: m.Spans(), AudioGaps: len(m.AudioGaps), EbookSHA256: m.Ebook.SHA256,
@@ -559,7 +559,7 @@ func (h *Handler) finishReadalong(ctx context.Context, r *run, b store.Book) (an
 		res.HealWindows = rep.HealWindows
 	}
 	h.doneJobs.Add(1)
-	r.rep.Progress(jobs.Progress{Step: string(state.Done), Message: "Finished", Done: 1, Total: 1, Extra: extra})
+	r.rep.Progress(jobs.Progress{Step: string(state.Done), Code: jobs.SayFinished, Done: 1, Total: 1, Extra: extra})
 	return res, nil
 }
 

@@ -500,7 +500,7 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 	for _, x := range list {
 		pushes[x.ASIN] = x
 	}
-	rep.Progress(jobs.Progress{Step: "audible", Message: "Reading the places on Audible", Total: len(asins)})
+	rep.Progress(jobs.Progress{Step: "audible", Code: jobs.SayReadingAudiblePlaces, Total: len(asins)})
 	// In a new order every sync: a read Audible stops partway (a rate limit
 	// after so many batches) keeps the places it got (below), so over a few
 	// syncs every title is read, not only the ones listed first (bridge#50).
@@ -569,7 +569,7 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 		}
 	}
 
-	rep.Progress(jobs.Progress{Step: "server", Message: "Sending the places to the server", Total: len(events)})
+	rep.Progress(jobs.Progress{Step: "server", Code: jobs.SaySendingPlaces, Total: len(events)})
 	for start := 0; start < len(events); start += link.MaxAudibleEvents {
 		batch := events[start:min(start+link.MaxAudibleEvents, len(events))]
 		ans, err := srv.PostAudibleListening(ctx, acct.ID, link.AudibleListening{SentAt: h.o.Now().UTC().Format(time.RFC3339), Events: batch})
@@ -629,7 +629,7 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 				h.reassert(ctx, acct.ID, x, res)
 			}
 		}
-		rep.Progress(jobs.Progress{Step: "server", Message: "Sending the places to the server", Done: res.Sent, Total: len(events)})
+		rep.Progress(jobs.Progress{Step: "server", Code: jobs.SaySendingPlaces, Done: res.Sent, Total: len(events)})
 	}
 	if res.Mismatched > 0 {
 		h.o.Log.Warn("audible: the server's books for some titles are another length than on Audible, so their matches look wrong; not synced",

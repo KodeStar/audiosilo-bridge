@@ -333,12 +333,12 @@ func (e *importEnv) parks() []string {
 	return out
 }
 
-// said reports whether a progress of the job said msg.
-func (e *importEnv) said(msg string) bool {
+// said reports whether a progress of the job said the phrase code.
+func (e *importEnv) said(code string) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for _, p := range e.progress {
-		if strings.Contains(p.Message, msg) {
+		if p.Code == code {
 			return true
 		}
 	}
@@ -1197,7 +1197,7 @@ func TestImportOnePerAccount(t *testing.T) {
 	progress := e.opts.onProgress
 	e.opts.onProgress = func(p jobs.Progress) {
 		progress(p)
-		if strings.Contains(p.Message, "other backup") {
+		if p.Code == jobs.SayAccountBackupWait {
 			once.Do(func() { close(waiting) })
 		}
 	}
@@ -1428,7 +1428,7 @@ func TestImportWaitsForTheMappingCheck(t *testing.T) {
 			if _, err := e.run(context.Background(), e.params(nil)); err != nil {
 				t.Fatal(err)
 			}
-			if !e.said("Waiting for the library's mapping check") || len(e.parks()) != 0 {
+			if !e.said(jobs.SayMappingWait) || len(e.parks()) != 0 {
 				t.Fatalf("parks %v", e.parks())
 			}
 		})
@@ -1926,7 +1926,7 @@ func TestImportGateYieldsOnlyForAHolderThatYielded(t *testing.T) {
 	progress := e.opts.onProgress
 	e.opts.onProgress = func(p jobs.Progress) {
 		progress(p)
-		if strings.Contains(p.Message, "other backup") {
+		if p.Code == jobs.SayAccountBackupWait {
 			waitOnce.Do(func() { close(waiting) })
 		}
 	}

@@ -52,7 +52,7 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 		return nil, err
 	}
 	show := *job.Path
-	rep.Progress(jobs.Progress{Step: "retaining", Message: "Checking retained episodes"})
+	rep.Progress(jobs.Progress{Step: "retaining", Code: jobs.SayCheckingRetained})
 	srv, ok := s.o.Server().(RetentionServer)
 	if !ok {
 		return nil, fail("bridge_lost", "The retention policy could not be verified.")
