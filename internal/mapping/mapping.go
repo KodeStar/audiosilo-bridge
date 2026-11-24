@@ -38,7 +38,7 @@ import (
 
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
-	"github.com/kodestar/audiosilo-bridge/internal/netguard"
+	"github.com/kodestar/audiosilo-bridge/internal/timeutil"
 )
 
 // MaxFilesChecked bounds how many of the sample book's files are stat-ed.
@@ -827,7 +827,7 @@ type pacer struct {
 // wait waits out the spacing since the run's last read, or ctx's error.
 func (p *pacer) wait(ctx context.Context) error {
 	if !p.last.IsZero() {
-		if err := netguard.Wait(ctx, time.Until(p.last.Add(p.spacing))); err != nil {
+		if err := timeutil.SleepCtx(ctx, time.Until(p.last.Add(p.spacing))); err != nil {
 			return err
 		}
 	}

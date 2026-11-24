@@ -29,6 +29,7 @@ import (
 
 	"github.com/kodestar/audiosilo-bridge/internal/agent"
 	"github.com/kodestar/audiosilo-bridge/internal/agentproto"
+	"github.com/kodestar/audiosilo-bridge/internal/timeutil"
 )
 
 // RetryAfter is how long a book parked on the agent container waits before it
@@ -495,10 +496,8 @@ func (r *Runner) deniedHere(ctx context.Context, root *os.Root, runner int64) bo
 	if !agentproto.Exists(root, credential) || !claimedBy(root, runner) {
 		return false
 	}
-	select {
-	case <-ctx.Done():
+	if timeutil.SleepCtx(ctx, r.takeFor) != nil {
 		return false
-	case <-time.After(r.takeFor):
 	}
 	return agentproto.Exists(root, credential)
 }

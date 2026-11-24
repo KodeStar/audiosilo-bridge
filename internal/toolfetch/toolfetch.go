@@ -49,6 +49,8 @@ import (
 	"time"
 
 	"github.com/ulikunitz/xz"
+
+	"github.com/kodestar/audiosilo-bridge/internal/timeutil"
 )
 
 // maxToolBytes caps a single extracted binary and the compressed download itself
@@ -244,12 +246,8 @@ func runSelfCheck(ctx context.Context, path string, args []string, timeout time.
 		if err == nil {
 			return nil
 		}
-		if i < len(busyRetries) && errors.Is(err, syscall.ETXTBSY) {
-			select {
-			case <-time.After(busyRetries[i]):
-				continue
-			case <-cctx.Done():
-			}
+		if i < len(busyRetries) && errors.Is(err, syscall.ETXTBSY) && timeutil.SleepCtx(cctx, busyRetries[i]) == nil {
+			continue
 		}
 		log.Warn("downloaded tool failed its self-check; discarding", "path", path, "err", err)
 		return err

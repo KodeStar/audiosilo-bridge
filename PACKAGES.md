@@ -157,8 +157,9 @@ internal/
             holds the fork lock: every fork in the process would wait for it.
   timeutil/ SleepCtx waits for a duration or context cancellation. Audible,
             agent and pipeline retries, generate, GitHub sign-in, the job
-            runner and worker use it. netguard.Wait delegates to it. link.Wait
-            checks cancellation first, including for a zero delay.
+            runner and worker, verify, the scheduler, agentbox, toolfetch,
+            netguard, mapping and the podcast and LibriVox jobs use it.
+            link.Wait checks cancellation first, including for a zero delay.
             RetryAfter reads seconds or an HTTP date and caps either at 24 h.
             The server link accepts digits only and caps oversized digit strings.
             Audible and feed requests also accept a leading plus and require

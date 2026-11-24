@@ -47,11 +47,6 @@ type Response struct {
 	CacheControl string
 }
 
-// Wait sleeps for d unless ctx ends first.
-func Wait(ctx context.Context, d time.Duration) error {
-	return timeutil.SleepCtx(ctx, d)
-}
-
 // Fetch retries only transient failures, enforcing the limit on decoded bytes.
 func (c *Client) Fetch(ctx context.Context, in Request) (*Response, error) {
 	if !validURL(in.URL) {

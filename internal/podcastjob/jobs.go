@@ -24,6 +24,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/podcast"
 	"github.com/kodestar/audiosilo-bridge/internal/secrets"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
+	"github.com/kodestar/audiosilo-bridge/internal/timeutil"
 )
 
 const SubscribeKind = "podcast.subscribe"
@@ -186,7 +187,7 @@ func New(o Options) *Subscribe {
 		o.MaxEpisodeBytes = 1024 << 20
 	}
 	if o.Wait == nil {
-		o.Wait = netguard.Wait
+		o.Wait = timeutil.SleepCtx
 	}
 	if o.Probe == nil {
 		o.Probe = LocalProbe("ffprobe")
@@ -373,7 +374,7 @@ func (s *service) libraryFor(ctx context.Context, slot bool, job jobs.Job, rep *
 		if slot {
 			s.yieldSlot(rep, lib, err)
 		}
-		if err := netguard.Wait(ctx, s.o.CheckPoll); err != nil {
+		if err := timeutil.SleepCtx(ctx, s.o.CheckPoll); err != nil {
 			return lib, "", err
 		}
 	}
@@ -542,7 +543,7 @@ func (s *service) writeDecided(ctx context.Context, slot *jobs.Reporter, lib lin
 			slot.Progress(waitingFor(err))
 			s.yieldSlot(slot, lib, err)
 		}
-		if err := netguard.Wait(wait, s.o.CheckPoll); err != nil {
+		if err := timeutil.SleepCtx(wait, s.o.CheckPoll); err != nil {
 			return err
 		}
 	}
@@ -581,7 +582,7 @@ func (s *service) lockForWrite(ctx context.Context, slot *jobs.Reporter, key str
 		if !undecided(err) {
 			return nil, err
 		}
-		if err := netguard.Wait(ctx, s.o.CheckPoll); err != nil {
+		if err := timeutil.SleepCtx(ctx, s.o.CheckPoll); err != nil {
 			return nil, err
 		}
 	}
@@ -1194,7 +1195,7 @@ func (s *service) lockShowToWrite(ctx context.Context, root *os.Root, lib link.L
 		}
 		show = at // lockShow still finds the show elsewhere if at lost it
 		if again {
-			if err := netguard.Wait(ctx, s.o.CheckPoll); err != nil {
+			if err := timeutil.SleepCtx(ctx, s.o.CheckPoll); err != nil {
 				return "", nil, nil, err
 			}
 		}

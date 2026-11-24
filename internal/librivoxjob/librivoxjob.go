@@ -27,6 +27,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/mapping"
 	"github.com/kodestar/audiosilo-bridge/internal/metaops"
 	"github.com/kodestar/audiosilo-bridge/internal/netguard"
+	"github.com/kodestar/audiosilo-bridge/internal/timeutil"
 	"github.com/kodestar/audiosilo-bridge/internal/transfer"
 )
 
@@ -214,7 +215,7 @@ func New(o Options) *Handler {
 		o.Free = fsutil.FreeBytes
 	}
 	if o.Wait == nil {
-		o.Wait = netguard.Wait
+		o.Wait = timeutil.SleepCtx
 	}
 	if o.ServerID == nil {
 		o.ServerID = func() string { return "" }
@@ -1021,7 +1022,9 @@ func (h *Handler) recheck(ctx context.Context, f *fetch, step string) error {
 	return nil
 }
 
-// mapped waits for this job's library and download slot under its claim's pairing.
+// mapped waits for this job's library and download slot under its claim's
+// pairing (transfer.MappingWait.Mapped). A run whose pairing ended returns
+// errPairingGone, its own staging folder and state removed on the way out (bridge#71).
 func (h *Handler) mapped(ctx context.Context, job jobs.Job, id int64, rep *jobs.Reporter, step string, strict bool) (link.Library, string, error) {
 	w := transfer.MappingWait{
 		Libraries: h.o.Libraries, Mount: h.o.Mount, Pairing: h.o.Pairing, PairingGone: errPairingGone,

@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"syscall"
 	"time"
+
+	"github.com/kodestar/audiosilo-bridge/internal/timeutil"
 )
 
 var ErrBlocked = errors.New("the feed address is not public or explicitly allowed")
@@ -51,7 +53,7 @@ func New(opts Options) *Client {
 	if opts.Version == "" {
 		opts.Version = "dev"
 	}
-	c := &Client{resolver: opts.Resolver, allow: append([]netip.Prefix(nil), opts.AllowNetworks...), version: opts.Version, stall: 30 * time.Second, wait: Wait}
+	c := &Client{resolver: opts.Resolver, allow: append([]netip.Prefix(nil), opts.AllowNetworks...), version: opts.Version, stall: 30 * time.Second, wait: timeutil.SleepCtx}
 	c.transport = &http.Transport{Proxy: nil, DialContext: c.dial, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 15 * time.Second, DisableCompression: true, MaxIdleConns: 10, IdleConnTimeout: 30 * time.Second}
 	return c
 }
