@@ -129,17 +129,28 @@ func Link[S any](job Job, srv S) S {
 		return srv
 	}
 	l, ok := any(srv).(interface{ ServerID() string })
-	if !ok || l.ServerID() != job.serverID {
+	if !ok {
 		var none S
 		return none
 	}
-	if job.pairing != "" {
-		if p, ok := any(srv).(interface{ PairingID() string }); !ok || p.PairingID() != job.pairing {
-			var none S
-			return none
-		}
+	at := Pairing{ServerID: l.ServerID()}
+	if p, ok := any(srv).(interface{ PairingID() string }); ok {
+		at.ID = p.PairingID()
+	}
+	if !job.Under(at) {
+		var none S
+		return none
 	}
 	return srv
+}
+
+// Under reports whether p (a pairing: the Bridge's now, or a link's) is the
+// one job was claimed under: the same server and, when the job was claimed
+// under a pairing, the same pairing. Always so for a job no runner claimed.
+// It is Link's rule for a caller that holds a Pairing rather than a link (a
+// token the server refuses meanwhile changes neither).
+func (j Job) Under(p Pairing) bool {
+	return j.serverID == "" || p.ServerID == j.serverID && (j.pairing == "" || p.ID == j.pairing)
 }
 
 // Handler runs one job kind.

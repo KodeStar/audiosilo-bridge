@@ -2748,7 +2748,9 @@ internal/
             through service.forJob, librivox's state, audible's account checks),
             and take the server's link only while it reaches that server under
             the job's pairing (jobs.Link: generate, verify, podcastjob, librivox,
-            audible), so a job of a server the Bridge is no longer paired with,
+            audible; Job.Under is the same rule against a Pairing value, for a
+            handler that holds the Bridge's pairing rather than a link: librivox),
+            so a job of a server the Bridge is no longer paired with,
             or of a pairing ended since, writes nothing under, files nothing for
             and sends nothing to the new one. ABANDONER: a handler whose jobs
             hold work beyond Run (generate's engine book) implements Abandon(ctx,
@@ -4052,7 +4054,7 @@ internal/
             so a fetch of it runs rather than failing as already running.
             Pairing (bridge#71): a run writes to the library only while the
             Bridge is still paired as when it claimed the job (stillPaired,
-            Options.Pairing: the same server and pairing; a refused token ends
+            Job.Under(Options.Pairing()): the same server and pairing; a refused token ends
             neither), looked at before the first write and in every mapping
             look (mapped, so before each section, the cover and the rename, and
             while parked); once not, it ends with its staging folder and state

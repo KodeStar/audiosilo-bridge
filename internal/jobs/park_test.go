@@ -1651,4 +1651,13 @@ func TestLinkOnlyReachesTheJobsServer(t *testing.T) {
 	if Link[Server](paired, again) != nil {
 		t.Fatal("a new pairing's link was handed to an earlier pairing's job")
 	}
+	// Under is the same rule against a pairing held as a value.
+	if !paired.Under(Pairing{ID: "p1", ServerID: "a"}) || !(Job{}).Under(Pairing{}) || !job.Under(Pairing{ID: "p9", ServerID: "a"}) {
+		t.Fatal("the job's own pairing (or a job no runner claimed) isn't under it")
+	}
+	for _, p := range []Pairing{{}, {ID: "p2", ServerID: "a"}, {ID: "p1", ServerID: "b"}} {
+		if paired.Under(p) {
+			t.Fatalf("an earlier pairing's job is under %+v", p)
+		}
+	}
 }

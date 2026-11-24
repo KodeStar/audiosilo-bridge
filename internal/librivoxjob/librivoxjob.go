@@ -324,17 +324,10 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 }
 
 // stillPaired reports whether the Bridge is still paired as when it claimed
-// job: the same server and the same pairing (Options.Pairing; a token the
-// server refuses meanwhile ends neither), as jobs.Link has it. Always so for
-// a job no runner claimed. The mapping registry lists the libraries of the
-// pairing now, so a run writes to a library only while this holds.
-func (h *Handler) stillPaired(job jobs.Job) bool {
-	if job.ServerID() == "" {
-		return true
-	}
-	p := h.o.Pairing()
-	return p.ServerID == job.ServerID() && (job.Pairing() == "" || p.ID == job.Pairing())
-}
+// job (jobs.Job.Under, Options.Pairing; a token the server refuses meanwhile
+// ends neither). The mapping registry lists the libraries of the pairing now,
+// so a run writes to a library only while this holds.
+func (h *Handler) stillPaired(job jobs.Job) bool { return job.Under(h.o.Pairing()) }
 
 // errPairingGone ends a run whose pairing ended under it (stillPaired).
 var errPairingGone = errors.New("the Bridge's pairing that claimed this fetch has ended, so it writes nothing more to the library")
