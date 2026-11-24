@@ -605,12 +605,46 @@ func TestPositionlessPack(t *testing.T) {
 		{"equally good packs", "Iron Vale Box Set", "", []link.LibraryBook{later, first}, ""},
 		{"stated single position", "Iron Vale Box Set", "1", []link.LibraryBook{first}, ""},
 		{"other series by same author", "Iron Vale Box Set", "", []link.LibraryBook{{Path: "other", Title: "North Wind Box Set", Authors: one.Authors, Series: series("North Wind", "1-3")}}, ""},
+		// One pack listed under two spellings of its series scores alike under
+		// each: that is one book, not a tie between two.
+		{"pack under two spellings of its series", "Iron Vale Box Set", "", []link.LibraryBook{{Path: "both", Title: name, Authors: one.Authors,
+			Series: []link.SeriesRef{{Name: name, Position: "1-3"}, {Name: "The Iron Vale Series", Position: "1-3"}}}}, "both"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := audibleRec("B0SYN00081", tc.title, "Ona Fell", name, tc.pos)
 			got, ok := MatchInBooks(tc.books, rec)
 			if got.Path != tc.want || ok != (tc.want != "") {
 				t.Fatalf("matched %q (%v), want %q", got.Path, ok, tc.want)
+			}
+		})
+	}
+}
+
+// A store can leave a collection label off a title ("Four" for "Four: A
+// Divergent Collection"): a single volume claims a book labeled as a pack only
+// when nothing scores better, never when it is the series-named opening
+// volume, and never takes its ASIN (SpanMismatch).
+func TestLabeledPackOverride(t *testing.T) {
+	four := link.LibraryBook{Path: "Roth/Divergent/Four", Title: "Four: A Divergent Collection", Authors: []string{"Vera Roth"}, Series: series("Divergent", "")}
+	box := link.LibraryBook{Path: "Roth/Divergent/Divergent Box Set", Title: "Divergent Box Set", Authors: four.Authors, Series: series("Divergent", "")}
+	opener := link.LibraryBook{Path: "Roth/Divergent/Divergent", Title: "Divergent", Authors: four.Authors, Series: series("Divergent", "1")}
+	for _, tc := range []struct {
+		name, title, pos string
+		books            []link.LibraryBook
+		want             string
+	}{
+		{"label left off the title", "Four", "", []link.LibraryBook{four}, four.Path},
+		{"series-named opener", "Divergent", "1", []link.LibraryBook{box}, ""},
+		{"opener beside its own volume", "Divergent", "1", []link.LibraryBook{box, opener}, opener.Path},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := audibleRec("B0SYN00091", tc.title, "Vera Roth", "Divergent", tc.pos)
+			got, ok := MatchInBooks(tc.books, rec)
+			if got.Path != tc.want || ok != (tc.want != "") {
+				t.Fatalf("matched %q (%v), want %q", got.Path, ok, tc.want)
+			}
+			if ok && got.Path == four.Path && !SpanMismatch(rec, got) {
+				t.Fatalf("a single volume on a labeled pack may take its ASIN")
 			}
 		})
 	}
