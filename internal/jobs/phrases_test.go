@@ -135,8 +135,10 @@ func TestProgressCodeOnTheWire(t *testing.T) {
 	params := map[string]any{"library": "Books"}
 	for _, extra := range []map[string]any{nil, {"message_code": "x", "message_params": "y", "park": map[string]any{"code": "not_writable"}}} {
 		got := read(Progress{Step: "place", Code: SayLibraryNotWritable, Params: params, Extra: extra})
-		if got["message_code"] != SayLibraryNotWritable || got["message_params"].(map[string]any)["library"] != "Books" ||
-			!strings.HasPrefix(got["message"].(string), "Needs attention: Library Books must be mapped") {
+		sent, _ := got["message_params"].(map[string]any)
+		msg, _ := got["message"].(string)
+		if got["message_code"] != SayLibraryNotWritable || sent["library"] != "Books" ||
+			!strings.HasPrefix(msg, "Needs attention: Library Books must be mapped") {
 			t.Fatalf("extra %v: %v", extra, got)
 		}
 	}
