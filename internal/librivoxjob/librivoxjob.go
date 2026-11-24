@@ -335,11 +335,8 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 // so a run writes to a library only while this holds.
 func (h *Handler) stillPaired(job jobs.Job) bool { return job.Under(h.o.Pairing()) }
 
-// errPairingGone ends a run whose pairing ended under it (stillPaired). The
-// run writes nothing more to the library; on the way out it removes its own
-// staging folder, through the mount it took at the claim, and its state, so
-// nothing is left for a sweep that, paired with another server, could not
-// find them (a claim of the job under the next pairing starts clean).
+// errPairingGone ends a run whose pairing ended under it (stillPaired): it
+// writes nothing more, and run's defer removes its own staging and state.
 var errPairingGone = errors.New("the Bridge's pairing that claimed this fetch has ended, so it writes nothing more to the library")
 
 // key is one fetch's state: a library and a project.
@@ -450,22 +447,22 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, p Params, rep *jobs.Rep
 		h.touchState(lib.ID, p.LibrivoxID, time.Now())
 	}
 	defer func() {
-		// A stop the next start resumes, and a lost claim the server hands out
-		// again, keep the staging folder and the state; a cancel or a failure
-		// before the book was placed removes both, and so does a run whose
-		// pairing ended (errPairingGone, or the job dropped: an unpair, a
-		// pairing with another server), however it failed: its staging folder
-		// is removed through f.mount, the mount it took at the claim, and
-		// nothing else is written. A placed book stays, and its state with it
-		// when the rescan failed (the retry goes on from there).
+		// While the pairing stands, a stop the next start resumes, a lost
+		// claim the server hands out again and a keepStaging failure keep the
+		// staging folder and the state; a cancel or another failure before the
+		// book was placed removes both. A run whose pairing ended
+		// (errPairingGone, or the job dropped) removes both however it ended,
+		// through f.mount, the mount it took at the claim: a sweep paired with
+		// another server could find neither, and the next pairing's claim
+		// starts clean. A placed book stays, and its state with it when the
+		// rescan failed (the retry goes on from there).
 		if err == nil || f.st == nil || f.st.Placed {
 			return
 		}
-		if h.stillPaired(job) {
-			var keep *keepStaging
-			if errors.As(err, &keep) || ctx.Err() != nil && (jobs.Resumes(ctx) || jobs.Lost(ctx)) {
-				return
-			}
+		var ks *keepStaging
+		resumable := errors.As(err, &ks) || (ctx.Err() != nil && (jobs.Resumes(ctx) || jobs.Lost(ctx)))
+		if resumable && h.stillPaired(job) {
+			return
 		}
 		// A folder that can't be removed now (a cancel while the mount is
 		// away) keeps its state, for the sweep.
