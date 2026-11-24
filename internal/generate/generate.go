@@ -1212,8 +1212,8 @@ func (h *Handler) compareFiles(ctx context.Context, r *run, files []link.BookFil
 }
 
 // folderWait waits Poll (or for a Retry) before looking again at a folder that
-// didn't answer a look in time, reporting the wait as phrase say unless the job
-// is parked on a reason of the Bridge's own (its message stays). The mapping is
+// didn't answer a look in time, reporting the wait as the phrase code say unless
+// the job is parked on a reason of the Bridge's own (its message stays). The mapping is
 // read again after each wait: a library mapped to another folder meanwhile
 // ends it (errRemapped).
 func (h *Handler) folderWait(ctx context.Context, r *run, say string) error {
