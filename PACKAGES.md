@@ -4024,8 +4024,9 @@ internal/
             state (Unmapped, forgotten when a run finds it mapped again) and
             ends StagingMaxAge later, its staging folder left in place (bridge#65:
             "gone" needs a definite look: a check that failed to look at the
-            folder, a share not mounted now, isn't gone unless no mapping is
-            configured for the library any more; the time is forgotten once a
+            folder, or found it empty (a share not mounted now leaves an empty
+            mount point), isn't gone unless no mapping is configured for the
+            library any more; the time is forgotten once a
             check finds the library mapped again, writable or not, the state
             keeping its age); once a
             day (strayWalkEvery) sweepStrays looks in every checked writable

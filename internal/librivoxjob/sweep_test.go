@@ -884,7 +884,8 @@ func (b bookErr) Book(context.Context, int64, string) (*link.Book, error) { retu
 // The "mapping gone" timer starts only on a definite "not mapped": a check the
 // server didn't answer leaves the library's state unknown (the registry's
 // Status false), which isn't gone (denied), while the server's own "no indexed
-// book" is (allowed).
+// book" at a folder holding something is (allowed). An empty folder, which is
+// what a share not mounted leaves at its mount point, isn't (denied).
 func TestMappingGoneNeedsADefiniteAnswer(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -895,6 +896,16 @@ func TestMappingGoneNeedsADefiniteAnswer(t *testing.T) {
 	reg.Check(context.Background(), bookErr{&link.APIError{Status: 429}}, mount, time.Now)
 	if h.mappingGone(1) {
 		t.Fatal("denied: a check the server didn't answer counts as the mapping gone")
+	}
+	reg.Check(context.Background(), bookErr{link.ErrNoBook}, mount, time.Now)
+	if st, checked := reg.Status(1); !checked || st.Mapped {
+		t.Fatalf("the empty folder's check = %+v, %v; want a standing unmapped", st, checked)
+	}
+	if h.mappingGone(1) {
+		t.Fatal("denied: an empty folder (an unmounted share's mount point) counts as the mapping gone")
+	}
+	if err := os.WriteFile(filepath.Join(root, "other.txt"), nil, 0o600); err != nil {
+		t.Fatal(err)
 	}
 	reg.Check(context.Background(), bookErr{link.ErrNoBook}, mount, time.Now)
 	if !h.mappingGone(1) {

@@ -3,6 +3,7 @@ package librivoxjob
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"math/rand/v2"
 	"os"
@@ -129,9 +130,10 @@ func (h *Handler) sweepOne(k key, now time.Time) {
 			h.endUnmapped(k, st, now)
 			return
 		}
-		h.forgetUnmapped(k, st, info.ModTime())
 		if !ok || !h.removeStaging(mount, k.id, st) {
-			return // the state stays, so a later sweep finds the folder again
+			// The state stays, so a later sweep finds the folder again.
+			h.forgetUnmapped(k, st, info.ModTime())
+			return
 		}
 	}
 	h.o.Log.Info("librivox: swept an abandoned fetch", "library", k.lib, "librivox_id", k.id, "placed", st.Placed)
@@ -141,12 +143,13 @@ func (h *Handler) sweepOne(k key, now time.Time) {
 // mappingGone reports whether library id's mapping is gone: the server no
 // longer lists the library, or its last check found it unmapped here with a
 // definite look, at the mount the library has now: no mapping is configured
-// for it here any more, or its folder answers and isn't the library's. A
-// library that is mapped (writable or not), not checked yet, whose state no
-// answered check backs (the registry's Status false: a check the server
-// didn't answer, a state too old), or whose check failed to look at its
-// folder (missing, unreadable, not answering: a share not mounted now), isn't
-// gone (bridge#65).
+// for it here any more, or its folder answers, holds something and isn't the
+// library's. A library that is mapped (writable or not), not checked yet,
+// whose state no answered check backs (the registry's Status false: a check
+// the server didn't answer, a state too old), or whose folder doesn't show
+// it is there (missing, unreadable, not answering, or empty: a share not
+// mounted now leaves an empty folder at its mount point, as mapping's
+// proveKept says), isn't gone (bridge#65).
 func (h *Handler) mappingGone(id int64) bool {
 	lib, ok := h.o.Libraries.Library(id)
 	if !ok {
@@ -163,8 +166,24 @@ func (h *Handler) mappingGone(id int64) bool {
 	case mount != st.MountPath:
 		return false // the check was of another folder
 	}
-	info, err := fsutil.StatWithin(mount, mapping.LookTimeout)
-	return err == nil && info.IsDir()
+	held, err := fsutil.LookWithin("librivox-holds", mount, mapping.LookTimeout, holdsAnything)
+	return err == nil && held
+}
+
+// holdsAnything reports whether the folder dir lists at least one entry
+// (reading no more than one); a file there is an error, as is a folder that
+// can't be read.
+func holdsAnything(dir string) (bool, error) {
+	f, err := os.Open(dir) //nolint:gosec // G304: a library's mount, only listed
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = f.Close() }()
+	names, err := f.Readdirnames(1)
+	if errors.Is(err, io.EOF) {
+		return false, nil
+	}
+	return len(names) > 0, err
 }
 
 // forgetUnmapped clears the time an unplaced fetch's library was found
