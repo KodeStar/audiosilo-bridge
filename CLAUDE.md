@@ -148,6 +148,7 @@ internal/
   -- the engine (from audiosilo-sidecars; app/engine.go runs it) --
   toolfetch/ audio/ asr/ transcript/ ebook/ scratch/ qa/ spelling/ agent/ repair/
   pipeline/ contrib/ state/ eta/ scheduler/ supervisor/ metaops/ events/ pricing/ fsutil/
+  timeutil/ context-aware sleeps and Retry-After parsing
   execfile/ (fork-safe executable writes, a leaf; the tests' fake tools)
   testwait/ (tests only, a leaf: Race and Scaled, a failed test's deadline x4 under -race)
   chapterdetect/ (Phase 1d: chapters from the narration; pure, imported by pipeline)
@@ -172,8 +173,8 @@ internal/
               feed, the sections from archive.org only (https, every redirect checked)
               into a staging folder, Author/Title/NN - Section.mp3 + cover.jpg +
               .audiosilo/librivox.json by one no-replace rename, rescan
-  transfer/   Local.Place: SafeJoin + os.Root, free-space check, no-replace install
-  placement/ source/ progress/  (the manager's; source trimmed to Record in 4b)
+  transfer/   book download staging, mapping and lane waits, no-replace file install
+  placement/ source/ progress/  (the manager's metadata, series position and progress helpers)
 web/          the page: Vite + React 19 + TS + Tailwind v4; pure logic in src/lib
 docker/       entrypoint.sh (own /bridge-data, umask 022, drop to PUID:PGID)
 Dockerfile    slim | cuda | agent | full; compose.example.yaml: server, bridge, agent
@@ -189,16 +190,16 @@ the password), with types from jobs/link/mapping/store/logring/endpoint; `verify
 jobs, link, mapping}`; `generate -> {jobs, link, mapping, store, scheduler, pipeline, ...}`
 through its own Engine/Server interfaces; `podcastjob -> {fsutil, jobs, link, mapping, netguard, podcast, secrets, store}`;
 `podcast -> {fsutil, gofeed, x/net/html, x/text}`; `logring -> podcast`;
-`audible -> {progress, source}` (its tagged build also `audiblefake`, which never
+`audible -> {progress, source, timeutil}` (its tagged build also `audiblefake`, which never
 imports `audible`); `importjob -> {link, placement, source,
 audiosilo-server/pkg/match}`; `audibleacct -> {audible, link, secrets, source, store}`;
 `audiblejob -> {audible, audibleacct, fsutil, importjob, jobs, link, mapping, placement,
 source, store, transfer}` (app wires both); `librivoxjob -> {fsutil, importjob, jobs, link,
-mapping, metaops, netguard, placement, transfer, audiosilo-server/pkg/match}`; `audiblesync -> {audible, audibleacct, jobs, link, store}`; `transfer -> {fsutil, mapping, progress}`;
-`jobs -> {link, store}`; `mapping -> {fsutil, link}`;
-`link`, `agentproto`, `endpoint` and `workerproto` are leaves; `config -> {agent,
+mapping, metaops, netguard, placement, transfer, audiosilo-server/pkg/match}`; `audiblesync -> {audible, audibleacct, jobs, link, store}`; `transfer -> {fsutil, jobs, link, mapping, progress}`;
+`jobs -> {link, store, timeutil}`; `mapping -> {fsutil, link}`;
+`link -> timeutil`; `timeutil`, `agentproto`, `endpoint` and `workerproto` are leaves; `config -> {agent,
 agentproto, fsutil, ghauth, pricing, state}`; `workers -> {asr, fsutil,
-scheduler, state, store, transcript, workerproto}`; `worker -> {asr, fsutil, workerproto}`
+scheduler, state, store, transcript, workerproto}`; `worker -> {asr, fsutil, timeutil, workerproto}`
 (never `workers`; its tests drive the real `api` + `workers` in-process); `api`
 reaches the hub through its own `WorkerHub` interface and `workerproto`, and
 serves `workerdist` (a leaf); `agentbox` and `agentrun` each import only

@@ -24,6 +24,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/kodestar/audiosilo-bridge/internal/timeutil"
 )
 
 // ClientHeader names the Bridge on every request (CROSS-REPO.md §20).
@@ -743,7 +745,7 @@ func (c *Client) attempt(ctx context.Context, method string, u *url.URL, payload
 	err = answerError(resp.StatusCode, raw)
 	var ae *APIError
 	if errors.As(err, &ae) {
-		ae.RetryAfter, ae.RetryAfterSet = retryAfter(resp.Header.Get("Retry-After"), time.Now())
+		ae.RetryAfter, ae.RetryAfterSet = timeutil.RetryAfter(resp.Header.Get("Retry-After"), time.Now(), timeutil.Server)
 	}
 	return resp.StatusCode, err
 }
@@ -754,25 +756,6 @@ type unusableError struct{ err error }
 
 func (e unusableError) Error() string   { return e.err.Error() }
 func (e unusableError) Unwrap() []error { return []error{e.err, ErrUnusableAnswer} }
-
-// maxRetryAfter bounds a Retry-After, in either form.
-const maxRetryAfter = 24 * time.Hour
-
-// retryAfter reads a Retry-After value (delay seconds or an HTTP date),
-// clamped at maxRetryAfter. A past date is a valid zero wait.
-func retryAfter(v string, now time.Time) (time.Duration, bool) {
-	v = strings.TrimSpace(v)
-	if v != "" && strings.Trim(v, "0123456789") == "" {
-		// An out-of-range digit string parses to MaxUint64. Clamp before
-		// multiplying so even that header waits the maximum.
-		n, _ := strconv.ParseUint(v, 10, 64)
-		return time.Duration(min(n, uint64(maxRetryAfter/time.Second))) * time.Second, true
-	}
-	if t, err := http.ParseTime(v); err == nil {
-		return min(max(t.Sub(now), 0), maxRetryAfter), true
-	}
-	return 0, false
-}
 
 // answerError maps a failed answer to its sentinel or an APIError.
 func answerError(status int, raw []byte) error {

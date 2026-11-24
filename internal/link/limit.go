@@ -8,6 +8,8 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"time"
+
+	"github.com/kodestar/audiosilo-bridge/internal/timeutil"
 )
 
 // Backoff bounds how a job waits out the server's 429s to one call: the
@@ -173,14 +175,7 @@ func Wait(ctx context.Context, d time.Duration) error {
 	if err := ctx.Err(); err != nil || d <= 0 {
 		return err
 	}
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.C:
-		return nil
-	}
+	return timeutil.SleepCtx(ctx, d)
 }
 
 // Transient reports whether the same call may be answered differently if made

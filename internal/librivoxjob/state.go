@@ -6,7 +6,6 @@ import (
 	"io/fs"
 	"os"
 	"path"
-	"path/filepath"
 	"strconv"
 	"time"
 
@@ -78,18 +77,18 @@ type partState struct {
 }
 
 // stagingPrefix begins every staging folder's name.
-const stagingPrefix = ".audiosilo-librivox-"
+const stagingPrefix = transfer.LibrivoxStagePrefix
 
 // stagingName is the staging folder's name: a dot folder the server's scan
 // never indexes, beside the book's destination so placing it is one rename.
-func stagingName(id int) string { return stagingPrefix + strconv.Itoa(id) }
+func stagingName(id int) string { return transfer.LibrivoxStageName(id) }
 
 // staging is the project's staging folder: <parent>/.audiosilo-librivox-<id>.
 func (st *state) staging(id int) string { return path.Join(st.Parent, stagingName(id)) }
 
 // statePath is the state file of the project's fetch into library lib.
 func (h *Handler) statePath(lib int64, id int) string {
-	return filepath.Join(h.o.StateDir, strconv.FormatInt(lib, 10)+"-"+strconv.Itoa(id)+".json")
+	return transfer.PrivateDir(h.o.StateDir).Base(strconv.FormatInt(lib, 10), strconv.Itoa(id)) + ".json"
 }
 
 // loadState reads the state of the project's fetch into library lib, nil when
@@ -155,7 +154,7 @@ func (st *state) valid() bool {
 
 // saveState writes the state of the project's fetch into st's library.
 func (h *Handler) saveState(id int, st *state) error {
-	if err := os.MkdirAll(h.o.StateDir, 0o700); err != nil {
+	if err := transfer.PrivateDir(h.o.StateDir).Create(); err != nil {
 		return err
 	}
 	b, err := json.Marshal(st)

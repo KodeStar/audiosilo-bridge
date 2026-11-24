@@ -155,6 +155,15 @@ internal/
             downloaded tool's first run, retries a run refused as busy
             (busyRetries) until the child forked mid-write has exec'd. No install
             holds the fork lock: every fork in the process would wait for it.
+  timeutil/ SleepCtx waits for a duration or context cancellation. Audible,
+            agent and pipeline retries, generate, GitHub sign-in, the job
+            runner and worker use it. netguard.Wait delegates to it. link.Wait
+            checks cancellation first, including for a zero delay.
+            RetryAfter reads seconds or an HTTP date and caps either at 24 h.
+            The server link accepts digits only and caps oversized digit strings.
+            Audible and feed requests also accept a leading plus and require
+            seconds to fit an int. Feed dates are read as received in whole
+            seconds. Each client sets its own limit on how long to wait.
   fsutil/   small filesystem helpers shared by the engine and the writers
             (WriteFileAtomic, ...). Phase 4b: install*.go (moved from podcast)
             InstallNoReplace(root, temp, name, link): an exclusive hard link (it
@@ -561,8 +570,7 @@ internal/
             substring caught. runCLI bounds Cmd.Wait with a 5s WaitDelay
             (cliPipeWaitDelay) so a detached CLI helper holding the inherited
             stdout/stderr pipe cannot hang a finished stage; ErrWaitDelay after a
-            successful exit is treated as success. SleepCtx is the shared
-            ctx-aware backoff sleep (pipeline's split retry reuses it).
+            successful exit is treated as success. Retries wait with timeutil.SleepCtx.
             Phase 1a split each backend's Run into the CLI run and its
             interpretation, so a run in the agent container is classified by the same
             code: CLIOutcome {Stdout, Stderr, ExitErr, TimedOut, Timeout, LastMessage}
@@ -912,7 +920,7 @@ internal/
             duck it) >= budget parks ParkBudgetExceeded before spending more.
             Post-M9 round: the split stage retries a transient
             audio.IsTransientSourceErr in-place (3 attempts, resumable - completed
-            chapter FLACs are skipped; agent.SleepCtx backoff) instead of failing
+            chapter FLACs are skipped; timeutil.SleepCtx backoff) instead of failing
             the book, and runs under the shared stage heartbeat
             (runWithStageHeartbeat, the generalization transcribeWithHeartbeat now
             wraps) so the supervisor cannot kill a slow single-chapter ffmpeg
@@ -2145,7 +2153,7 @@ internal/
             cancel was asked), ErrNoHeartbeat,
             ErrNoBook, ErrNotIndexable (a rescan's 404 not_indexable), else *APIError. HTML proxy pages never become error messages.
             RetryAfter carries a 429's
-            Retry-After, seconds or an HTTP date, clamped at a day; RetryAfterSet
+            Retry-After as read by timeutil.RetryAfter, capped at a day; RetryAfterSet
             distinguishes a valid zero wait from a missing or invalid header;
             Transient is the status rule a retry goes by: a 5xx, a 408 or a 429
             may be answered differently if asked again, any other status not
@@ -3368,7 +3376,7 @@ internal/
             deregister) send the profile's userAgent too (bridge#46); ContentACR's answer with no acr
             (a 200 denying the license) wraps the denial's kind as License does, and IsDenial(err)
             says whether an error is one of the four.
-            Deps: stdlib + progress + source.
+            Deps: stdlib + progress + source + timeutil.
             Build tag audiblefake (never in a release build or image; fake_off.go /
             fake_on.go): AUDIOSILO_BRIDGE_AUDIBLE_FAKE_URL points every endpoint at the
             fake (FakeURL() is "" without the tag, a test holds it) and
@@ -3609,7 +3617,7 @@ internal/
             AND writable at the mount in use, else not_writable; an account that fails
             either is read again first with audibleacct AwaitedAccount, as the poll's, past a
             sign-in or mapping the server has and this Bridge is still storing). A mapping check
-            not made yet for that mount is waited for (mappingPoll, 1 s), no park;
+            not made yet for that mount is waited for (transfer.MappingPoll, 1 s), no park;
             an unwritable mapping refuses a NEW job at once, while a resumed job,
             and any job at the place step (checked again before the copy), parks
             not_writable (progress.park.code, Reporter.Park) and waits for it to
@@ -4057,7 +4065,7 @@ internal/
             isn't; the time is forgotten once a
             check finds the library mapped again, writable or not, the state
             keeping its age); once a
-            day (strayWalkEvery) sweepStrays looks in every checked writable
+            day (strayWalkEvery) sweepStrays calls transfer.StagedProjects in each checked writable
             books library's root and author folders (each folder read bounded,
             fsutil.ReadDirWithin, the author folders' reads together by
             strayWalkTime, 2 min, in a random order each walk) for folders named exactly
@@ -4107,7 +4115,8 @@ internal/
             the source spells it, ReleaseDate YYYY-MM-DD or "") (source.go only;
             the Source/Acquirer interfaces and the manager's Key went in Phase 4b;
             the manager's folder walk, probe and OpenAudible reader were not
-            imported).
+            imported). ParsePosition reads a single number for both Audible listings
+            and importjob matching. importjob.rangeStart reads ranges.
   transfer/ Local only (SFTP and Index were not kept): CleanRel (mapping.SafeJoin's
             rules, no empty path, no hidden (dot) segment anywhere: the server
             never indexes one), OnDisk(fsys, rel) over a LibraryFS
@@ -4137,8 +4146,16 @@ internal/
             account on this server maps to it. The sweep
             removes only .audiosilo-import-<16 hex>.part files at least 7 days old,
             no hidden folder or link followed, never one a Place here still uses
-            (staging), stopping when the mapping changes. Deps: fsutil, mapping,
-            progress.
+            (staging), stopping when the mapping changes.
+            Audible imports and LibriVox fetches use MappingWait.Mapped to
+            check the pairing and writable mount, yield the download slot and
+            recheck after reclaiming it. WritableAt also guards both sweeps.
+            PrivateDir names their files, creates the private directory and
+            runs each job's sweep policy. Both use the seven-day StagingMaxAge.
+            PrepareProjectDir and Local.Place create library parents through
+            the open root. StagedProjects finds LibriVox project directories
+            for the fetch handler's ownership checks before removal.
+            Deps: fsutil, jobs, link, mapping, progress.
   progress/ throttled byte-progress Reader (1 MiB) for the download; the
             transfer copies in EmitEvery steps for the same cadence.
   generate/ sidecars.generate (Phase 1a): turns a server job into an ENGINE BOOK, follows
@@ -5577,12 +5594,12 @@ config}`; `app -> {api, auth, config, jobs, link, logring, mapping, secrets, sto
 verify, web, generate, agentbox, agentproto, agent, endpoint}` plus the engine it wires (asr,
 contrib, events, metaops, pipeline, scheduler, state, supervisor, toolfetch);
 `api -> {auth, jobs, link, logring, mapping, store}` (types only; it calls the
-injected Backend); `verify -> {jobs, link, mapping}`; `jobs -> {link, store}`;
-`mapping -> link`; `link` is a leaf; `endpoint` (the endpoint check, bridge#84) is a
+injected Backend); `verify -> {jobs, link, mapping}`; `jobs -> {link, store, timeutil}`;
+`mapping -> link`; `link -> timeutil`; `endpoint` (the endpoint check, bridge#84) is a
 leaf (standard library only); `config -> {agent, agentproto, fsutil, ghauth,
 pricing, state}`. `generate -> {jobs, link, mapping, store,
-scheduler, state, pipeline, contrib, chapterdetect, audio, scratch, metaops, ebook, agent, fsutil,
-readalong}` (+ the meta
+scheduler, state, pipeline, contrib, chapterdetect, audio, scratch, metaops, ebook, fsutil,
+readalong, timeutil}` (+ the meta
 module's extract/model), its engine and server reached through its own Engine and
 Server interfaces. The agent container: `agentproto` is a leaf (standard library
 only); `agentbox -> {agent, agentproto}`; `agentrun -> {agent, agentproto,
@@ -5593,7 +5610,7 @@ scheduler - never the reverse);
 `chapterdetect -> audio` (its number words and Silence only); `readalong -> epubcfi`
 (+ x/text) and `epubcfi -> {x/net/html, x/text}`, both pure leaves of the engine;
 `scratch -> readalong` (its work-dir names only); `pipeline -> {audio, asr, transcript, ebook, qa, spelling, agent, repair, toolfetch, chapterdetect,
-readalong, scratch, secrets, fsutil, metaops, contrib, pricing, store, state, scheduler}` (metaops since M7's
+readalong, scratch, secrets, fsutil, metaops, contrib, pricing, store, state, scheduler, timeutil}` (metaops since M7's
 contributing stage, and the spelling stage's series glossary); `contrib -> {store, state, accounts}`
 (+ the meta module's model/pack; accounts for ErrUnrefreshed alone, the sign-in reached
 through contrib's DeviceTokens interface, so accounts never imports contrib); `agent`/`repair` are leaf helpers (no

@@ -25,7 +25,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/kodestar/audiosilo-bridge/internal/agent"
 	"github.com/kodestar/audiosilo-bridge/internal/contrib"
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
@@ -36,6 +35,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
+	"github.com/kodestar/audiosilo-bridge/internal/timeutil"
 )
 
 // Kind is the job kind.
@@ -762,7 +762,7 @@ func (h *Handler) resumeMapping(ctx context.Context, job jobs.Job) (store.Genera
 		}
 		if i < stopTries {
 			h.o.Log.Warn("generate: reading the job's earlier run failed; trying again", "job", job.ID, "err", err)
-			if err = agent.SleepCtx(ctx, h.o.Poll); err == nil {
+			if err = timeutil.SleepCtx(ctx, h.o.Poll); err == nil {
 				continue
 			}
 		}
@@ -928,7 +928,7 @@ func (h *Handler) Abandon(ctx context.Context, job jobs.Job) {
 // the checks and the cancel is never stopped.
 func (h *Handler) stopStartedStage(ctx context.Context, job jobs.Job, bookID int64) {
 	for h.o.Engine() == nil {
-		if agent.SleepCtx(ctx, h.o.Poll) != nil {
+		if timeutil.SleepCtx(ctx, h.o.Poll) != nil {
 			return
 		}
 	}
@@ -1026,7 +1026,7 @@ func (h *Handler) stopBook(ctx context.Context, g store.StopGuard, bookID int64,
 			// Stopped, settled, or deleted since the read: nothing runs on.
 			return false
 		}
-		if i == stopTries || agent.SleepCtx(ctx, h.o.Poll) != nil {
+		if i == stopTries || timeutil.SleepCtx(ctx, h.o.Poll) != nil {
 			break
 		}
 	}
@@ -1111,7 +1111,7 @@ func (h *Handler) waitEngine(ctx context.Context, r *run) (Engine, error) {
 			return eng, nil
 		}
 		r.rep.Progress(jobs.Progress{Step: stepWaiting, Code: jobs.SayEngineStarting})
-		if err := agent.SleepCtx(ctx, h.o.Poll); err != nil {
+		if err := timeutil.SleepCtx(ctx, h.o.Poll); err != nil {
 			if !jobs.Resumes(ctx) {
 				// Cancelled, or taken back, before the engine started: the run never
 				// reaches end(), so the engine book an earlier run of the job made is
@@ -1293,7 +1293,7 @@ func (h *Handler) fetchBook(ctx context.Context, r *run) (*link.Book, error) {
 			sleep = min(wait, left)
 		}
 		h.o.Log.Warn("generate: asking the server for the book failed; trying again", "job", r.job.ID, "err", err)
-		if err := agent.SleepCtx(ctx, sleep); err != nil {
+		if err := timeutil.SleepCtx(ctx, sleep); err != nil {
 			return nil, err
 		}
 		wait = min(wait*2, time.Minute)
@@ -1327,7 +1327,7 @@ func (h *Handler) waitMapped(ctx context.Context, r *run, strict bool) error {
 		default:
 			h.park(r, parkLibraryNotWritable, "library "+r.lib.Name+" isn't mapped and writable on the Bridge any more")
 		}
-		if err := agent.SleepCtx(ctx, h.o.Poll); err != nil {
+		if err := timeutil.SleepCtx(ctx, h.o.Poll); err != nil {
 			return err
 		}
 	}
@@ -1757,7 +1757,7 @@ func (h *Handler) deleteEarlier(ctx context.Context, eng Engine, r *run, id int6
 			return err
 		}
 		r.rep.Progress(jobs.Progress{Step: stepWaiting, Code: jobs.SayEngineReleaseWait})
-		if err := agent.SleepCtx(ctx, h.o.Poll); err != nil {
+		if err := timeutil.SleepCtx(ctx, h.o.Poll); err != nil {
 			return err
 		}
 	}
@@ -2420,7 +2420,7 @@ func (h *Handler) rescan(ctx context.Context, r *run) {
 			h.o.Log.Warn("generate: the server didn't re-read the attachments (its next scan will)", "job", r.job.ID, "err", err)
 			return
 		}
-		if agent.SleepCtx(ctx, h.o.Poll) != nil {
+		if timeutil.SleepCtx(ctx, h.o.Poll) != nil {
 			return
 		}
 	}

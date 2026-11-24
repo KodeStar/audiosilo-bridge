@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kodestar/audiosilo-bridge/internal/timeutil"
 )
 
 // Error deliberately contains no remote error text or URL.
@@ -47,14 +49,7 @@ type Response struct {
 
 // Wait sleeps for d unless ctx ends first.
 func Wait(ctx context.Context, d time.Duration) error {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.C:
-		return nil
-	}
+	return timeutil.SleepCtx(ctx, d)
 }
 
 // Fetch retries only transient failures, enforcing the limit on decoded bytes.
@@ -133,7 +128,7 @@ func (c *Client) once(ctx context.Context, in Request) (*Response, error) {
 		return out, nil
 	}
 	if resp.StatusCode != 200 {
-		return nil, StatusError("feed", resp.StatusCode, retryAfter(resp.Header.Get("Retry-After"), time.Now()))
+		return nil, StatusError("feed", resp.StatusCode, retryAfterSeconds(resp.Header.Get("Retry-After"), time.Now()))
 	}
 	if resp.ContentLength > in.MaxBytes {
 		return nil, &Error{Code: "too_large", Message: "The response exceeds the size limit."}
@@ -253,15 +248,13 @@ func header(s string) string {
 	}
 	return s
 }
-func retryAfter(s string, now time.Time) int {
-	if n, err := strconv.Atoi(strings.TrimSpace(s)); err == nil {
-		return min(max(n, 0), 86400)
-	}
-	if t, err := http.ParseTime(s); err == nil {
-		return min(max(int(t.Sub(now).Seconds()), 0), 86400)
-	}
-	return 0
+
+// retryAfterSeconds is the feed's whole-second delay. Unreadable headers give no wait.
+func retryAfterSeconds(value string, now time.Time) int {
+	wait, _ := timeutil.RetryAfter(value, now, timeutil.Feed)
+	return int(wait / time.Second)
 }
+
 func retryable(e *Error) bool {
 	return e.Code == "dns" || e.Code == "timeout" || e.Code == "network" || e.Code == "http_408" || e.Code == "http_429" || strings.HasPrefix(e.Code, "http_5")
 }

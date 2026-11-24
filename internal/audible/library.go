@@ -159,7 +159,7 @@ func (it libItem) toRecord(now time.Time) source.Record {
 	if len(it.Series) > 0 {
 		rec.Series = it.Series[0].Title
 		rec.SeriesPosition = strings.TrimSpace(it.Series[0].Sequence)
-		if seq, ok := parseSeq(it.Series[0].Sequence); ok {
+		if seq, ok := source.ParsePosition(rec.SeriesPosition); ok {
 			rec.Sequence, rec.HasSequence = seq, true
 		}
 	}
@@ -315,20 +315,6 @@ func releaseDay(s string) string {
 		return t.Format(time.DateOnly)
 	}
 	return ""
-}
-
-// parseSeq parses the free-form Audible series sequence ("1", "0.5", "1-3", "").
-// Only a clean single number counts; anything else leaves the book unsequenced.
-func parseSeq(s string) (float64, bool) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return 0, false
-	}
-	v, err := strconv.ParseFloat(s, 64)
-	if err != nil {
-		return 0, false
-	}
-	return v, true
 }
 
 func yearFromDate(s string) string {

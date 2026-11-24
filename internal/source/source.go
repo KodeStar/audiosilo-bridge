@@ -2,6 +2,11 @@
 // audiobook (an Audible title), which matching and placement read.
 package source
 
+import (
+	"strconv"
+	"strings"
+)
+
 // Record is normalized metadata for one importable audiobook file.
 type Record struct {
 	FileName   string // destination file name
@@ -35,4 +40,13 @@ type Record struct {
 	// Preorder: the record is unavailable because it isn't released yet (its
 	// UnavailableReason says so in words).
 	Preorder bool
+}
+
+// ParsePosition reads a single numeric series position from a listing or a record.
+func ParsePosition(s string) (float64, bool) {
+	v, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
 }

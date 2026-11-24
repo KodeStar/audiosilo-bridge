@@ -76,7 +76,7 @@ func (c *Client) Stream(ctx context.Context, in StreamRequest) (*StreamResponse,
 	}
 	timer := time.AfterFunc(c.stall, cancel)
 	body := &streamBody{progressReader: progressReader{r: resp.Body, timer: timer, stall: c.stall}, body: resp.Body, cancel: cancel}
-	return &StreamResponse{Status: resp.StatusCode, Body: body, ContentLength: resp.ContentLength, ContentRange: resp.Header.Get("Content-Range"), Encoding: strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding"))), ContentType: resp.Header.Get("Content-Type"), ETag: resp.Header.Get("ETag"), RetryAfterSeconds: retryAfter(resp.Header.Get("Retry-After"), time.Now())}, nil
+	return &StreamResponse{Status: resp.StatusCode, Body: body, ContentLength: resp.ContentLength, ContentRange: resp.Header.Get("Content-Range"), Encoding: strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding"))), ContentType: resp.Header.Get("Content-Type"), ETag: resp.Header.Get("ETag"), RetryAfterSeconds: retryAfterSeconds(resp.Header.Get("Retry-After"), time.Now())}, nil
 }
 
 // streamBody resets the stall timer on progress (progressReader) and ends the

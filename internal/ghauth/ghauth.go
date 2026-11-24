@@ -21,6 +21,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/kodestar/audiosilo-bridge/internal/timeutil"
 )
 
 // DefaultClientID is the AudioSilo contributions GitHub App's client ID (App id
@@ -235,7 +237,7 @@ func (c *Client) Poll(ctx context.Context, deviceCode string) (Token, time.Durat
 // that doesn't).
 func (c *Client) Wait(ctx context.Context, dc DeviceCode, sleep func(context.Context, time.Duration) error) (Token, error) {
 	if sleep == nil {
-		sleep = sleepCtx
+		sleep = timeutil.SleepCtx
 	}
 	interval := max(dc.Interval, defaultInterval)
 	for {
@@ -482,16 +484,4 @@ func snippet(raw []byte) string {
 		s = strings.ToValidUTF8(s[:200], "")
 	}
 	return s
-}
-
-// sleepCtx waits d or until ctx ends.
-func sleepCtx(ctx context.Context, d time.Duration) error {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.C:
-		return nil
-	}
 }

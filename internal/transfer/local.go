@@ -1,6 +1,6 @@
-// Package transfer installs one audiobook file into a library the Bridge has a
-// checked, writable mapping of (Local: this host or a mounted share). It never
-// replaces a file: the copy is staged in a temp file beside the destination and
+// Package transfer stages book downloads and waits for a checked, writable
+// library mapping. Local installs one audiobook file on this host or a mounted
+// share. It never replaces a file: the copy is staged in a temp file beside the destination and
 // installed with fsutil.InstallNoReplace (an exclusive hard link, else a rename
 // that refuses an existing target), the podcast episode install's primitive.
 // Every destination goes through mapping.SafeJoin against the mapping's root and
@@ -239,10 +239,8 @@ func (l *Local) Place(ctx context.Context, req PlaceRequest) (PlaceResult, error
 		}
 	}
 	dir := path.Dir(rel)
-	if dir != "." {
-		if err := root.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // G301: library folders the server (another user) must read
-			return PlaceResult{}, noSpace(fmt.Errorf("creating the book's folder: %w", err))
-		}
+	if err := makeParent(root, dir); err != nil {
+		return PlaceResult{}, noSpace(fmt.Errorf("creating the book's folder: %w", err))
 	}
 	req.RelPath = rel
 	temp, err := l.stage(ctx, root, src, size, req)
@@ -279,6 +277,14 @@ func (l *Local) Place(ctx context.Context, req PlaceRequest) (PlaceResult, error
 	}
 	syncFolder(root, dir)
 	return res, nil
+}
+
+// makeParent creates the library folders that will hold a staged file or project.
+func makeParent(root *os.Root, dir string) error {
+	if dir == "" || dir == "." {
+		return nil
+	}
+	return root.MkdirAll(dir, 0o755) //nolint:gosec // G301: the server also reads library folders
 }
 
 // syncFolder flushes dir's entries, so the book just installed there outlives
