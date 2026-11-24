@@ -3619,7 +3619,9 @@ internal/
             (errImportPairingGone) without writing to the library listed now,
             which may be another server's of the same id, and removes its
             decrypted copy and partial download, a stopped or lost claim's
-            too (no later claim, under another pairing, may use them).
+            too (no later claim, under another pairing, may use them), as
+            does an import that ends otherwise once the Bridge is paired
+            otherwise (run's defer asks Job.Under again).
             Then the title (preorder
             not_released, no rights / not in the library no_rights, a refusal
             audible_refused; a license denied as audible.ErrThrottled, the device on

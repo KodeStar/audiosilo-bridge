@@ -408,8 +408,9 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 	defer func() {
 		// A stop the next start resumes, and a lost claim the server hands out
 		// again, keep the temp files; an import whose pairing ended
-		// (errImportPairingGone) resumes under no claim, so it never does.
-		pairingGone := errors.Is(err, errImportPairingGone)
+		// (errImportPairingGone, or however it ended once the Bridge is
+		// paired otherwise) resumes under no claim, so it never does.
+		pairingGone := errors.Is(err, errImportPairingGone) || !job.Under(h.o.Pairing())
 		if err != nil && ctx.Err() != nil && (jobs.Resumes(ctx) || jobs.Lost(ctx)) && !pairingGone {
 			return
 		}

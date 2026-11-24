@@ -599,6 +599,32 @@ func TestImportFirstLookEndsOnceItsPairingEnded(t *testing.T) {
 	}
 }
 
+// An import that ends other than at a mapping look once its pairing ended (a
+// stop during the copy, which keeps the decrypted copy for the next start
+// while the pairing stands) removes its temp files all the same: no later
+// claim, under another pairing, may use them (bridge#71).
+func TestImportEndingOnceItsPairingEndedRemovesItsTempFiles(t *testing.T) {
+	e := newImportEnv(t)
+	e.srv.id, e.srv.pairing = "srv1", "p1"
+	e.pair.Store(&jobs.Pairing{ID: "p1", ServerID: "srv1"})
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	progress := e.opts.onProgress
+	e.opts.onProgress = func(p jobs.Progress) {
+		progress(p)
+		if p.Step == StepPlace && p.Done > 0 {
+			e.pair.Store(&jobs.Pairing{})
+			stop() // the Bridge stopping as the copy staged its bytes
+		}
+	}
+	job := jobs.ClaimedUnder(jobs.Job{ID: 7, Kind: ImportKind, Params: e.params(nil), Attempt: 1}, "srv1", "p1")
+	_, err := NewImport(e.opts).Run(ctx, job, jobs.LocalReporter())
+	if err == nil || len(e.libraryFiles()) != 0 {
+		t.Fatalf("the stopped import placed the book: %v, %v", err, e.libraryFiles())
+	}
+	e.tmpEmpty(t)
+}
+
 func mustJSON(t *testing.T, v any) string {
 	t.Helper()
 	b, err := json.Marshal(v)
