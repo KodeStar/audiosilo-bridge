@@ -76,9 +76,6 @@ type partState struct {
 	Total int64  `json:"total,omitempty"`
 }
 
-// stagingPrefix begins every staging folder's name.
-const stagingPrefix = transfer.LibrivoxStagePrefix
-
 // stagingName is the staging folder's name: a dot folder the server's scan
 // never indexes, beside the book's destination so placing it is one rename.
 func stagingName(id int) string { return transfer.LibrivoxStageName(id) }

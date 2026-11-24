@@ -1,8 +1,9 @@
 // Package transfer stages book downloads and waits for a checked, writable
 // library mapping. Local installs one audiobook file on this host or a mounted
-// share. It never replaces a file: the copy is staged in a temp file beside the destination and
-// installed with fsutil.InstallNoReplace (an exclusive hard link, else a rename
-// that refuses an existing target), the podcast episode install's primitive.
+// share. It never replaces a file: the copy is staged in a temp file beside the
+// destination and installed with fsutil.InstallNoReplace (an exclusive hard
+// link, else a rename that refuses an existing target), the podcast episode
+// install's primitive.
 // Every destination goes through mapping.SafeJoin against the mapping's root and
 // every filesystem call through an os.Root there, so neither a "..", an
 // absolute path nor a symlink in the library reaches outside it.
