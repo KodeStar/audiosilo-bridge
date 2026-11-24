@@ -864,6 +864,11 @@ func (h *Handler) place(ctx context.Context, f *fetch, names []string) error {
 	if err := sweep(root, f.staging(), names); err != nil {
 		return err
 	}
+	// The pairing once more right before the rename: sweep's looks and
+	// removals on a slow mount may have taken long since recheck's.
+	if !h.stillPaired(f.job) {
+		return errPairingGone
+	}
 	n, bytes := countFiles(root, f.staging())
 	primary := f.st.Dest
 	for _, dest := range candidates(primary, f.p.LibrivoxID) {

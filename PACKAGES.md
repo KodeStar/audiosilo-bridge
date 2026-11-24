@@ -4084,7 +4084,8 @@ internal/
             Job.Under(Options.Pairing()): the same server and pairing; a refused token ends
             neither), looked at before the first write and in every mapping
             look (mapped, so before each section, the cover and the rename, and
-            while parked); once not, it ends (errPairingGone) writing nothing
+            while parked), and once more right before the rename (place, after
+            its sweep of the staging folder); once not, it ends (errPairingGone) writing nothing
             more, and removes its own staging folder (through the mount it took
             at the claim) and its state on the way out, as does a run the runner
             drops after its pairing ended: a sweep paired with another server
