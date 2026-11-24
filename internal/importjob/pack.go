@@ -12,17 +12,23 @@ import (
 	"github.com/kodestar/audiosilo-server/pkg/match"
 )
 
-// As in pkg/match's titleSpan, numbers embedded in a word are not volume bounds.
+// titleRange is a range of volumes in a title ("Books 1-3", "(5–8)"). As in
+// pkg/match's titleSpan, numbers embedded in a word are not volume bounds.
+// publisherPack and completePack are pack names packWord does not cover.
 var titleRange = regexp.MustCompile(`(?:^|[^\p{L}\p{N}])(\d{1,3}(?:\.\d+)?)\s*[-–]\s*(\d{1,3}(?:\.\d+)?)(?:[^\p{L}\p{N}]|$)`)
 var publisherPack = regexp.MustCompile(`(?i)\bpublisher['’]s pack\b`)
 var completePack = regexp.MustCompile(`(?i)\b(?:the )?complete (?:series|collection)\b`)
 
+// packTitle reports whether title names a pack: a pack word, a range of
+// volumes or a publisher's pack.
 func packTitle(title string) bool {
 	return packWord.MatchString(title) || titleRange.MatchString(title) || publisherPack.MatchString(title)
 }
 
-// A tagged title can be a track name ("End Credits") even when the folder
-// names the whole box set. Only the book's own path segment counts.
+// bookPackTitle is the label that marks b as a pack, its title or else its
+// folder name, or "" for none. A tagged title can be a track name ("End
+// Credits") even when the folder names the whole box set. Only the book's own
+// path segment counts.
 func bookPackTitle(b link.LibraryBook) string {
 	if packTitle(b.Title) {
 		return b.Title
@@ -33,10 +39,13 @@ func bookPackTitle(b link.LibraryBook) string {
 	return ""
 }
 
+// volumeRange is the first and last volume a pack spans.
 type volumeRange struct {
 	start, end float64
 }
 
+// readRange reads the first range pattern matches in s, its two numbers
+// captured as the first and second groups.
 func readRange(pattern *regexp.Regexp, s string) (volumeRange, bool) {
 	m := pattern.FindStringSubmatch(s)
 	if m == nil {
@@ -47,6 +56,7 @@ func readRange(pattern *regexp.Regexp, s string) (volumeRange, bool) {
 	return volumeRange{start, end}, okStart && okEnd
 }
 
+// bookRanges is the distinct ranges b's series list it at.
 func bookRanges(b link.LibraryBook) []volumeRange {
 	var spans []volumeRange
 	for _, s := range b.Series {
@@ -57,8 +67,9 @@ func bookRanges(b link.LibraryBook) []volumeRange {
 	return spans
 }
 
-// Match the pack's own name. Words such as "Omnibus" are common to different
-// series by one author. A folder titled just "Books 1-3" takes its series name.
+// packName is a pack's own name, so packs match on it: words such as
+// "Omnibus" are common to different series by one author. A folder titled
+// just "Books 1-3" takes its series name.
 func packName(title, series string) string {
 	title = completePack.ReplaceAllString(title, " ")
 	title = publisherPack.ReplaceAllString(title, " ")
@@ -73,6 +84,9 @@ func packName(title, series string) string {
 	return cmp.Or(title, series)
 }
 
+// packCandidate is one pack candidate scored by its name: ord is its index in
+// BookMatcher.cands, ranged whether the listing gives it a range (spans then
+// holds those, else the range its label states, if any), index its names.
 type packCandidate struct {
 	ord    int
 	ranged bool
@@ -80,6 +94,8 @@ type packCandidate struct {
 	index  *match.Index
 }
 
+// newPackCandidate prepares book as a pack under its title's name and, when
+// it differs, its label's.
 func newPackCandidate(ord int, book match.Book, label string, spans []volumeRange) packCandidate {
 	ranged := len(spans) > 0
 	if !ranged {
@@ -134,8 +150,9 @@ func (m *BookMatcher) bestPackTitle(q match.Query, span volumeRange, allowRanges
 	return best, high, true
 }
 
-// Keep the display fallback for a range at its first volume's position. The
-// series name alone cannot identify a pack on the series-named opening book.
+// firstRangeFallback is the display fallback for a range at its first
+// volume's position. The series name alone cannot identify a pack on the
+// series-named opening book, so that one is skipped for the next best.
 func (m *BookMatcher) firstRangeFallback(q match.Query) (int, float64, bool) {
 	seriesNamed := func(i int) bool {
 		b := m.books[m.owner[i]]

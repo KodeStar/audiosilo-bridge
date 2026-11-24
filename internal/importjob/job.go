@@ -379,8 +379,12 @@ func rangeStart(pos string) (float64, bool) {
 
 // best tries ASINs over every candidate before scoring the stable partitions.
 // The index applies the person gate and preserves candidate order for ties.
-// A range title first tries spanning books starting at its position, then
-// single volumes. A single volume never tries a spanning book.
+// A range position first tries the spanning books starting where it does. A
+// range, or a title that names a pack, then tries the packs by name
+// (bestPackTitle); only a positionless one may claim a listed range. A range
+// that found no pack falls back to the single volumes (at volume 1 through
+// firstRangeFallback). A single volume never claims a listed range, and takes
+// a pack labeled only by its title or folder only when that scores higher.
 func (m *BookMatcher) best(q match.Query, position string) (int, float64, bool) {
 	if q.ASIN != "" {
 		for i := range m.cands {
@@ -392,6 +396,7 @@ func (m *BookMatcher) best(q match.Query, position string) (int, float64, bool) 
 	}
 	span, isRange := readRange(rangePosition, position)
 	isRange = isRange && !q.HasSequence
+	allowRanges := !q.HasSequence && strings.TrimSpace(position) == ""
 	if isRange {
 		// The position from the store takes precedence over a pack number in
 		// the title ("Publisher's Pack 3" at volumes 5-6).
@@ -401,7 +406,6 @@ func (m *BookMatcher) best(q match.Query, position string) (int, float64, bool) 
 		}
 	}
 	if isRange || packTitle(cmp.Or(q.Title, q.TitleShort)) {
-		allowRanges := !q.HasSequence && strings.TrimSpace(position) == ""
 		if i, score, ok := m.bestPackTitle(q, span, allowRanges); ok || !isRange {
 			return i, score, ok
 		}
@@ -415,10 +419,9 @@ func (m *BookMatcher) best(q match.Query, position string) (int, float64, bool) 
 		// "Four: A Divergent Collection"). Preserve the display match and
 		// listing order. SpanMismatch still protects the ASIN.
 		j, other, found := m.labeled.best(q)
-		if found && (other > score || (other == score && j < i)) {
-			if q.Sequence > 1 || !seriesNamedTitle(cmp.Or(q.Title, q.TitleShort), cmp.Or(q.Series, m.cands[j].Series)) {
-				return j, other, true
-			}
+		better := found && (other > score || (other == score && j < i))
+		if better && (q.Sequence > 1 || !seriesNamedTitle(cmp.Or(q.Title, q.TitleShort), cmp.Or(q.Series, m.cands[j].Series))) {
+			return j, other, true
 		}
 	}
 	return i, score, ok
@@ -470,9 +473,14 @@ func PositionAgrees(rec source.Record, b link.LibraryBook) (agrees, disagrees bo
 	return got == want, got != want
 }
 
-// Keep the code and pack expressions in step with the server's
-// internal/metadata.FolderCodePosition. TestFolderCodeIsServerVectors uses
-// the server's cases for single positions, ranges and rejected codes.
+// folderCode is a leading series code on a folder name, as the server reads
+// one: one to five letters, maybe a space, a number of one to three digits
+// with maybe a decimal part ("DH06 - Land of Magic", "DF15.5 Brief Cases"),
+// then maybe a year, a lettered number or a range end joined on. packWord
+// names a pack ("Omnibus", "Box Set", "Books 1-3"). Keep both in step with
+// the server's internal/metadata.FolderCodePosition:
+// TestFolderCodeIsServerVectors runs its cases for single positions, ranges
+// and rejected codes.
 var folderCode = regexp.MustCompile(`^([A-Za-z]{1,5}) ?(\d{1,3}(?:\.\d+)?)(?:[-–](?:(?:19|20)\d{2}|\d{1,3}[A-Za-z]|(\d{1,3}(?:\.\d+)?)))?`)
 var packWord = regexp.MustCompile(`(?i)\b(?:omnibus|box(?:ed)? ?set|collection|books \d+ ?[-–] ?\d+)\b`)
 
@@ -660,8 +668,8 @@ func SpanMismatch(rec source.Record, b link.LibraryBook) bool {
 	_, ranged := rangeStart(rec.SeriesPosition)
 	pack := packTitle(cmp.Or(rec.Title, rec.TitleShort))
 	if len(bookRanges(b)) > 0 {
-		if ranged && !rec.HasSequence {
-			return false
+		if ranged {
+			return rec.HasSequence
 		}
 		return !pack || rec.HasSequence || strings.TrimSpace(rec.SeriesPosition) != ""
 	}
