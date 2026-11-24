@@ -335,15 +335,12 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 // so a run writes to a library only while this holds.
 func (h *Handler) stillPaired(job jobs.Job) bool { return job.Under(h.o.Pairing()) }
 
-// errPairingGone ends a run whose pairing ended under it (stillPaired).
+// errPairingGone ends a run whose pairing ended under it (stillPaired). The
+// run writes nothing more to the library; on the way out it removes its own
+// staging folder, through the mount it took at the claim, and its state, so
+// nothing is left for a sweep that, paired with another server, could not
+// find them (a claim of the job under the next pairing starts clean).
 var errPairingGone = errors.New("the Bridge's pairing that claimed this fetch has ended, so it writes nothing more to the library")
-
-// pairingGone is errPairingGone keeping the staging folder and the state as
-// they are: nothing is written (or removed) in a library the pairing no longer
-// vouches for. The same server's job, claimed under the next pairing, resumes
-// from them; otherwise the sweep ends them (another server's state is dropped,
-// its folder swept as a stray).
-func pairingGone() error { return &keepStaging{err: errPairingGone} }
 
 // key is one fetch's state: a library and a project.
 type key struct {
@@ -455,19 +452,20 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, p Params, rep *jobs.Rep
 	defer func() {
 		// A stop the next start resumes, and a lost claim the server hands out
 		// again, keep the staging folder and the state; a cancel or a failure
-		// before the book was placed removes both. A placed book stays, and its
-		// state with it when the rescan failed (the retry goes on from there).
-		var keep *keepStaging
-		if err == nil || f.st == nil || f.st.Placed || errors.As(err, &keep) {
+		// before the book was placed removes both, and so does a run whose
+		// pairing ended (errPairingGone, or the job dropped: an unpair, a
+		// pairing with another server), however it failed: its staging folder
+		// is removed through f.mount, the mount it took at the claim, and
+		// nothing else is written. A placed book stays, and its state with it
+		// when the rescan failed (the retry goes on from there).
+		if err == nil || f.st == nil || f.st.Placed {
 			return
 		}
-		if ctx.Err() != nil && (jobs.Resumes(ctx) || jobs.Lost(ctx)) {
-			return
-		}
-		// A run whose pairing ended (the job dropped: an unpair, a pairing
-		// with another server) touches the library no more (pairingGone).
-		if !h.stillPaired(job) {
-			return
+		if h.stillPaired(job) {
+			var keep *keepStaging
+			if errors.As(err, &keep) || ctx.Err() != nil && (jobs.Resumes(ctx) || jobs.Lost(ctx)) {
+				return
+			}
 		}
 		// A folder that can't be removed now (a cancel while the mount is
 		// away) keeps its state, for the sweep.
@@ -508,7 +506,7 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, p Params, rep *jobs.Rep
 	// The pairing again before the first write: the manifest's reads may
 	// have taken long (recheck looks before each later one).
 	if !h.stillPaired(job) {
-		return nil, pairingGone()
+		return nil, errPairingGone
 	}
 	if err := h.prepare(f); err != nil {
 		return nil, err
@@ -1043,12 +1041,12 @@ func (h *Handler) recheck(ctx context.Context, f *fetch, step string) error {
 // The run is bound to the pairing that claimed job (stillPaired): once the
 // Bridge is paired otherwise (unpaired on its page, paired again after that,
 // or with another server, whose libraries share ids with this one's), the run
-// ends without a write, its staging folder and state kept (pairingGone), even
-// before the runner drops the job (bridge#71).
+// ends without a write (errPairingGone, its own staging folder and state
+// removed on the way out), even before the runner drops the job (bridge#71).
 func (h *Handler) mapped(ctx context.Context, job jobs.Job, id int64, rep *jobs.Reporter, step string, strict bool) (link.Library, string, error) {
 	for {
 		if !h.stillPaired(job) {
-			return link.Library{}, "", pairingGone()
+			return link.Library{}, "", errPairingGone
 		}
 		lib, ok := h.o.Libraries.Library(id)
 		if !ok || lib.LibraryKind() != "books" {
