@@ -81,10 +81,6 @@ const readySuffix = ".ready.m4b"
 // attempt that added to it starts the count again).
 const downloadAttempts = 3
 
-// mappingPoll is how often a job waiting on its library's mapping (a check not
-// made yet, or a mapping to come back) looks again.
-const mappingPoll = transfer.MappingPoll
-
 // Failure is a failed import's result and error: a code from the list above
 // and a sentence for the console, and for CodeExists what is in the way
 // (Conflict: link.ConflictFile, ConflictBook or ConflictAudio, the plan's
@@ -1059,7 +1055,9 @@ func (h *Importer) tryGate(account string, rep *jobs.Reporter) (func(), bool) {
 	}
 }
 
-// mapped waits for this job's library and download slot under its claim's pairing.
+// mapped waits for this job's library and download slot under its claim's
+// pairing (transfer.MappingWait.Mapped). An import whose pairing ended returns
+// errImportPairingGone, and run's defer removes its temp files.
 func (h *Importer) mapped(ctx context.Context, job jobs.Job, id int64, rep *jobs.Reporter, step string, strict bool) (link.Library, string, error) {
 	w := transfer.MappingWait{
 		Libraries: h.o.Libraries, Mount: h.o.Mount, Pairing: h.o.Pairing, PairingGone: errImportPairingGone,

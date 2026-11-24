@@ -32,6 +32,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/source"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
+	"github.com/kodestar/audiosilo-bridge/internal/transfer"
 )
 
 // The secrets a license carries in these tests: none may reach a log, a
@@ -1491,7 +1492,7 @@ func TestImportResumedParksUntilTheMappingIsBack(t *testing.T) {
 	looks := 0
 	rep := jobs.LocalReporter()
 	e.opts.Wait = func(ctx context.Context, d time.Duration) error {
-		if d == mappingPoll {
+		if d == transfer.MappingPoll {
 			looks++
 			if !rep.Yielded() {
 				t.Fatal("parked import held its slot")
@@ -1532,7 +1533,7 @@ func TestImportParksAtThePlaceStep(t *testing.T) {
 		return decrypt(ctx, ffmpeg, in, out, lic)
 	}
 	e.opts.Wait = func(ctx context.Context, d time.Duration) error {
-		if d == mappingPoll {
+		if d == transfer.MappingPoll {
 			e.libs.status.Writable = true
 		}
 		return ctx.Err()
@@ -1564,7 +1565,7 @@ func TestImportWaitsForTheMappingCheck(t *testing.T) {
 			e := newImportEnv(t)
 			e.libs.status.MountPath = unchecked
 			e.opts.Wait = func(ctx context.Context, d time.Duration) error {
-				if d == mappingPoll {
+				if d == transfer.MappingPoll {
 					e.libs.status.MountPath = e.root
 				}
 				return ctx.Err()

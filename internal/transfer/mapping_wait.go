@@ -17,8 +17,10 @@ type Libraries interface {
 }
 
 const (
+	// CodeNotWritable is the failure and park code for a library the job may not write.
 	CodeNotWritable = "not_writable"
-	MappingPoll     = time.Second
+	// MappingPoll is how often a job waiting on its library's mapping looks again.
+	MappingPoll = time.Second
 )
 
 // WritableAt reports whether the current check permits a write at mount.
@@ -38,9 +40,20 @@ type MappingWait struct {
 }
 
 // Mapped waits for a checked, writable books library under the claim's pairing.
-// A strict first attempt fails at a known unwritable mapping. A resumable job
-// parks there and returns its download slot. After reclaiming the slot it
-// checks both pairing and mapping again before handing the mount to its writer.
+// A job claimed before the library's mapping check has a result waits for it.
+// A strict first attempt fails at a known unwritable mapping; a resumed job, or
+// one past its download, parks not_writable and waits, keeping what it holds.
+//
+// A parked job, or one waiting on a check that doesn't stand (the server didn't
+// answer it, or it is too old), gives its download-lane slot back (Yield), so
+// the lane's other downloads run meanwhile. Once the mapping is back it takes a
+// slot again (Reclaim) and looks at pairing and mapping again before handing
+// the mount to its writer, since the wait for the slot may have been long.
+//
+// The run is bound to the pairing that claimed job (jobs.Job.Under): once the
+// Bridge is paired otherwise (unpaired, paired again, or with another server,
+// whose libraries share ids with this one's), it ends with PairingGone and
+// writes nothing to the library the registry lists now.
 func (w MappingWait) Mapped(ctx context.Context, job jobs.Job, id int64, rep *jobs.Reporter, step string, strict bool) (link.Library, string, error) {
 	for {
 		if !job.Under(w.Pairing()) {
@@ -66,6 +79,7 @@ func (w MappingWait) Mapped(ctx context.Context, job jobs.Job, id int64, rep *jo
 		case !checked || st.MountPath != mount:
 			w.Report(rep, jobs.Progress{Step: step, Code: jobs.SayMappingWait})
 			if !checked && st.Error != "" {
+				// A check that doesn't stand may wait out an outage: free the lane.
 				rep.Yield()
 			}
 		case strict:
