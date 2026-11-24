@@ -230,9 +230,13 @@ type Libraries interface {
 
 // ImportOptions wire the import handler.
 type ImportOptions struct {
-	Accounts  ImportAccounts
-	Server    func() ImportServer
-	ServerID  func() string
+	Accounts ImportAccounts
+	Server   func() ImportServer
+	ServerID func() string
+	// Pairing is the Bridge's pairing now (jobs.Options.Pairing's): an import
+	// writes to a library only while it is the one its job was claimed under
+	// (mapped). nil is always the zero Pairing.
+	Pairing   func() jobs.Pairing
 	Libraries Libraries
 	Mount     mapping.MountFunc
 	// TmpDir is <data>/audible/tmp: the partial downloads and decrypted copies.
@@ -285,6 +289,9 @@ func NewImport(o ImportOptions) *Importer {
 	}
 	if o.ServerID == nil {
 		o.ServerID = func() string { return "" }
+	}
+	if o.Pairing == nil {
+		o.Pairing = func() jobs.Pairing { return jobs.Pairing{} }
 	}
 	if o.FFmpeg == nil {
 		o.FFmpeg = func() string { return "" }
@@ -399,7 +406,12 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 	defer release()
 	part, decrypted := h.partPaths(p.Account, p.ASIN)
 	defer func() {
-		if err != nil && ctx.Err() != nil && (jobs.Resumes(ctx) || jobs.Lost(ctx)) {
+		// A stop the next start resumes, and a lost claim the server hands out
+		// again, keep the temp files; an import whose pairing ended
+		// (errImportPairingGone, or however it ended once the Bridge is
+		// paired otherwise) resumes under no claim, so it never does.
+		pairingGone := errors.Is(err, errImportPairingGone) || !job.Under(h.o.Pairing())
+		if err != nil && ctx.Err() != nil && (jobs.Resumes(ctx) || jobs.Lost(ctx)) && !pairingGone {
 			return
 		}
 		// A failure placing the book can be retried with the same decrypt.
@@ -407,7 +419,7 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 		// A 404 for the job is no refusal: a proxy in front of a restarting
 		// server answers one too, and a title queued again (by this account)
 		// reuses the decrypt. The start-up sweep bounds what a removed job leaves.
-		if err == nil || ctx.Err() != nil || bookRefused(err) {
+		if err == nil || ctx.Err() != nil || bookRefused(err) || pairingGone {
 			removeStaged(decrypted)
 		}
 		audible.RemovePartial(part)
@@ -435,7 +447,7 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 	}
 
 	stage := readStaged(decrypted, library, p.ASIN)
-	lib, mount, err := h.mapped(ctx, p.LibraryID, rep, StepLicense, !job.Resumed && stage == nil)
+	lib, mount, err := h.mapped(ctx, job, p.LibraryID, rep, StepLicense, !job.Resumed && stage == nil)
 	if err != nil {
 		return nil, err
 	}
@@ -559,7 +571,7 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 	// Checked again before the copy: the mapping may have changed during the
 	// download. Not writable now, the job parks with its decrypted copy and
 	// waits for it to come back rather than throwing the download away.
-	if _, mount, err = h.mapped(ctx, lib.ID, rep, StepPlace, false); err != nil {
+	if _, mount, err = h.mapped(ctx, job, lib.ID, rep, StepPlace, false); err != nil {
 		return nil, err
 	}
 	placed, err := h.local.Place(ctx, transfer.PlaceRequest{Root: mount, RelPath: rel, SrcPath: decrypted, LinkSource: true,
@@ -1057,8 +1069,17 @@ func (h *Importer) tryGate(account string, rep *jobs.Reporter) (func(), bool) {
 // (strict); a resumed job, or one past its download, parks not_writable and
 // waits for the mapping to come back (CLAUDE.md: a resumed write job parks and
 // waits), keeping what it holds. The job runs on (unparked) once it is back.
-func (h *Importer) mapped(ctx context.Context, id int64, rep *jobs.Reporter, step string, strict bool) (link.Library, string, error) {
+//
+// The import is bound to the pairing that claimed job (jobs.Job.Under): once
+// the Bridge is paired otherwise (unpaired, paired again after that, or with
+// another server, whose libraries share ids with this one's), it ends
+// (errImportPairingGone) without writing to the library the registry lists
+// now, and run's defer removes its temp files.
+func (h *Importer) mapped(ctx context.Context, job jobs.Job, id int64, rep *jobs.Reporter, step string, strict bool) (link.Library, string, error) {
 	for {
+		if !job.Under(h.o.Pairing()) {
+			return link.Library{}, "", errImportPairingGone
+		}
 		lib, ok := h.o.Libraries.Library(id)
 		if !ok || lib.LibraryKind() != "books" {
 			return link.Library{}, "", fail(CodeNotWritable, "The server lists no books library %d for the Bridge.", id)
@@ -1096,6 +1117,9 @@ func (h *Importer) mapped(ctx context.Context, id int64, rep *jobs.Reporter, ste
 		}
 	}
 }
+
+// errImportPairingGone ends an import whose pairing ended under it (mapped).
+var errImportPairingGone = errors.New("the Bridge's pairing that claimed this import has ended, so it writes nothing to the library")
 
 // spelled is rel as the library spells the folders of it that already exist
 // (transfer.OnDisk: the path the server indexes, on a case-insensitive disk).

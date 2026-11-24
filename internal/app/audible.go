@@ -46,7 +46,7 @@ func (b *Bridge) newAudible(vault secrets.Store, db *store.DB, log *slog.Logger,
 	if err != nil {
 		log.Warn("audible: sweeping the import's temp folder failed", "err", err)
 	}
-	imp := audiblejob.NewImport(audiblejob.ImportOptions{Accounts: m, ServerID: serverID, Libraries: b.libs, Mount: b.mount,
+	imp := audiblejob.NewImport(audiblejob.ImportOptions{Accounts: m, ServerID: serverID, Pairing: b.conn.jobsPairing, Libraries: b.libs, Mount: b.mount,
 		TmpDir: tmp, FFmpeg: b.ffmpeg, Log: log, Server: func() audiblejob.ImportServer {
 			if cl := server(); cl != nil {
 				return cl

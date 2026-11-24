@@ -22,6 +22,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -154,13 +155,16 @@ func (s *stubImportAccounts) Download(ctx context.Context, _ string, url, dest s
 }
 
 type stubImportServer struct {
-	mu        sync.Mutex
-	lists     int
-	books     []link.LibraryBook
-	rescanErr []error
-	rescanned []string
-	enriched  []string
-	rejected  map[string]bool
+	// id and pairing name the server the link reaches and the pairing it was
+	// made for (ServerID, PairingID: jobs.Link's check of a claimed job).
+	id, pairing string
+	mu          sync.Mutex
+	lists       int
+	books       []link.LibraryBook
+	rescanErr   []error
+	rescanned   []string
+	enriched    []string
+	rejected    map[string]bool
 	// rejectedErr answers the "Not this book" read.
 	rejectedErr error
 	enrichErr   error
@@ -169,6 +173,9 @@ type stubImportServer struct {
 	// bookOf is the book the rescan answers for a file (nil: its folder).
 	bookOf func(p string) string
 }
+
+func (s *stubImportServer) ServerID() string  { return s.id }
+func (s *stubImportServer) PairingID() string { return s.pairing }
 
 func (s *stubImportServer) RejectedAudibleTitles(context.Context, string) (map[string]bool, error) {
 	s.mu.Lock()
@@ -254,11 +261,17 @@ type importEnv struct {
 	decrypted []audible.License
 	waits     []time.Duration
 	mu        sync.Mutex
+	// pair is the Bridge's pairing now (ImportOptions.Pairing), srv1's with
+	// no pairing id unless a test sets another.
+	pair atomic.Pointer[jobs.Pairing]
 }
+
+func (e *importEnv) pairing() jobs.Pairing { return *e.pair.Load() }
 
 func newImportEnv(t *testing.T) *importEnv {
 	t.Helper()
 	e := &importEnv{root: t.TempDir(), tmp: filepath.Join(t.TempDir(), "audible", "tmp"), logs: &bytes.Buffer{}}
+	e.pair.Store(&jobs.Pairing{ServerID: "srv1"})
 	e.accts = &stubImportAccounts{
 		acct:  store.AudibleAccount{ID: "acct0001", LibraryID: 1, ServerID: "srv1"},
 		title: rec("B0FAKE0002", "The Copper Grove", "Mara Quill", "Orchard Cycle", 2),
@@ -269,9 +282,10 @@ func newImportEnv(t *testing.T) *importEnv {
 		status: link.LibraryStatus{LibraryID: 1, MountPath: e.root, Mapped: true, Writable: true}}
 	e.opts = ImportOptions{
 		Accounts: e.accts, ServerID: func() string { return "srv1" }, Libraries: e.libs,
-		Server: func() ImportServer { return e.srv },
-		Mount:  func(int64, string) (string, bool) { return e.root, true },
-		TmpDir: e.tmp, Log: slog.New(slog.NewTextHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		Pairing: e.pairing,
+		Server:  func() ImportServer { return e.srv },
+		Mount:   func(int64, string) (string, bool) { return e.root, true },
+		TmpDir:  e.tmp, Log: slog.New(slog.NewTextHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		Decrypt: func(_ context.Context, _, in, out string, lic audible.License) error {
 			e.mu.Lock()
 			e.decrypted = append(e.decrypted, lic)
@@ -479,6 +493,136 @@ func TestImportBacksATitleUp(t *testing.T) {
 			t.Fatalf("result lacks %q: %v", k, wire)
 		}
 	}
+}
+
+// An import is bound to the pairing its job was claimed under: once the
+// Bridge is paired otherwise (unpaired, paired again with the same server, or
+// with another server whose library 1 shares the id), it writes nothing to the
+// library the registry lists now (denied); under its own pairing it places
+// the book (allowed). The decrypted copy goes too: no later claim, under
+// another pairing, may use it, even when the claim was lost meanwhile (lost:
+// a lost claim keeps its temp files only while its pairing stands).
+func TestImportWritesOnlyUnderItsPairing(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		now   jobs.Pairing
+		place bool
+		lost  bool
+	}{
+		{"the same pairing", jobs.Pairing{ID: "p1", ServerID: "srv1"}, true, false},
+		{"unpaired", jobs.Pairing{}, false, false},
+		{"paired again with the same server", jobs.Pairing{ID: "p2", ServerID: "srv1"}, false, false},
+		{"paired with another server", jobs.Pairing{ID: "p3", ServerID: "other"}, false, false},
+		{"unpaired, its claim lost meanwhile", jobs.Pairing{}, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newImportEnv(t)
+			e.srv.id, e.srv.pairing = "srv1", "p1"
+			e.pair.Store(&jobs.Pairing{ID: "p1", ServerID: "srv1"})
+			ctx, lose := jobs.LoseContext(context.Background())
+			defer lose()
+			progress := e.opts.onProgress
+			e.opts.onProgress = func(p jobs.Progress) {
+				progress(p)
+				if p.Step == StepDecrypt {
+					e.pair.Store(&tc.now)
+					if tc.lost {
+						lose()
+					}
+				}
+			}
+			job := jobs.ClaimedUnder(jobs.Job{ID: 7, Kind: ImportKind, Params: e.params(nil), Attempt: 1}, "srv1", "p1")
+			_, err := NewImport(e.opts).Run(ctx, job, jobs.LocalReporter())
+			if tc.place {
+				if err != nil || len(e.libraryFiles()) == 0 {
+					t.Fatalf("allowed: the import under its own pairing placed nothing: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, errImportPairingGone) {
+				t.Fatalf("denied: the import went on after its pairing ended: %v", err)
+			}
+			if files := e.libraryFiles(); len(files) != 0 {
+				t.Fatalf("denied: the import wrote %v to the library after its pairing ended", files)
+			}
+			// Its decrypted copy is no later claim's (another pairing's).
+			e.tmpEmpty(t)
+		})
+	}
+}
+
+// The pairing is looked at in the import's first mapping look too: a claim
+// whose pairing ended before it ran, or while it was parked there (a resumed
+// job whose library isn't writable), ends without asking Audible anything or
+// writing to the library, and removes the partial download it kept (denied).
+func TestImportFirstLookEndsOnceItsPairingEnded(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		parked bool
+	}{
+		{"before it ran", false},
+		{"while it was parked", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newImportEnv(t)
+			e.srv.id, e.srv.pairing = "srv1", "p1"
+			e.pair.Store(&jobs.Pairing{ID: "p1", ServerID: "srv1"})
+			part, _ := NewImport(e.opts).partPaths("acct0001", "B0FAKE0002")
+			if err := os.MkdirAll(e.tmp, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(part, []byte("partial"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if tc.parked {
+				e.libs.status.Writable = false
+				progress := e.opts.onProgress
+				e.opts.onProgress = func(p jobs.Progress) {
+					progress(p)
+					if p.Code == jobs.SayLibraryNotWritable {
+						e.pair.Store(&jobs.Pairing{})
+					}
+				}
+			} else {
+				e.pair.Store(&jobs.Pairing{ID: "p2", ServerID: "srv1"})
+			}
+			job := jobs.ClaimedUnder(jobs.Job{ID: 7, Kind: ImportKind, Params: e.params(nil), Attempt: 1, Resumed: true}, "srv1", "p1")
+			_, err := NewImport(e.opts).Run(context.Background(), job, jobs.LocalReporter())
+			if !errors.Is(err, errImportPairingGone) {
+				t.Fatalf("denied: the import went on once its pairing ended: %v", err)
+			}
+			if len(e.decrypted) != 0 || len(e.libraryFiles()) != 0 {
+				t.Fatalf("denied: the import decrypted %d or wrote %v once its pairing ended", len(e.decrypted), e.libraryFiles())
+			}
+			e.tmpEmpty(t)
+		})
+	}
+}
+
+// An import that ends other than at a mapping look once its pairing ended (a
+// stop during the copy, which keeps the decrypted copy for the next start
+// while the pairing stands) removes its temp files all the same: no later
+// claim, under another pairing, may use them (bridge#71).
+func TestImportEndingOnceItsPairingEndedRemovesItsTempFiles(t *testing.T) {
+	e := newImportEnv(t)
+	e.srv.id, e.srv.pairing = "srv1", "p1"
+	e.pair.Store(&jobs.Pairing{ID: "p1", ServerID: "srv1"})
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	progress := e.opts.onProgress
+	e.opts.onProgress = func(p jobs.Progress) {
+		progress(p)
+		if p.Step == StepPlace && p.Done > 0 {
+			e.pair.Store(&jobs.Pairing{})
+			stop() // the Bridge stopping as the copy staged its bytes
+		}
+	}
+	job := jobs.ClaimedUnder(jobs.Job{ID: 7, Kind: ImportKind, Params: e.params(nil), Attempt: 1}, "srv1", "p1")
+	_, err := NewImport(e.opts).Run(ctx, job, jobs.LocalReporter())
+	if err == nil || len(e.libraryFiles()) != 0 {
+		t.Fatalf("the stopped import placed the book: %v, %v", err, e.libraryFiles())
+	}
+	e.tmpEmpty(t)
 }
 
 func mustJSON(t *testing.T, v any) string {

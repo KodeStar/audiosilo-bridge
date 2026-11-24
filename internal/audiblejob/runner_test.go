@@ -107,10 +107,6 @@ func TestPodcastPollRunsWhileAudibleEnrichmentWaits(t *testing.T) {
 	}
 }
 
-type namedImportServer struct{ *stubImportServer }
-
-func (namedImportServer) ServerID() string { return "srv1" }
-
 func TestImportLeaseRefusalFailsWithoutPublishing(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -132,8 +128,7 @@ func TestImportLeaseRefusalFailsWithoutPublishing(t *testing.T) {
 func testImportLeaseRefusal(t *testing.T, refusal error, retry bool) {
 	t.Helper()
 	e := newImportEnv(t)
-	srv := namedImportServer{e.srv}
-	e.opts.Server = func() ImportServer { return srv }
+	e.srv.id = "srv1"
 	var staged, confirmed atomic.Bool
 	e.opts.onProgress = func(p jobs.Progress) {
 		if p.Step == StepPlace && p.Done > 0 {

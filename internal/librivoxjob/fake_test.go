@@ -194,8 +194,10 @@ func mp3(fill byte, n int) []byte {
 // fakeServer is the server link: the library's books and the rescan.
 type fakeServer struct {
 	// id is the server the link reaches (ServerID; "" for a link that names
-	// none, which only a job a runner claimed is checked against).
+	// none, which only a job a runner claimed is checked against), and
+	// pairing the Bridge's pairing it was made for (PairingID).
 	id        string
+	pairing   string
 	mu        sync.Mutex
 	books     []link.LibraryBook
 	rescanErr []error
@@ -204,6 +206,8 @@ type fakeServer struct {
 }
 
 func (s *fakeServer) ServerID() string { return s.id }
+
+func (s *fakeServer) PairingID() string { return s.pairing }
 
 func (s *fakeServer) LibraryBooks(context.Context, int64, string, int) (*link.LibraryBooks, error) {
 	return &link.LibraryBooks{Books: s.books}, nil
@@ -287,6 +291,8 @@ type harness struct {
 	stateDir string
 	free     int64
 	serverID string
+	// pairing is the Bridge's pairing now (Options.Pairing, with serverID).
+	pairing  string
 	progress []jobs.Progress
 	mu       sync.Mutex
 }
@@ -339,6 +345,7 @@ func newHarness(t *testing.T) *harness {
 		Mount:    func(id int64, _ string) (string, bool) { return x.libs.mountOf(id), true },
 		Server:   func() Server { return x.srv },
 		ServerID: func() string { return x.serverID },
+		Pairing:  func() jobs.Pairing { return jobs.Pairing{ID: x.pairing, ServerID: x.serverID} },
 		Free:     func(string) (int64, error) { return x.free, nil },
 		Wait:     func(ctx context.Context, _ time.Duration) error { return ctx.Err() },
 		onProgress: func(p jobs.Progress) {

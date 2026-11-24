@@ -174,7 +174,8 @@ internal/
             stats the audio through it (pipeline.SourceStatWait, 10 s), and so does a
             generate job's look at where the book is now before it (bookFileNow).
             bridge#65: ReadDirWithin(path, d) is os.ReadDir bounded the same way (one
-            read in flight per path), and audio.ResolveSourceWithin resolves a book's
+            read in flight per path; each caller gets its own copy of the entries,
+            as from ReadDirNWithin), and audio.ResolveSourceWithin resolves a book's
             audio through both, as the generate job's markersFile does.
             BR-OPENAI-2: LstatWithin(path, d) is os.Lstat bounded the same way, and
             ReadDirNWithin(path, n, d) a folder read of at most n entries (never
@@ -2762,7 +2763,10 @@ internal/
             through service.forJob, librivox's state, audible's account checks),
             and take the server's link only while it reaches that server under
             the job's pairing (jobs.Link: generate, verify, podcastjob, librivox,
-            audible), so a job of a server the Bridge is no longer paired with,
+            audible; Job.Under is the same rule against a Pairing value, for a
+            handler that holds the Bridge's pairing rather than a link: librivox
+            and the Audible import, in their mapping looks),
+            so a job of a server the Bridge is no longer paired with,
             or of a pairing ended since, writes nothing under, files nothing for
             and sends nothing to the new one. ABANDONER: a handler whose jobs
             hold work beyond Run (generate's engine book) implements Abandon(ctx,
@@ -3609,7 +3613,16 @@ internal/
             an unwritable mapping refuses a NEW job at once, while a resumed job,
             and any job at the place step (checked again before the copy), parks
             not_writable (progress.park.code, Reporter.Park) and waits for it to
-            come back, then runs on unparked. Then the title (preorder
+            come back, then runs on unparked. Each of those mapping looks first
+            asks whether the Bridge is still paired as when it claimed the job
+            (Job.Under(ImportOptions.Pairing())); once not, the import ends
+            (errImportPairingGone) without writing to the library listed now,
+            which may be another server's of the same id, and removes its
+            decrypted copy and partial download, a stopped or lost claim's
+            too (no later claim, under another pairing, may use them), as
+            does an import that ends otherwise once the Bridge is paired
+            otherwise (run's defer asks Job.Under again).
+            Then the title (preorder
             not_released, no rights / not in the library no_rights, a refusal
             audible_refused; a license denied as audible.ErrThrottled, the device on
             an older profile, is audible_refused with ThrottledText: "Audible
@@ -4034,16 +4047,28 @@ internal/
             fetch whose library's mapping is gone (not listed by the server, or
             checked unmapped; an unwritable one isn't gone) gets the time in the
             state (Unmapped, forgotten when a run finds it mapped again) and
-            ends StagingMaxAge later, its staging folder left in place; once a
+            ends StagingMaxAge later, its staging folder left in place (bridge#65:
+            "gone" needs a definite look: a check that failed to look at the
+            folder, or found it empty (a share not mounted now leaves an empty
+            mount point), isn't gone, nor is a check of another folder than
+            the library's mount now; with no mapping configured for the
+            library (MountFor's same-path fallback, a compose stack's) a
+            missing folder at the server's own path is gone, an empty one
+            isn't; the time is forgotten once a
+            check finds the library mapped again, writable or not, the state
+            keeping its age); once a
             day (strayWalkEvery) sweepStrays looks in every checked writable
             books library's root and author folders (each folder read bounded,
-            fsutil.ReadDirWithin) for folders named exactly
+            fsutil.ReadDirWithin, the author folders' reads together by
+            strayWalkTime, 2 min, in a random order each walk) for folders named exactly
             .audiosilo-librivox-<id> of a project no state in any library, run
             or held job knows (projectKnown), holding only what a fetch writes
             there (stagingContents: "NN - title.ext" sections and their .part,
             cover.jpg, .audiosilo/librivox.json, atomic-write temps; no folder
             or symlink), its newest entry older than StagingMaxAge, and removes
-            them (the mapping checked again first; never the author folder):
+            them (the project held in every library first, beginProject, so no
+            fetch of it starts anywhere between projectKnown and the removal;
+            the mapping checked again first; never the author folder):
             clearStray opens the folder once, through the mount's root, and
             looks and removes through that (a root of its own, so nothing
             outside the folder looked at can go), the mapping checked once more
@@ -4051,9 +4076,22 @@ internal/
             when empty and never recursively, so a file put there since the
             look stays, and a folder that is no longer the one looked at
             (renamed away, a symlink in its place) is left. The look
-            and the removal run aside holding the project's reservation, the
-            sweep waiting strayWorkWait for them: a library that hangs after the
-            walk listed it is left for the next walk.
+            and the removal run aside, the sweep waiting strayWorkWait for them:
+            a library that hangs after the walk listed it is left for the next
+            walk, and the removal is given up (bridge#71): it removes nothing
+            more once the mount answers, and the project is free again at once,
+            so a fetch of it runs rather than failing as already running.
+            Pairing (bridge#71): a run writes to the library only while the
+            Bridge is still paired as when it claimed the job (stillPaired,
+            Job.Under(Options.Pairing()): the same server and pairing; a refused token ends
+            neither), looked at before the first write and in every mapping
+            look (mapped, so before each section, the cover and the rename, and
+            while parked), and once more right before the rename (place, after
+            its sweep of the staging folder); once not, it ends (errPairingGone) writing nothing
+            more, and removes its own staging folder (through the mount it took
+            at the claim) and its state on the way out, as does a run the runner
+            drops after its pairing ended: a sweep paired with another server
+            could find neither, and a claim under the next pairing starts clean.
             Steps manifest, download (done/total = sections), cover, place,
             rescan. Result {library_id, path (the rescan's), librivox_id, files,
             bytes, adopted} (files and bytes: the sections and the cover;

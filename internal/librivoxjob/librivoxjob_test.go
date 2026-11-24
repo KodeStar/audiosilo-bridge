@@ -332,6 +332,94 @@ func TestFetchCancelAndLost(t *testing.T) {
 	}
 }
 
+// A run is bound to the pairing its job was claimed under: once the Bridge is
+// paired otherwise (unpaired, paired again after an unpair, another server,
+// whose libraries share ids with this one's), it writes nothing more, before
+// the next section too, and removes its own staging folder and its state on
+// the way out, so nothing is left that another server's sweep can't find
+// (denied); under the same pairing it goes on and places the book (allowed).
+// Paired again with the same server, a new claim of the job starts clean.
+// bridge#71.
+func TestRunStopsWritingOnceItsPairingEnds(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		pairing, server string
+		goesOn          bool
+	}{
+		{"the same pairing", "p1", testServer, true},
+		{"unpaired", "", "", false},
+		{"paired again after an unpair", "p2", testServer, false},
+		{"paired with another server", "p3", "other", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			x := newHarness(t)
+			x.pairing, x.srv.id, x.srv.pairing = "p1", testServer, "p1"
+			job := jobs.ClaimedUnder(x.job(false), testServer, "p1")
+			x.h.o.onProgress = func(p jobs.Progress) {
+				if p.Step == StepDownload && p.Done == 1 && p.Total == 3 {
+					x.pairing, x.serverID = tc.pairing, tc.server
+				}
+			}
+			_, err := x.h.Run(context.Background(), job, jobs.LocalReporter())
+			if tc.goesOn {
+				if err != nil || !x.exists(bookDir) {
+					t.Fatalf("allowed: the run under its own pairing didn't place the book: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, errPairingGone) {
+				t.Fatalf("denied: the run went on after its pairing ended: %v", err)
+			}
+			if x.exists(bookDir) || x.exists(stagingDir+"/03 - Johnny Crow's New Garden.mp3") {
+				t.Fatal("denied: the run wrote to the library after its pairing ended")
+			}
+			for _, r := range x.fetch.seen() {
+				if r.url == sectionURL(3) {
+					t.Fatal("denied: the run fetched the next section after its pairing ended")
+				}
+			}
+			if x.exists(stagingDir) || x.exists(path.Dir(stagingDir)) || x.hasState() {
+				t.Fatal("denied: the run left its staging folder, its author folder or its state after its pairing ended")
+			}
+
+			// Paired again with the same server: a new claim starts clean,
+			// from the first section, and places the book.
+			x.h.o.onProgress = nil
+			x.pairing, x.serverID = "p4", testServer
+			x.srv.id, x.srv.pairing = testServer, "p4"
+			before := len(x.fetch.seen())
+			if _, err := x.h.Run(context.Background(), jobs.ClaimedUnder(x.job(false), testServer, "p4"), jobs.LocalReporter()); err != nil || !x.exists(bookDir) {
+				t.Fatalf("the next claim under a new pairing didn't place the book: %v", err)
+			}
+			for _, r := range x.fetch.seen()[before:] {
+				if r.offset != 0 {
+					t.Fatalf("the next claim resumed %s at %d rather than starting clean", r.url, r.offset)
+				}
+			}
+			if got := x.fetch.seen()[before].url; got != sectionURL(1) {
+				t.Fatalf("the next claim began with %s, not the first section", got)
+			}
+		})
+	}
+
+	// Dropped by the runner (its context ended for good) once the pairing
+	// ended: its own staging folder and state go on the way out too.
+	x := newHarness(t)
+	x.pairing, x.srv.id, x.srv.pairing = "p1", testServer, "p1"
+	ctx, drop := jobs.DropContext(context.Background())
+	x.fetch.files[sectionURL(2)].cut = []int{100}
+	x.fetch.files[sectionURL(2)].onCut = func() {
+		x.pairing, x.serverID = "", ""
+		drop()
+	}
+	if _, err := x.h.Run(ctx, jobs.ClaimedUnder(x.job(false), testServer, "p1"), jobs.LocalReporter()); err == nil {
+		t.Fatal("a dropped run succeeded")
+	}
+	if x.exists(stagingDir) || x.hasState() {
+		t.Fatal("a run dropped after its pairing ended left its staging folder or its state")
+	}
+}
+
 func TestAbandon(t *testing.T) {
 	x := newHarness(t)
 	ctx, stop := context.WithCancel(context.Background())
