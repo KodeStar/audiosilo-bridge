@@ -414,7 +414,7 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 		// A 404 for the job is no refusal: a proxy in front of a restarting
 		// server answers one too, and a title queued again (by this account)
 		// reuses the decrypt. The start-up sweep bounds what a removed job leaves.
-		if err == nil || ctx.Err() != nil || bookRefused(err) {
+		if err == nil || ctx.Err() != nil || bookRefused(err) || errors.Is(err, errImportPairingGone) {
 			removeStaged(decrypted)
 		}
 		audible.RemovePartial(part)

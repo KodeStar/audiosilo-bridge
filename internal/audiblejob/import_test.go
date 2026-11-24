@@ -22,6 +22,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -262,26 +263,15 @@ type importEnv struct {
 	mu        sync.Mutex
 	// pair is the Bridge's pairing now (ImportOptions.Pairing), srv1's with
 	// no pairing id unless a test sets another.
-	pairMu sync.Mutex
-	pair   jobs.Pairing
+	pair atomic.Pointer[jobs.Pairing]
 }
 
-func (e *importEnv) pairing() jobs.Pairing {
-	e.pairMu.Lock()
-	defer e.pairMu.Unlock()
-	return e.pair
-}
-
-func (e *importEnv) setPairing(p jobs.Pairing) {
-	e.pairMu.Lock()
-	defer e.pairMu.Unlock()
-	e.pair = p
-}
+func (e *importEnv) pairing() jobs.Pairing { return *e.pair.Load() }
 
 func newImportEnv(t *testing.T) *importEnv {
 	t.Helper()
-	e := &importEnv{root: t.TempDir(), tmp: filepath.Join(t.TempDir(), "audible", "tmp"), logs: &bytes.Buffer{},
-		pair: jobs.Pairing{ServerID: "srv1"}}
+	e := &importEnv{root: t.TempDir(), tmp: filepath.Join(t.TempDir(), "audible", "tmp"), logs: &bytes.Buffer{}}
+	e.pair.Store(&jobs.Pairing{ServerID: "srv1"})
 	e.accts = &stubImportAccounts{
 		acct:  store.AudibleAccount{ID: "acct0001", LibraryID: 1, ServerID: "srv1"},
 		title: rec("B0FAKE0002", "The Copper Grove", "Mara Quill", "Orchard Cycle", 2),
@@ -292,7 +282,7 @@ func newImportEnv(t *testing.T) *importEnv {
 		status: link.LibraryStatus{LibraryID: 1, MountPath: e.root, Mapped: true, Writable: true}}
 	e.opts = ImportOptions{
 		Accounts: e.accts, ServerID: func() string { return "srv1" }, Libraries: e.libs,
-		Pairing: func() jobs.Pairing { return e.pairing() },
+		Pairing: e.pairing,
 		Server:  func() ImportServer { return e.srv },
 		Mount:   func(int64, string) (string, bool) { return e.root, true },
 		TmpDir:  e.tmp, Log: slog.New(slog.NewTextHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
@@ -509,7 +499,8 @@ func TestImportBacksATitleUp(t *testing.T) {
 // Bridge is paired otherwise (unpaired, paired again with the same server, or
 // with another server whose library 1 shares the id), it writes nothing to the
 // library the registry lists now (denied); under its own pairing it places
-// the book (allowed).
+// the book (allowed). The decrypted copy goes too: no later claim, under
+// another pairing, may use it.
 func TestImportWritesOnlyUnderItsPairing(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -524,12 +515,12 @@ func TestImportWritesOnlyUnderItsPairing(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newImportEnv(t)
 			e.srv.id, e.srv.pairing = "srv1", "p1"
-			e.setPairing(jobs.Pairing{ID: "p1", ServerID: "srv1"})
+			e.pair.Store(&jobs.Pairing{ID: "p1", ServerID: "srv1"})
 			progress := e.opts.onProgress
 			e.opts.onProgress = func(p jobs.Progress) {
 				progress(p)
 				if p.Step == StepDecrypt {
-					e.setPairing(tc.now)
+					e.pair.Store(&tc.now)
 				}
 			}
 			job := jobs.ClaimedUnder(jobs.Job{ID: 7, Kind: ImportKind, Params: e.params(nil), Attempt: 1}, "srv1", "p1")
@@ -546,6 +537,8 @@ func TestImportWritesOnlyUnderItsPairing(t *testing.T) {
 			if files := e.libraryFiles(); len(files) != 0 {
 				t.Fatalf("denied: the import wrote %v to the library after its pairing ended", files)
 			}
+			// Its decrypted copy is no later claim's (another pairing's).
+			e.tmpEmpty(t)
 		})
 	}
 }

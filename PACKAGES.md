@@ -3617,7 +3617,9 @@ internal/
             asks whether the Bridge is still paired as when it claimed the job
             (Job.Under(ImportOptions.Pairing())); once not, the import ends
             (errImportPairingGone) without writing to the library listed now,
-            which may be another server's of the same id. Then the title (preorder
+            which may be another server's of the same id, and removes its
+            decrypted copy (no later claim, under another pairing, may use it).
+            Then the title (preorder
             not_released, no rights / not in the library no_rights, a refusal
             audible_refused; a license denied as audible.ErrThrottled, the device on
             an older profile, is audible_refused with ThrottledText: "Audible
