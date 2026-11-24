@@ -24,6 +24,8 @@ import (
 
 	"github.com/kodestar/audiosilo-meta/pkg/model"
 	"github.com/kodestar/audiosilo-server/pkg/match"
+
+	"github.com/kodestar/audiosilo-bridge/internal/source"
 )
 
 // coverageTTL bounds how long lookup/work-detail/search-verdict responses are
@@ -893,13 +895,8 @@ func firstNonEmpty(ss []string) string {
 // non-numeric position yields ok=false so a fuzzy match never asserts a false
 // sequence.
 func parseFloatSeq(s string) (float64, bool) {
-	s = strings.TrimSpace(s)
-	if s == "" || strings.Contains(s, "-") {
+	if strings.Contains(s, "-") {
 		return 0, false
 	}
-	v, err := strconv.ParseFloat(s, 64)
-	if err != nil {
-		return 0, false
-	}
-	return v, true
+	return source.ParsePosition(s)
 }
