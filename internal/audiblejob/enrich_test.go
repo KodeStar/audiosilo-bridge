@@ -305,6 +305,38 @@ func TestPollContestedKeepsTheBest(t *testing.T) {
 	}
 }
 
+// TestPollOtherVolumeNotEnriched: the opening volume's bare title matches a
+// numbered sequel's folder (pkg/match lets volume 1 claim a bare-titled book).
+// With the sequel not owned that is the folder's only claim, but the numbers
+// disagree, so the opening volume's ASIN never goes onto the sequel's folder.
+// The same title on its own folder is enriched.
+func TestPollOtherVolumeNotEnriched(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		pos  string
+		want map[string]string
+	}{
+		{"3", map[string]string{}},
+		{"1", map[string]string{"Val/Road to Craft/RC03": "B0CONT0001"}},
+	} {
+		fs := &fakeServer{pageSize: 500, books: []link.LibraryBook{
+			{Path: "Val/Road to Craft/RC03", Title: "Road to Craft " + tc.pos, Authors: []string{"Val Erio"},
+				Series: []link.SeriesRef{{Name: "Road to Craft", Position: tc.pos}}},
+		}}
+		accts := &stubAccounts{acct: account(), recs: []source.Record{
+			{ASIN: "B0CONT0001", Title: "Road to Craft", Author: "Val Erio", Series: "Road to Craft", SeriesPosition: "1", Sequence: 1, HasSequence: true},
+		}}
+		h := setup(t, fs, accts)
+		res, err := run(t, h, "acct0001")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Matched != 1 || fmt.Sprint(fs.enrichedNow()) != fmt.Sprint(tc.want) {
+			t.Fatalf("book #%s: result = %+v, enriched %v, want %v", tc.pos, res, fs.enrichedNow(), tc.want)
+		}
+	}
+}
+
 // TestPollPackOnVolumeNotEnriched: a pack whose title fell back to the folder
 // at its first volume's position matches it, but that folder may hold one
 // volume, so the pack's ASIN never goes onto it; a pack on its own range

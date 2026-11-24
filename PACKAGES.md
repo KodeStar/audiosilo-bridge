@@ -3594,7 +3594,10 @@ internal/
             empty library sends one empty final call, so the server marks every
             title gone), then Enrich (enrich.go) for each matched book without an
             ASIN that no second title claimed (counted from the claims: contested), no preorder matched
-            (not out yet: another edition), and the spans agree (importjob.SpanMismatch).
+            (not out yet: another edition), whose claim's series number does not
+            disagree with the book's (Claim.Disagrees: volume 1's bare title matches
+            a numbered sequel's folder, and with the sequel not owned would be its
+            only claim), and the spans agree (importjob.SpanMismatch).
             A folder at the first volume's position may hold that volume alone.
             Enrichment is PACED: one PUT per 200 ms, a 429 waits
             its Retry-After (else 1 to 2 s with jitter, doubling) and halves the pace (to 2 s at the
