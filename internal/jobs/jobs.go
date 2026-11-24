@@ -1949,13 +1949,12 @@ func (p Progress) Text() string {
 
 // MarshalJSON writes the progress as one flat object: Extra's keys beside step,
 // message (Text), message_code, message_params, done and total. An object over
-// the server's 16 KiB is sent without Extra, which the server would otherwise
-// refuse for good.
+// the server's 16 KiB is sent without Extra (and without message_params when
+// they alone take it over), which the server would otherwise refuse for good.
 func (p Progress) MarshalJSON() ([]byte, error) {
-	type base Progress
 	p.Message = p.Text()
 	if len(p.Extra) == 0 {
-		return json.Marshal(base(p))
+		return marshalPlain(p)
 	}
 	out := make(map[string]any, len(p.Extra)+6)
 	for k, v := range p.Extra {
@@ -1982,9 +1981,22 @@ func (p Progress) MarshalJSON() ([]byte, error) {
 	}
 	b, err := json.Marshal(out)
 	if err != nil || len(b) > maxProgressBytes {
-		return json.Marshal(base(p))
+		return marshalPlain(p)
 	}
 	return b, nil
+}
+
+// marshalPlain is p without Extra, and without its Params too when they alone
+// take it past the server's cap (a param is never clipped, as message is): the
+// console then shows the coded sentence's English message.
+func marshalPlain(p Progress) ([]byte, error) {
+	type base Progress
+	b, err := json.Marshal(base(p))
+	if err == nil && len(b) > maxProgressBytes && len(p.Params) > 0 {
+		p.Params = nil
+		return json.Marshal(base(p))
+	}
+	return b, err
 }
 
 // progressFields are Progress's own keys in its flat object, never Extra's.

@@ -150,6 +150,31 @@ func TestProgressCodeOnTheWire(t *testing.T) {
 	}
 }
 
+// Params past the server's cap (they are never clipped, as message is) go, with
+// Extra, rather than have the server refuse the progress for good: the code and
+// the clipped English message still go.
+func TestProgressParamsPastTheCap(t *testing.T) {
+	t.Parallel()
+	rep := LocalReporter()
+	params, _ := LibraryNotWritable(strings.Repeat("x", maxProgressBytes))
+	rep.Progress(Progress{Step: "place", Code: SayLibraryNotWritable, Params: params,
+		Extra: map[string]any{"park": map[string]any{"code": "not_writable"}}})
+	b, err := json.Marshal(rep.Last())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	msg, _ := got["message"].(string)
+	if len(b) > maxProgressBytes || got["message_params"] != nil || got["message_code"] != SayLibraryNotWritable ||
+		len(msg) != maxMessageText {
+		t.Fatalf("%d bytes: code %v, params sent %v, message %d bytes", len(b), got["message_code"],
+			got["message_params"] != nil, len(msg))
+	}
+}
+
 // A stored coded progress reads back with its code and params as fields, not
 // Extra (a restarted job resends them as they were).
 func TestDecodeProgressKeepsCode(t *testing.T) {

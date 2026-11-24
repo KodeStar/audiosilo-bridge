@@ -2640,9 +2640,11 @@ internal/
             never reports running between two parks. The same progress again changes
             nothing (DeepEqual), so a handler may report on every poll. Progress.Extra
             is a kind's own fields (sidecars.generate's stage, eta_seconds, cost_usd,
-            source, park), marshalled FLAT beside step/message/done/total (those four
-            win over an Extra key of the same name); an object over the server's 16
-            KiB is sent without Extra rather than refused for good. Reporter.Path()
+            source, park), marshalled FLAT beside step/message/message_code/
+            message_params/done/total (those win over an Extra key of the same
+            name); an object over the server's 16 KiB is sent without Extra (and
+            without message_params when they alone take it over: a param is never
+            clipped) rather than refused for good. Reporter.Path()
             is the job's path as the server's last answer gave it ("" until one did):
             the server moves an open job with its book. SERVER IDENTITY, THE ONE
             RULE (BR-LINK-RULE; it replaced three: AskShareOff by address,
