@@ -142,14 +142,18 @@ func (h *Handler) sweepOne(k key, now time.Time) {
 
 // mappingGone reports whether library id's mapping is gone: the server no
 // longer lists the library, or its last check found it unmapped here with a
-// definite look, at the mount the library has now: no mapping is configured
-// for it here any more, or its folder answers, holds something and isn't the
-// library's. A library that is mapped (writable or not), not checked yet,
-// whose state no answered check backs (the registry's Status false: a check
-// the server didn't answer, a state too old), or whose folder doesn't show
-// it is there (missing, unreadable, not answering, or empty: a share not
-// mounted now leaves an empty folder at its mount point, as mapping's
-// proveKept says), isn't gone (bridge#65).
+// definite look, at the mount the library has now: its folder answers, holds
+// something and isn't the library's, or no mapping is configured for it here
+// any more and nothing is at the server's own path (MountFor's fallback). A
+// library that is mapped (writable or not), not checked yet, whose state no
+// answered check backs (the registry's Status false: a check the server
+// didn't answer, a state too old), checked at another folder, or whose folder
+// doesn't show it is there (missing while a mapping is configured,
+// unreadable, not answering, or empty: a share not mounted now leaves an
+// empty folder at its mount point, as mapping's proveKept says), isn't gone
+// (bridge#65). An empty folder at the server's own path isn't gone either: a
+// compose stack mounting the libraries at the same path in both containers
+// configures no mapping at all.
 func (h *Handler) mappingGone(id int64) bool {
 	lib, ok := h.o.Libraries.Library(id)
 	if !ok {
@@ -160,13 +164,13 @@ func (h *Handler) mappingGone(id int64) bool {
 		return false
 	}
 	mount, configured := h.o.Mount(lib.ID, lib.Root)
-	switch {
-	case !configured:
-		return true
-	case mount != st.MountPath:
+	if mount != st.MountPath {
 		return false // the check was of another folder
 	}
 	held, err := fsutil.LookWithin("librivox-holds", mount, mapping.LookTimeout, holdsAnything)
+	if !configured && errors.Is(err, fs.ErrNotExist) {
+		return true
+	}
 	return err == nil && held
 }
 

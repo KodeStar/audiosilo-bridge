@@ -4048,8 +4048,11 @@ internal/
             ends StagingMaxAge later, its staging folder left in place (bridge#65:
             "gone" needs a definite look: a check that failed to look at the
             folder, or found it empty (a share not mounted now leaves an empty
-            mount point), isn't gone unless no mapping is configured for the
-            library any more; the time is forgotten once a
+            mount point), isn't gone, nor is a check of another folder than
+            the library's mount now; with no mapping configured for the
+            library (MountFor's same-path fallback, a compose stack's) a
+            missing folder at the server's own path is gone, an empty one
+            isn't; the time is forgotten once a
             check finds the library mapped again, writable or not, the state
             keeping its age); once a
             day (strayWalkEvery) sweepStrays looks in every checked writable

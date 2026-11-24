@@ -904,6 +904,13 @@ func TestMappingGoneNeedsADefiniteAnswer(t *testing.T) {
 	if h.mappingGone(1) {
 		t.Fatal("denied: an empty folder (an unmounted share's mount point) counts as the mapping gone")
 	}
+	// The same at the server's own path with no mapping configured (a compose
+	// stack mounting the library at the same path in both containers).
+	h.o.Mount = func(int64, string) (string, bool) { return root, false }
+	if h.mappingGone(1) {
+		t.Fatal("denied: an empty folder at the server's own path, no mapping configured, counts as the mapping gone")
+	}
+	h.o.Mount = mount
 	if err := os.WriteFile(filepath.Join(root, "other.txt"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
