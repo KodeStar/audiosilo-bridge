@@ -290,8 +290,22 @@ func (s *Scheduler) Reconcile(ctx context.Context) error {
 		return err
 	}
 	for _, r := range openRuns {
-		if err := s.db.FinishStageRun(ctx, r.ID, false,
-			json.RawMessage(`{"interrupted":true}`)); err != nil {
+		ok := false
+		metrics := json.RawMessage(`{"interrupted":true}`)
+		// A repair can finish on disk just before shutdown. Its stage counter
+		// must include that round when the scheduler resumes from the sentinel.
+		if r.Stage == string(state.Retranscribing) {
+			b, err := s.db.GetBook(ctx, r.BookID)
+			if err != nil {
+				return err
+			}
+			if b.Goal == state.GoalReadalong && b.State == r.Stage {
+				if sn, err := ReadSentinel(b.WorkDir, r.Stage); err == nil && sn.Stage == r.Stage {
+					ok, metrics = true, sn.Result.Metrics
+				}
+			}
+		}
+		if err := s.db.FinishStageRun(ctx, r.ID, ok, metrics); err != nil {
 			return err
 		}
 	}
@@ -543,6 +557,14 @@ func sortASRLaneWithRanks(candidates []store.Book, ranks map[int64]int) {
 
 func sortByID(b []store.Book) {
 	sort.Slice(b, func(i, j int) bool { return b[i].ID < b[j].ID })
+}
+
+// StageActive reports whether the scheduler has dispatched this exact stage.
+func (s *Scheduler) StageActive(id int64, stage state.State) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	run := s.inflight[id]
+	return run != nil && run.stage == stage
 }
 
 // QueueSnapshot returns the current scheduler-owned Running-board order. It uses
@@ -877,6 +899,9 @@ func (s *Scheduler) runStage(ctx context.Context, b store.Book) {
 // the stage's StageResult.RateSample), so the reporter no longer tracks a span.
 func (s *Scheduler) execute(ctx context.Context, b store.Book, stage state.State) (StageResult, error) {
 	r := StageReport{
+		ASRDecoded: func(remote bool, audioSeconds, decodeSeconds float64) {
+			s.recordASRRate(ctx, remote, audioSeconds, decodeSeconds)
+		},
 		Progress: func(done, total int) {
 			_ = s.db.SetProgress(ctx, b.ID, string(stage), done, total)
 			_ = s.db.TouchOpenStageRun(ctx, b.ID, string(stage), true)

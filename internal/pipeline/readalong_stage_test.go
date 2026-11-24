@@ -314,11 +314,15 @@ func TestReadalongAligningRefusesTheEbook(t *testing.T) {
 // mechanical round (no agent) and goes to retranscribing; once that round ran it
 // goes on to aligning, clean or not; a clean one goes straight on.
 func TestReadalongSweepOneRound(t *testing.T) {
-	work := t.TempDir()
+	ctx := t.Context()
+	db := openTestDB(t)
+	book := newSeriesBook(t, db, t.TempDir(), "", "", true)
+	exe := &Executor{db: db}
+	work := book.WorkDir
 	dirty := &qa.Report{RetranscribeQueue: []int{2}, RepeatedRuns: []qa.RepeatedRun{{Chapter: 3}}}
 	var notes []string
 	r := scheduler.StageReport{Note: func(s string) { notes = append(notes, s) }}
-	got, err := readalongSweep(work, dirty, r)
+	got, err := exe.readalongSweep(ctx, book, dirty, r)
 	if err != nil || !got {
 		t.Fatalf("first sweep: %v %v", got, err)
 	}
@@ -329,30 +333,37 @@ func TestReadalongSweepOneRound(t *testing.T) {
 	if len(plan.NonAcceptEntries()) != 2 {
 		t.Fatalf("plan %+v", plan.Entries)
 	}
-	if err := markReadalongRepaired(work); err != nil {
+	run, err := db.StartStageRun(ctx, book.ID, string(state.Retranscribing), 1)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if got, err := readalongSweep(work, dirty, r); err != nil || got {
+	if err := db.FinishStageRun(ctx, run, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := exe.readalongSweep(ctx, book, dirty, r); err != nil || got {
 		t.Fatalf("second sweep: %v %v", got, err)
 	}
 	if last := notes[len(notes)-1]; !strings.Contains(last, "chapters 2,3") && !strings.Contains(last, "chapters 2, 3") {
 		t.Fatalf("note %q doesn't name the chapters left", last)
 	}
-	if err := ResetReadalongRepair(work); err != nil {
+	if err := db.SupersedeStageSuccesses(ctx, book.ID, string(state.Retranscribing)); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := readalongSweep(work, &qa.Report{}, r); got {
+	if got, err := exe.readalongSweep(ctx, book, dirty, r); err != nil || !got {
+		t.Fatalf("continued sweep: %v %v", got, err)
+	}
+	if got, _ := exe.readalongSweep(ctx, book, &qa.Report{}, r); got {
 		t.Fatal("a clean sweep was repaired")
 	}
 	// Nothing a re-transcription could fix (a cross-segment hit only): straight on.
-	if got, _ := readalongSweep(work, &qa.Report{CrossSegment: []qa.CrossSegmentHit{{Chapter: 4}}}, r); got {
+	if got, _ := exe.readalongSweep(ctx, book, &qa.Report{CrossSegment: []qa.CrossSegmentHit{{Chapter: 4}}}, r); got {
 		t.Fatal("an accept-only plan went to retranscribing")
 	}
 }
 
-// TestReadalongRetranscribeMarksTheRound: a read-along book's retranscribing
-// marks its round, and cuts a FLAC a purge took again before transcribing it.
-func TestReadalongRetranscribeMarksTheRound(t *testing.T) {
+// TestReadalongRetranscribeResplits: a read-along book's retranscribing
+// cuts a FLAC a purge took again before transcribing it.
+func TestReadalongRetranscribeResplits(t *testing.T) {
 	ffmpeg, err := exec.LookPath("ffmpeg")
 	if err != nil {
 		t.Skip("ffmpeg not installed")
@@ -371,9 +382,7 @@ func TestReadalongRetranscribeMarksTheRound(t *testing.T) {
 	if !fileExists(filepath.Join(book.WorkDir, audio.ChaptersDir, audio.ChapterFileName(2))) {
 		t.Fatal("chapter 2's FLAC wasn't cut again")
 	}
-	if !readalongRepaired(book.WorkDir) {
-		t.Fatal("the round wasn't marked")
-	}
+
 }
 
 // TestAudioCurrent: a folder book's files as inspected are current; a file
@@ -495,28 +504,5 @@ func TestReadalongInspectWindowsAnUnusableTable(t *testing.T) {
 		if want := map[string]state.State{state.GoalReadalong: state.Splitting, "": state.MarkersNormalizing}[tc.goal]; err != nil || next != want {
 			t.Fatalf("goal %q: next %q, want %q (%v)", tc.goal, next, want, err)
 		}
-	}
-}
-
-// The transcript check's located loops become heal windows (a re-align reuses the
-// kept transcripts, loops and all, and the mechanical round writes no tail
-// verdicts); an unlocated one, or one over 600 s, doesn't.
-func TestReadalongLoopWindows(t *testing.T) {
-	tl, err := readalong.Compose(readalong.StyleFiles, []readalong.ManifestChapter{{Chapter: 1, FilePath: "01.mp3"}, {Chapter: 4, FilePath: "04.mp3"}},
-		[]readalong.AudioFile{{Path: "01.mp3", Duration: 1510.89}, {Path: "04.mp3", Duration: 1400}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	sec := func(v float64) *float64 { return &v }
-	hits := []qa.CrossSegmentHit{
-		{Chapter: 1, Count: 2641, FirstSec: sec(1277), LastSec: sec(1507)},
-		{Chapter: 4, Count: 4194, FirstSec: sec(957), LastSec: sec(1331)},
-		{Chapter: 4, Count: 9, Pos: -1},                               // not located
-		{Chapter: 1, Count: 6, FirstSec: sec(10), LastSec: sec(1200)}, // a phrase the book repeats
-	}
-	got := readalongLoopWindows(hits, tl)
-	want := []readalong.Window{{File: 0, Start: 1276.5, End: 1507.5}, {File: 1, Start: 956.5, End: 1331.5}}
-	if fmt.Sprint(got) != fmt.Sprint(want) {
-		t.Fatalf("windows %+v, want %+v", got, want)
 	}
 }

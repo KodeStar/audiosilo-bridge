@@ -1,4 +1,5 @@
 {
+  "asr_turn_wait": "Waiting for a turn to use speech recognition",
   "account_backup_wait": "Waiting for this account's other backup to finish",
   "adding_asin": "Adding the title's ASIN to the book",
   "adding_asins": "Adding the ASINs of the matched books",

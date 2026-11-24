@@ -132,15 +132,19 @@ func TestRouterRemote(t *testing.T) {
 	go func() {
 		task, _ := h.Claim(ctx, id, 5*time.Second)
 		if task != nil {
-			_ = h.Result(ctx, id, task.ID, workerproto.ResultMeta{Attempt: task.Attempt, Backend: "mlx-whisper"}, []byte(okRaw))
+			_ = h.Result(ctx, id, task.ID, workerproto.ResultMeta{Attempt: task.Attempt, Backend: "mlx-whisper", Model: "worker-model", Device: "metal", DecodeSeconds: 8}, []byte(okRaw))
 		}
 	}()
 	if r.ID() != IDWorker {
 		t.Fatalf("id = %s", r.ID())
 	}
 	j := job(t)
+	j.Result = &asr.Decode{}
 	if err := r.Transcribe(ctx, j); err != nil || readRaw(t, j) != okRaw {
 		t.Fatal(err)
+	}
+	if *j.Result != (asr.Decode{Remote: true, Backend: "mlx-whisper", Device: "metal", Model: "worker-model", Seconds: 8}) {
+		t.Fatalf("route %+v", j.Result)
 	}
 	if local.runs.Load() != 0 || local.ready.Load() != 0 {
 		t.Fatal("a worker's segment ran locally")

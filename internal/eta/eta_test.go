@@ -142,6 +142,22 @@ func TestBookETASumsSeeds(t *testing.T) {
 	}
 }
 
+func TestASRRouteRateAndAlignmentUnits(t *testing.T) {
+	rates := map[string]float64{ASRRateKey(true): 120, ASRRateKey(false): 800, "asr": 999}
+	b := Book{State: state.ASR, Chapters: 4, DurationSec: 7200, RemoteASR: true, Progress: map[string]Progress{"asr": {Done: 1, Total: 4}}}
+	if got := remainingSegments(b, rates)[0].seconds; got != 180 {
+		t.Fatalf("remote: %v", got)
+	}
+	b.RemoteASR = false
+	if got := remainingSegments(b, rates)[0].seconds; got != 1200 {
+		t.Fatalf("local: %v", got)
+	}
+	align := Book{State: state.ReadalongAligning, Goal: state.GoalReadalong, Progress: map[string]Progress{"readalong_aligning": {Done: 18, Total: 36}}}
+	if got, ok := BookETA(align, nil); !ok || got != 90 {
+		t.Fatalf("align: %v, %v", got, ok)
+	}
+}
+
 func TestUnknownChaptersDefault(t *testing.T) {
 	// chapters 0, no progress -> the per-chapter stages assume DefaultChapters.
 	b := Book{State: state.Splitting}

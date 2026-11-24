@@ -139,7 +139,7 @@ export function sourceText(source: string | undefined): string {
 export function generateFacts(p: Progress | null | undefined, parked: boolean): string[] {
   if (!p) return [];
   const facts: string[] = [];
-  const eta = parked ? '' : etaText(p.eta_seconds);
+  const eta = parked || p.step === 'waiting' ? '' : etaText(p.eta_seconds);
   if (eta) facts.push(`${eta} left`);
   const cost = usd(p.cost_usd);
   if (cost) facts.push(`${cost} spent`);

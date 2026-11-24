@@ -59,6 +59,7 @@ type Engine interface {
 	CancelUnlessFollowed(ctx context.Context, id int64, g store.StopGuard) error
 	Delete(ctx context.Context, id int64) error
 	ETASeconds(id int64) (int64, bool)
+	StageActive(id int64, stage state.State) bool
 	// Hold reserves a book for work outside its stages (the description step, a
 	// transcript purge); ok is false while a stage runs on it or another holds it.
 	Hold(id int64) (release func(), ok bool)
@@ -1948,8 +1949,9 @@ func (h *Handler) step(ctx context.Context, eng Engine, r *run, b store.Book) (a
 		r.costUSD, _, _ = h.o.DB.SumStageRunBudgetCost(ctx, b.ID)
 	}
 	v := view{book: b, source: r.source, progress: r.progress, costUSD: r.costUSD}
-	v.eta, v.hasETA = eng.ETASeconds(b.ID)
 	st, status := state.State(b.State), state.Status(b.Status)
+	v.waitingASR = status == state.StatusNone && state.LaneOf(st) == state.LaneASR && !eng.StageActive(b.ID, st)
+	v.eta, v.hasETA = eng.ETASeconds(b.ID)
 	if r.kind == ReadalongKind {
 		if err := h.readalongAsk(r, b); err != nil {
 			return nil, true, err

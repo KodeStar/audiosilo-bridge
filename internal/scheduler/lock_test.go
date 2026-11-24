@@ -534,6 +534,34 @@ func TestReconcileClosesOpenRunsAndRewindsOnMissingSentinel(t *testing.T) {
 	}
 }
 
+func TestReconcileCountsCompletedReadalongRepair(t *testing.T) {
+	h := newHarness(t)
+	db := h.openDB(t)
+	ctx := t.Context()
+	b, err := db.CreateBook(ctx, store.NewBook{SourcePath: "book", WorkDir: t.TempDir(), Goal: state.GoalReadalong})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := string(state.Retranscribing)
+	if err := db.SetBookState(ctx, b.ID, stage, "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.StartStageRun(ctx, b.ID, stage, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteSentinel(b.WorkDir, stage, StageResult{}); err != nil {
+		t.Fatal(err)
+	}
+	s := New(db, h.hub, NewStubExecutor(0, 0), 1, h.workRoot, false)
+	defer s.wg.Wait()
+	if err := s.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := db.CountStageSuccesses(ctx, b.ID, stage); err != nil || n != 1 {
+		t.Fatalf("completed repairs %d: %v", n, err)
+	}
+}
+
 func TestControlOpErrors(t *testing.T) {
 	h := newHarness(t)
 	db := h.openDB(t)

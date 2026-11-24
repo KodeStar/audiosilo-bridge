@@ -771,6 +771,9 @@ func (db *DB) ContinueReadalong(ctx context.Context, id int64, from, to, goal st
 	} else if err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM progress WHERE book_id=?`, id); err != nil {
+		return err
+	}
 	if fresh {
 		if _, err := tx.ExecContext(ctx, `UPDATE generate_books SET swept_at='' WHERE book_id=?`, id); err != nil {
 			return err

@@ -644,31 +644,58 @@ func TestASRStageResumesSkippingCompleted(t *testing.T) {
 	}
 }
 
-// TestASRStageResumeRateSampleUnits asserts the RateSample a resumed ASR run reports
-// counts ONLY the chapters transcribed this run (1 of 3), not the whole book, so a
-// resume can never corrupt the learned per-chapter rate with a whole-book count.
-func TestASRStageResumeRateSampleUnits(t *testing.T) {
+// A resume learns only from newly decoded segments, and keeps each actual route.
+func TestASRSegmentProvenanceAndRates(t *testing.T) {
 	work := t.TempDir()
 	writeManifest(t, work, 3)
 	seedFLACs(t, work, 3)
-	seedRawTranscript(t, work, 1)
-	seedRawTranscript(t, work, 2)
+	seedRawTranscript(t, work, 1) // a pre-upgrade raw has no per-segment record
+	if err := writeASRProvenance(work, asrProvenance{Backend: "earlier", Model: "earlier-model", Language: "en"}); err != nil {
+		t.Fatal(err)
+	}
+	fake := &mixedBackend{fakeBackend: newFakeBackend()}
+	setup := fakeASR(fake)
+	exe := NewExecutor(Config{DataDir: t.TempDir(), ASR: setup})
+	var routes []bool
+	report := scheduler.StageReport{ASRDecoded: func(remote bool, audio, seconds float64) {
+		routes = append(routes, remote)
+		if seconds <= 0 {
+			t.Errorf("decode time %v", seconds)
+		}
+	}}
+	book := store.Book{ID: 1, WorkDir: work}
+	for range 2 {
+		if _, err := exe.Execute(t.Context(), book, state.ASR, report); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := readASRProvenance(work)
+	if len(routes) != 2 || routes[0] || !routes[1] || len(p.Segments) != 2 ||
+		p.Segments[2].Backend != fake.ID() || p.Segments[2].Model != setup.Model || p.Segments[3] != fake.remote() {
+		t.Fatalf("routes %v, provenance %+v", routes, p)
+	}
+	if _, err := exe.Execute(t.Context(), book, state.Sanitizing, scheduler.StageReport{}); err != nil {
+		t.Fatal(err)
+	}
+	for chapter, model := range map[int]string{1: "earlier-model", 2: setup.Model, 3: "worker-model"} {
+		tr, err := transcript.ReadNormalized(filepath.Join(work, transcript.JSONDir), chapter)
+		if err != nil || tr.Model != model {
+			t.Fatalf("chapter %d model %q: %v", chapter, tr.Model, err)
+		}
+	}
+}
 
-	fake := newFakeBackend()
-	exe := NewExecutor(Config{DataDir: t.TempDir(), ASR: fakeASR(fake), Fallback: scheduler.NewStubExecutor(0, 0)})
-	res, err := exe.Execute(context.Background(), store.Book{ID: 1, WorkDir: work}, state.ASR, scheduler.StageReport{Progress: func(int, int) {}})
-	if err != nil {
-		t.Fatalf("asr stage: %v", err)
+type mixedBackend struct{ *fakeBackend }
+
+func (*mixedBackend) remote() asr.Decode {
+	return asr.Decode{Backend: "mlx-whisper", Device: "metal", Model: "worker-model", Seconds: 12, Remote: true}
+}
+
+func (m *mixedBackend) Transcribe(ctx context.Context, j asr.Job) error {
+	if j.Chapter == 3 {
+		*j.Result = m.remote()
 	}
-	if res.RateSample == nil {
-		t.Fatal("asr stage reported no RateSample; want one for the chapter it transcribed")
-	}
-	if res.RateSample.Units != 1 {
-		t.Errorf("RateSample.Units = %d, want 1 (only chapter 3 transcribed this run, not all 3)", res.RateSample.Units)
-	}
-	if res.RateSample.Seconds <= 0 {
-		t.Errorf("RateSample.Seconds = %v, want > 0", res.RateSample.Seconds)
-	}
+	return m.fakeBackend.Transcribe(ctx, j)
 }
 
 // TestASRStageUnavailableParks asserts a book PARKS needs_attention (not a hard
@@ -873,7 +900,7 @@ func TestTranscribeChapterDecodeTimeoutRetriesNoContext(t *testing.T) {
 
 	exe, rawDir := decodeTimeoutExec(t, fake)
 	rawPath := filepath.Join(rawDir, transcript.RawName(1))
-	empty, err := exe.transcribeChapter(context.Background(), scheduler.StageReport{}, fakeASR(fake), audio.ChapterFileName(1), rawDir, rawPath, audio.Chapter{Chapter: 1})
+	empty, err := exe.transcribeChapter(context.Background(), scheduler.StageReport{}, fakeASR(fake), audio.ChapterFileName(1), rawDir, rawPath, audio.Chapter{Chapter: 1}, &asr.Decode{})
 	if err != nil {
 		t.Fatalf("transcribeChapter after a NoContext retry: %v", err)
 	}
@@ -903,7 +930,7 @@ func TestTranscribeChapterDecodeTimeoutParks(t *testing.T) {
 
 	exe, rawDir := decodeTimeoutExec(t, fake)
 	rawPath := filepath.Join(rawDir, transcript.RawName(1))
-	_, err := exe.transcribeChapter(context.Background(), scheduler.StageReport{}, fakeASR(fake), audio.ChapterFileName(1), rawDir, rawPath, audio.Chapter{Chapter: 1})
+	_, err := exe.transcribeChapter(context.Background(), scheduler.StageReport{}, fakeASR(fake), audio.ChapterFileName(1), rawDir, rawPath, audio.Chapter{Chapter: 1}, &asr.Decode{})
 	var pe *scheduler.ParkError
 	if !errors.As(err, &pe) {
 		t.Fatalf("error = %v, want a ParkError (decode timeout after the NoContext retry)", err)
@@ -929,7 +956,7 @@ func TestTranscribeChapterFastAndEmpty(t *testing.T) {
 		fake := newFakeBackend()
 		exe, rawDir := decodeTimeoutExec(t, fake)
 		rawPath := filepath.Join(rawDir, transcript.RawName(1))
-		empty, err := exe.transcribeChapter(context.Background(), scheduler.StageReport{}, fakeASR(fake), audio.ChapterFileName(1), rawDir, rawPath, audio.Chapter{Chapter: 1})
+		empty, err := exe.transcribeChapter(context.Background(), scheduler.StageReport{}, fakeASR(fake), audio.ChapterFileName(1), rawDir, rawPath, audio.Chapter{Chapter: 1}, &asr.Decode{})
 		if err != nil || empty {
 			t.Fatalf("transcribeChapter = (empty=%v, %v), want (false, nil)", empty, err)
 		}
@@ -946,7 +973,7 @@ func TestTranscribeChapterFastAndEmpty(t *testing.T) {
 		fake.emptyMode = "always"
 		exe, rawDir := decodeTimeoutExec(t, fake)
 		rawPath := filepath.Join(rawDir, transcript.RawName(1))
-		empty, err := exe.transcribeChapter(context.Background(), scheduler.StageReport{}, fakeASR(fake), audio.ChapterFileName(1), rawDir, rawPath, audio.Chapter{Chapter: 1})
+		empty, err := exe.transcribeChapter(context.Background(), scheduler.StageReport{}, fakeASR(fake), audio.ChapterFileName(1), rawDir, rawPath, audio.Chapter{Chapter: 1}, &asr.Decode{})
 		if err != nil {
 			t.Fatalf("transcribeChapter: %v", err)
 		}

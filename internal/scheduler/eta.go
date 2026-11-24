@@ -38,8 +38,11 @@ func (s *Scheduler) publishETAs(ctx context.Context, books []store.Book, finishe
 	if v, ok := s.exec.(interface{ AgentMaxPerBook() int }); ok {
 		fanout = max(1, v.AgentMaxPerBook())
 	}
+	remote := s.remoteASR()
 	for _, b := range books {
-		inputs = append(inputs, toETABook(b, progressByBook[b.ID], fanout))
+		in := toETABook(b, progressByBook[b.ID], fanout)
+		in.RemoteASR = remote
+		inputs = append(inputs, in)
 	}
 
 	// inputs are already in book-id order (dispatch's book list is ordered by id), so
@@ -151,8 +154,38 @@ func (s *Scheduler) ETASnapshot() map[int64]int64 {
 	return out
 }
 
-// rateSnapshot returns a copy of the per-stage rate cache safe to hand to the pure
-// eta functions.
+func (s *Scheduler) remoteASR() bool {
+	route, ok := s.exec.(interface{ RemoteASR() bool })
+	return ok && route.RemoteASR()
+}
+
+// ASRSecondsPerAudioHour is the heartbeat estimate for the route the next segment would take.
+func (s *Scheduler) ASRSecondsPerAudioHour() float64 {
+	remote := s.remoteASR()
+	s.rateMu.Lock()
+	defer s.rateMu.Unlock()
+	return eta.ASRSecondsPerAudioHour(s.rates, remote)
+}
+
+func (s *Scheduler) recordASRRate(ctx context.Context, remote bool, audioSeconds, decodeSeconds float64) {
+	if audioSeconds <= 0 || decodeSeconds <= 0 {
+		return
+	}
+	key := eta.ASRRateKey(remote)
+	rate := 3600 * decodeSeconds / audioSeconds
+	if math.IsNaN(rate) || math.IsInf(rate, 0) {
+		return
+	}
+	s.rateMu.Lock()
+	defer s.rateMu.Unlock()
+	if prior := s.rates[key]; prior > 0 {
+		rate = eta.Alpha*rate + (1-eta.Alpha)*prior
+	}
+	s.rates[key] = rate
+	_ = s.db.SetRate(ctx, key, rate)
+}
+
+// rateSnapshot returns a copy of the per-stage rates for the ETA calculation.
 func (s *Scheduler) rateSnapshot() map[string]float64 {
 	s.rateMu.Lock()
 	defer s.rateMu.Unlock()
@@ -184,6 +217,7 @@ func toETABook(b store.Book, progress []store.Progress, fanout int) eta.Book {
 		Series:           b.Series,
 		SeriesPos:        b.SeriesPos,
 		Chapters:         chapters,
+		DurationSec:      b.DurationSec,
 		Progress:         pm,
 		Goal:             b.Goal,
 		MaxAgentsPerBook: max(1, fanout),

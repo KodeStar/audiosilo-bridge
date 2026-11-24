@@ -6,9 +6,55 @@ import (
 	"math"
 	"testing"
 
+	"github.com/kodestar/audiosilo-bridge/internal/eta"
 	"github.com/kodestar/audiosilo-bridge/internal/events"
+	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
+
+type routedStub struct {
+	*StubExecutor
+	remote bool
+}
+
+func (r *routedStub) RemoteASR() bool { return r.remote }
+
+func TestLiveASRRateFollowsRoute(t *testing.T) {
+	h := newHarness(t)
+	db := h.openDB(t)
+	exec := &routedStub{StubExecutor: NewStubExecutor(0, 0)}
+	s := New(db, h.hub, exec, 1, h.workRoot, false)
+	ctx := t.Context()
+	s.recordASRRate(ctx, false, 300, 50)
+	if got := s.ASRSecondsPerAudioHour(); got != 600 {
+		t.Fatalf("local rate %v", got)
+	}
+	exec.remote = true
+	if got := s.ASRSecondsPerAudioHour(); got != eta.SeedASRSecondsPerAudioHour {
+		t.Fatalf("unseen route %v", got)
+	}
+	s.recordASRRate(ctx, true, 300, 5)
+	s.recordASRRate(ctx, true, 300, 0) // an old worker omitted decode time
+	if got := s.ASRSecondsPerAudioHour(); got != 60 {
+		t.Fatalf("remote rate %v", got)
+	}
+	if rate, ok, err := db.GetRate(ctx, eta.ASRRateKey(true)); err != nil || !ok || rate != 60 {
+		t.Fatalf("persisted %v %v %v", rate, ok, err)
+	}
+	exec.remote = false
+	if got := s.ASRSecondsPerAudioHour(); got != 600 {
+		t.Fatalf("local rate after disconnect %v", got)
+	}
+}
+
+func TestStageActiveMatchesASRHolder(t *testing.T) {
+	h := newHarness(t)
+	s := New(h.openDB(t), h.hub, NewStubExecutor(0, 0), 1, h.workRoot, false)
+	s.inflight[1] = &inflightBook{stage: state.ReadalongAligning, lane: state.LaneASR}
+	if !s.StageActive(1, state.ReadalongAligning) || s.StageActive(1, state.ASR) || s.StageActive(2, state.ASR) {
+		t.Fatal("incorrect ASR slot holder")
+	}
+}
 
 // TestRecordRate covers the RateSample path the EWMA rate update now feeds on: a stage
 // that reports a sample with positive units and seconds folds its observed per-unit

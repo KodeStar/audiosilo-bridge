@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/asr"
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
@@ -15,7 +16,7 @@ import (
 )
 
 // IDWorker is the Router's backend id while it sends segments to a worker.
-const IDWorker = "worker"
+const IDWorker = asr.IDWorker
 
 // The park messages of a book waiting for a worker: the fallback is wait, or
 // the Bridge has no speech recognition of its own to fall back on.
@@ -113,6 +114,9 @@ func (r *Router) Transcribe(ctx context.Context, job asr.Job) error {
 			if err == nil {
 				r.Log.Info("bridge: a worker transcribed a segment", "worker", out.Worker, "segment", filepath.Base(job.Audio),
 					"backend", out.Backend, "device", out.Device, "decode_seconds", int(out.DecodeSeconds))
+				if job.Result != nil {
+					*job.Result = asr.Decode{Remote: true, Backend: out.Backend, Device: out.Device, Model: out.Model, Seconds: out.DecodeSeconds}
+				}
 				return writeRaw(job, out.Raw)
 			}
 			if !errors.Is(err, ErrNoWorker) {
@@ -165,10 +169,15 @@ func (r *Router) decodeLocal(ctx context.Context, job asr.Job) (yielded bool, er
 	}
 	lctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	started := time.Now()
 	done := make(chan error, 1)
 	go func() { done <- r.Local.Transcribe(lctx, job) }()
 	select {
 	case err := <-done:
+		if err == nil && job.Result != nil {
+			job.Result.Backend, job.Result.Device = r.Local.ID(), r.LocalCap.Device
+			job.Result.Seconds = time.Since(started).Seconds()
+		}
 		return false, err
 	case <-connected:
 		cancel()

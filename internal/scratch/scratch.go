@@ -127,6 +127,7 @@ var audioArtifacts = []artifact{
 	{Dir: audio.WindowAudioDir},
 	{Dir: agent.RunsDir},
 	{Dir: repair.ClipsDir},
+	{Dir: readalong.HealPath},
 	{Dir: repair.RetranscribeDir},
 }
 
@@ -217,8 +218,32 @@ func Purge(workRoot, workDir string, kind state.Kind) error {
 	if !ok {
 		return nil // nothing safe to remove
 	}
+	rootPath, err := filepath.Abs(workRoot)
+	if err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(rootPath, wd)
+	if err != nil {
+		return err
+	}
+	workspace, err := os.OpenRoot(rootPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer func() { _ = workspace.Close() }()
+	root, err := workspace.OpenRoot(rel)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
 	for _, a := range artifactsFor(kind) {
-		if err := os.RemoveAll(filepath.Join(wd, a.Dir)); err != nil {
+		if err := root.RemoveAll(a.Dir); err != nil {
 			return err
 		}
 	}
@@ -244,12 +269,10 @@ func Purge(workRoot, workDir string, kind state.Kind) error {
 // audio book's transcripts-corrected/ as a durable; this tier is where it goes.)
 // windows/ is a chapterless book's window layer (Phase 1d: the windows' raw
 // transcripts and the detection); its chapters_detected.json (titles only) stays,
-// like the manifest. readalong/heal/ is the read-along heal's raw transcripts
-// (Phase 3c); readalong/map.json (CFIs and times only) stays, so a write a park
-// held up can still finish.
+// like the manifest. Purge already reclaims the read-along heal scratch.
 var transcriptDirs = []string{
 	transcript.RawDir, transcript.JSONDir, transcript.TextDir, transcript.RepairedDir, spelling.CorrectedDir,
-	audio.WindowsDir, readalong.HealPath,
+	audio.WindowsDir,
 }
 
 // transcriptFiles quote the transcript at the work dir's root: the spelling

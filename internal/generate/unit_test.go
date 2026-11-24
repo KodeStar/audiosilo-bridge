@@ -60,6 +60,10 @@ func TestDescribe(t *testing.T) {
 		t.Fatal("a running book has a park")
 	}
 
+	waiting := describe(view{book: b, waitingASR: true, progress: []store.Progress{{Stage: "asr", Done: 35, Total: 36}}, hasETA: true, eta: 8160})
+	if waiting.Step != stepWaiting || waiting.Code != jobs.SayASRTurnWait || waiting.Total != 0 || waiting.Extra["eta_seconds"] != nil {
+		t.Fatalf("waiting: %+v", waiting)
+	}
 	queued := describe(view{book: store.Book{State: "queued"}, source: SourceEbook})
 	if queued.Step != stepWaiting || queued.Extra["stage"] != "queued" {
 		t.Fatalf("queued = %+v", queued)
@@ -631,7 +635,7 @@ func present(workDir string) bool {
 
 func TestEstimateFrom(t *testing.T) {
 	t.Parallel()
-	e := estimateFrom(nil, 0, false)
+	e := estimateFrom(nil)
 	if e.ASRSecondsPerAudioHour != SeedASRSecondsPerAudioHour || e.AgentUSDPerAudioHour != nil || e.AgentUSDPerEbook != nil || e.Samples != 0 {
 		t.Fatalf("no history = %+v", e)
 	}
@@ -642,13 +646,11 @@ func TestEstimateFrom(t *testing.T) {
 		{Kind: "ebook", CostUSD: 4},
 		{Kind: "ebook", CostUSD: 6},
 	}
-	e = estimateFrom(books, 45, true)
+	e = estimateFrom(books)
 	if *e.AgentUSDPerAudioHour != 3 || *e.AgentUSDPerEbook != 5 || e.Samples != 4 {
 		t.Fatalf("estimates = %+v", e)
 	}
-	if e.ASRSecondsPerAudioHour != 450 { // 45 s/chapter x 10 chapters/hour
-		t.Fatalf("asr = %v", e.ASRSecondsPerAudioHour)
-	}
+
 }
 
 func TestEstimates(t *testing.T) {

@@ -628,6 +628,9 @@ func (e *Executor) remapTranscripts(workDir string, m audio.Manifest, docs []tra
 		return "", err
 	}
 	prov := readASRProvenance(workDir)
+	if len(prov.Segments) > 0 {
+		prov.Windows, prov.Segments = prov.Segments, nil
+	}
 	prov.ManifestSHA, prov.EmptyChapters = fp, empty
 	return fp, writeASRProvenance(workDir, prov)
 }

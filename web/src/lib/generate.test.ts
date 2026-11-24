@@ -271,3 +271,9 @@ describe('readalong', () => {
     expect(parseReadalongResult(null)).toBeNull();
   });
 });
+
+it('omits the ETA while waiting for speech recognition', () => {
+  expect(
+    generateFacts({ step: 'waiting', stage: 'asr', eta_seconds: 8160, source: 'audio' }, false),
+  ).toEqual(['from the audio']);
+});

@@ -412,7 +412,8 @@ internal/
             dir>: sentences within 2%, body coverage within 0.5 pp, shared
             sentence-start median under 0.05 s, every CFI resolving;
             AUDIOSILO_READALONG_MAPS=<dir> writes the five corpus maps in the v1
-            format). OpenEPUB/ReadEPUB (regular file <= 256 MiB, DRM refused:
+            format). CheckEPUB reads the zip directory, rights and package before ASR.
+            OpenEPUB/ReadEPUB (regular file <= 256 MiB, DRM refused:
             META-INF/rights.xml or an encryption.xml beyond font obfuscation, sha256 of
             the bytes; the spine with each section's CFI), LoadText (every content
             document walked; Sections() the linear ones, a linear="no" item is a note
@@ -429,8 +430,8 @@ internal/
             characters a second + 10 s, never past its chapter's end nor the next
             section's first aligned sentence, at most 600 s (a chapter-end loop, CotW
             in the 3c-1 live run); cut at file boundaries, plus the extra windows
-            (tail_verdicts, LoopWindow: the transcript check's loop ranges, 2-600 s),
-            overlapping or touching ones merged), Onset/Snap (10 ms frame energies on one grid per
+            (tail_verdicts and each local run of repeated 6-grams). Overlapping or
+            touching windows merge, then long windows split into clips of at most 600 s), Onset/Snap (10 ms frame energies on one grid per
             chapter, p10 + 0.3 (p95 - p10), after-pause/run-start/mid-flow; start =
             onset - 0.1 s, never past end - 0.2 s nor before raw - 0.5 s), Build/Encode
             (audiosilo-readalong/v1, keys in order, times clamped to the book and
@@ -438,7 +439,7 @@ internal/
             {text: the read body's sentence characters from the first aligned sentence
             to the last, audio}, audio_gaps over 5 s; refused over MaxMapBytes 16 MiB).
             workdir.go names the stage's work-dir files (readalong/request.json,
-            words.json, heal/, map.json, align_report.json, repaired) so scratch can
+            words.json, heal/, map.json, align_report.json) so scratch can
             name them too. testdata/alice.readalong.json is a regenerated spike map.
   ebook/    M9: the epub front half. BuildUniverse turns audiosilo-meta pkg/extract's
             per-section split into the LOGICAL chapter universe the sidecars publish
@@ -478,8 +479,8 @@ internal/
             Purge reclaims windows/chapters/ (audio.WindowAudioDir, no sentinel): the
             window FLACs chapter_detecting removes itself once the chapters are cut,
             left only by a run stopped in between (a re-run splits from the source).
-            Phase 3c-1: PurgeTranscripts also removes readalong/words.json and
-            readalong/heal/ (the heal's raws), keeping readalong/map.json (CFIs and
+            Purge reclaims readalong/heal/ (clips and raws). PurgeTranscripts also
+            removes readalong/words.json, keeping readalong/map.json (CFIs and
             times only, so a write a park held up still finishes), align_report.json and
             request.json.
   qa/       M4: the mechanical transcript-QA degeneration sweep, a faithful Go port
@@ -488,10 +489,9 @@ internal/
             chapter-0 asymmetries are CONTRACT, golden-tested against 2 real books).
             Reads transcripts-json/ (+ transcripts-repaired/ for multi-loop); writes
             qa_report.json (stable enum contract for the M5 adjudicator/UI) +
-            qa_report.md (byte-compatible with the Python report). CrossSegment(input): that
-            detector alone (the read-along's heal windows). LoopWords(text):
-            the words a 6-gram repeated 5+ times covers (the read-along's adoption
-            rule). Report.Clean()
+            qa_report.md (byte-compatible with the Python report). LoopSpans locates
+            separate runs in a chapter for the read-along heal. ReadalongNoise counts
+            suspect words from 6-grams, short repeated segments and fast tails. Report.Clean()
             drives the QAClean branch; the retranscribe queue = wph outliers +
             mid-chapter loops. Loud errors on manifest/transcript divergence,
             wrong-schema files, and an empty transcript set.
@@ -633,12 +633,11 @@ internal/
             adjudicate FABRICATED/BENIGN/CLIP-REDEGENERATED, splice into
             transcripts-repaired/ + repairs.log/tail_verdicts.json) and AdoptFresh
             (never-blindly-adopt full-chapter plausibility). AdoptFreshReadalong is goal
-            readalong's rule (Phase 3c-1): adopt the NoContext re-run unless its word
-            rate is implausible (AdoptFresh's check: the heal takes that span), it loops
-            over more words (AdoptStats.LoopWords, qa.LoopWords), it is shorter than a
-            loop-free original, or it keeps under 80% of a looped original's words
-            outside its loops; a looped original's extra words never count for it
-            (AdoptFresh keeps it for them). No agent; injected a
+            readalong's rule (Phase 3c-1). It rejects a crammed fresh run, a collapse
+            from a narration-rate original, or increased filler. A clean original must
+            retain its word count. With filler it must retain 80% of the words outside it.
+            Sparse originals and unknown durations are judged by the available word counts.
+            The full-chapter and clip machinery use an injected
             ClipCutter (ffmpeg) + a Transcribe func so it stays unit-testable. The
             re-transcription (full-chapter AND clip) runs NoContext (asr.Job.NoContext)
             so a context-conditioned repetition collapse cannot replay identically.
@@ -1213,8 +1212,8 @@ internal/
             every chapter FLAC a purge took (splitWithRetries on the manifest), reads
             transcripts-json/ only, opens the EPUB (its sentences as the job's
             refusals), aligns, heals (the windows: HealWindows' plus tail_verdicts' plus
-            the located loops of a qa.CrossSegment over the transcripts it reads,
-            readalongLoopWindows; each window a clip cut across its chapter FLACs
+            the stretches qa.LoopSpans finds in each normalized transcript. Each
+            window is a clip cut across its chapter FLACs
             into readalong/heal/<f###_start_end>.flac, transcribed NoContext through the
             engine's backend: a worker when one is connected; a complete raw reused, the
             clip deleted, an empty answer keeps the words it had), aligns again, snaps
@@ -1223,8 +1222,8 @@ internal/
             (coverage, first-pass coverage, heal windows and seconds, snap stats, ebook
             sha256, resplit). The map's generator.asr is path.Base of asr.json's model.
             qa_sweep for goal readalong (readalongSweep): a dirty report writes
-            qa.MechanicalPlan and goes to retranscribing ONCE (retranscribing writes
-            readalong/repaired for goal readalong; ResetReadalongRepair forgets it),
+            qa.MechanicalPlan and goes to retranscribing once per run, using
+            CountStageSuccesses. A continue from sanitizing retires that success,
             then on to aligning clean or not with a note naming the chapters left.
             retranscribeChapter cuts a missing chapter FLAC again (resplitChapter, any
             goal). inspect for goal readalong uses InspectWith(WindowUnusable) and fails
@@ -1810,10 +1809,11 @@ internal/
             Pause/resume/retry/cancel/delete + PurgeScratch (reclaim chapters/ when
             done/paused/failed). Publishes book.state/stage.progress/queue.stats.
             M2 runs the pipeline composite executor (real inspect/split, stubs beyond).
-            M6: records EWMA rates from each stage's explicit StageResult.RateSample
+            M6: records EWMA rates from each measured stage's explicit StageResult.RateSample
             (units processed this run + productive seconds, measured by the stage AFTER
             setup and excluding agent rate-limit backoff - first-run tool/model
-            downloads never contaminate learned rates; a nil sample records nothing),
+            downloads never contaminate learned rates; a nil sample records nothing).
+            First-pass ASR sends a per-segment sample as soon as the raw is saved. It
             recomputes ETAs on every dispatch pass (idle-gated: no active books = no
             query/sim) and publishes deduped eta.update SSE (queue_seconds is null when
             idle); ETASnapshot/ETASeconds feed the books API. Progress reporting is
@@ -4357,8 +4357,8 @@ internal/
             scheduler restartReadmitCodes, and runs a describe job again). The reasons
             speak of "a job paused at the cap": a generate job's description and the
             contributing stage's only log the description step's. Estimates (the heartbeat's): the
-            ASR rate (seconds per chapter) scaled by the finished audio books'
-            chapters per hour, else SeedASRSecondsPerAudioHour 900; agent spend per
+            ASR rate for the current route in seconds per audio hour. Each route starts
+            at 900 until its first measured decode. Agent spend per
             audio hour summed over finished audio books, per ebook averaged, nil until
             one finished; this month's spend (MonthBounds, deleted books included).
             Retention (decision 5) is policy here: SweepTranscripts (daily) purges
@@ -4636,7 +4636,8 @@ internal/
             after it and retires their successes and those of every stage a purge took
             the sentinel of (a restart's Reconcile would rewind to them), drops asr.json
             going on from inspecting (pipeline.ForgetTranscription: a new manifest), and
-            resets the repair round before qa_sweep. A generate job reading the audio
+            resets the repair round before qa_sweep. ContinueReadalong clears old progress
+            in its transaction. A job awaiting the ASR lane reports a wait without counts or ETA. A generate job reading the audio
             takes on the audio run beside an ebook run (earlierRun for both; the audio
             run continued, re-keyed to the book's path, the ebook run cleared inside
             the continue under the audio run's hold, or both cleared, the audio run
@@ -5155,9 +5156,11 @@ internal/
             it was prepared); no usable local backend is a wait too.
             Detect is always available (so the executor never re-detects), CanRun
             says whether a segment would run now (followWaiting's condition). ID/
-            Detect report the route NOW (backend "worker", device "remote"), so
-            asr.json's provenance is the route the stage started on (per-segment
-            provenance is a follow-up).
+            Detect report the route available now. Each completed segment records its
+            actual backend, device, model, route and decode time in asr.json. Detected
+            chapters retain the original window numbers under windows. Old raws use
+            the saved stage defaults. The scheduler learns local and remote rates
+            separately and the heartbeat reads the current route on each beat.
   worker/   Phase 1b, `audiosilo-bridge worker`: client (token + protocol header on
             every call; the FLAC checked by size and sha256), Run (Select +
             EnsureReady, ffmpeg checked for mlx-whisper; hello; then a loop: send
@@ -5404,7 +5407,7 @@ internal/
             source resolving (env, device sign-in, gh) and not refused. The heartbeat carries estimates (nil until the engine
             started): generate.Estimates, cached 5 min or until a job finishes done
             (can_contribute computed with them, since resolving can shell out to
-            gh), with the agent's readiness and the budget read fresh each beat. The
+            gh), with ASR speed, agent readiness and the budget read fresh each beat. The
             Backend adds Job(id), RetryJob (generate.Retry: ErrNotFound -> 404,
             ErrNotParked and ErrBookChanged -> 409) and Engine (the agent container from
             agentbox.Status, ASR capability, budgets and this month's spend, the

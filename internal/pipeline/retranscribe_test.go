@@ -995,6 +995,30 @@ func TestRetranscribeRepairOutcomesUpsertAcrossRounds(t *testing.T) {
 	}
 }
 
+// A three-copy repeat falls below the 6-gram detector. The shorter clean
+// decode is adopted for both ordinary narration and a chapter with little speech.
+func TestReadalongAdoptsShortRepeatedRun(t *testing.T) {
+	for _, duration := range []float64{2.5, 60, 0} {
+		t.Run(fmt.Sprintf("duration_%g", duration), func(t *testing.T) {
+			work := t.TempDir()
+			writeManifestStruct(t, work, audio.Manifest{Style: audio.StyleMarkers, Duration: duration, ChapterCount: 1,
+				Chapters: []audio.Chapter{{Chapter: 2, End: duration, Duration: duration}}})
+			seedNormalized(t, work, transcript.Transcript{Schema: transcript.Schema, Chapter: 2, Segments: []transcript.Segment{
+				{ID: 0, End: 0.5, Text: " he said"}, {ID: 1, Start: 0.5, End: 1, Text: " again"},
+				{ID: 2, Start: 1, End: 1.5, Text: " again"}, {ID: 3, Start: 1.5, End: 2, Text: " again"},
+			}})
+			seedFLACs(t, work, 2)
+			seedPlan(t, work, qa.PlanEntry{Chapter: 2, Action: qa.ActionRetranscribe, Reason: "repeated segment"})
+			exe := NewExecutor(Config{ASR: fakeASR(newFakeBackend())})
+			res, err := exe.Execute(t.Context(), store.Book{ID: 1, WorkDir: work, Goal: state.GoalReadalong}, state.Retranscribing, scheduler.StageReport{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertRetranscribeMetrics(t, res.Metrics, map[string]int{"retranscribed": 1, "adopted": 1})
+		})
+	}
+}
+
 // A read-along book adopts the fresh NoContext re-run of a looped chapter that
 // generate's rule keeps: the original has more words (the loop's) and both rates
 // are plausible (the Call of the Wild's chapter-end loops, 3c-1 live run).

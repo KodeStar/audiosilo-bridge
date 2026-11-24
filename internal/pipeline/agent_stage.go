@@ -2190,13 +2190,6 @@ func (e *Executor) retranscribe(ctx context.Context, book store.Book, r schedule
 		// learned per-unit rate with ~ms no-ops.
 		RateSample: rateSample(done-completed-skippedNew-unlocatableNew, loopSeconds),
 	}
-	// A read-along book's one mechanical round is done (decision 4): its next sweep
-	// goes on to readalong_aligning, clean or not.
-	if book.Goal == state.GoalReadalong {
-		if err := markReadalongRepaired(book.WorkDir); err != nil {
-			return scheduler.StageResult{}, fmt.Errorf("retranscribing: %w", err)
-		}
-	}
 	if err := scheduler.WriteSentinel(book.WorkDir, string(state.Retranscribing), result); err != nil {
 		return scheduler.StageResult{}, err
 	}
@@ -2359,7 +2352,7 @@ func (e *Executor) retranscribeChapter(ctx context.Context, r scheduler.StageRep
 		text := transcript.PlainText(t)
 		s := repair.AdoptStats{Words: len(strings.Fields(text)), DurationSec: durationSec}
 		if readalongRule {
-			s.LoopWords = qa.LoopWords(text)
+			s.LoopWords = qa.ReadalongNoise(t)
 		}
 		return s
 	}

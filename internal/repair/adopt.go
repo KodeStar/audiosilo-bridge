@@ -26,8 +26,7 @@ const (
 type AdoptStats struct {
 	Words       int
 	DurationSec float64
-	// LoopWords are the words inside the transcript's 6-gram loops (qa.LoopWords);
-	// only the read-along's rule weighs them.
+	// LoopWords estimates filler from 6-gram loops, repeated segments and fast tails.
 	LoopWords int
 }
 
@@ -91,12 +90,11 @@ const readalongMinKept = 0.8
 // so word count alone can't judge a looped original (it has MORE words; AdoptFresh
 // keeps it), and the spike adopted every re-run:
 //
-//   - fresh implausible by word rate (collapsed or crammed: AdoptFresh's check)
+//   - fresh crammed, or sparse where the original had a narration-rate word count
 //     -> keep original (the heal takes that span).
 //   - fresh loops over more words than the original -> keep original.
 //   - fresh keeps under 80% of a looped original's words outside its loops, or
-//     fewer words than a loop-free original (a re-run for dropout, a low word
-//     rate or a fast tail): it dropped narration    -> keep original.
+//     fewer words than an original with no detected filler -> keep original.
 //   - otherwise                                      -> adopt.
 //
 // generate's whole run keeps AdoptFresh. Pure and table-tested.
@@ -106,7 +104,8 @@ func AdoptFreshReadalong(original, fresh AdoptStats) AdoptDecision {
 		minKept = 1 // a fresh run that reaches that case is loop-free too
 	}
 	switch {
-	case !fresh.plausible():
+	case fresh.wpm() > plausibleMaxWPM ||
+		(fresh.DurationSec > 0 && fresh.wpm() < plausibleMinWPM && original.wpm() >= plausibleMinWPM):
 		return AdoptDecision{Adopt: false, Reason: reasonFreshImplausible}
 	case fresh.LoopWords > original.LoopWords:
 		return AdoptDecision{Adopt: false, Reason: "fresh run loops over more words; keep original"}

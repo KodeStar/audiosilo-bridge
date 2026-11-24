@@ -460,7 +460,8 @@ func (c *estimatesCache) figures(ctx context.Context, b *Bridge, agentState gene
 // estimates are the heartbeat's figures (nil until the engine has started):
 // the cached figures, with the agent container's state and the budget read now.
 func (b *Bridge) estimates(ctx context.Context) *link.Estimates {
-	if b.engine.get() == nil {
+	eng := b.engine.get()
+	if eng == nil {
 		return nil
 	}
 	cfg := b.config()
@@ -472,6 +473,7 @@ func (b *Bridge) estimates(ctx context.Context) *link.Estimates {
 		return nil
 	}
 	e.AgentBackend, e.AgentReady, e.Subscription = agentState.Backend, agentState.Ready, agentState.Subscription
+	e.ASRSecondsPerAudioHour = eng.sched.ASRSecondsPerAudioHour()
 	e.MonthlyBudgetUSD = cfg.Agent.MonthlyBudgetUSD
 	e.CanContribute = b.canContribute(ctx)
 	return &link.Estimates{Sidecars: &e}

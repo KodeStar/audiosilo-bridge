@@ -238,23 +238,20 @@ func (tl Timeline) ChapterWindow(chapter int, start, end float64) (Window, bool)
 
 // LoopWindow is a chapter's looped stretch (the transcript check's, chapter-relative
 // first to last second) as a window, 0.5 s wider each side and within the chapter;
-// ok is false for a chapter the timeline doesn't have, or a stretch under 2 or over
-// 600 s (a phrase the book itself repeats across a chapter, not a loop to heal).
+// ok is false for a chapter the timeline doesn't have, or a stretch under two seconds. HealWindows splits long stretches after merging.
 func (tl Timeline) LoopWindow(chapter int, from, to float64) (Window, bool) {
 	if to <= from {
 		return Window{}, false
 	}
 	w, ok := tl.ChapterWindow(chapter, from-healPad, to+healPad)
-	if d := w.End - w.Start; !ok || d < healMin || d > healMax {
+	if d := w.End - w.Start; !ok || d < healMin {
 		return Window{}, false
 	}
 	return w, true
 }
 
 // chapterEndAt is the whole-book end of the chapter playing at whole-book t (t
-// itself when there is none). trailingWindow asks it at the window's start, half a
-// second inside the last aligned sentence, so a sentence ending on a file boundary
-// is its own chapter's.
+// itself when there is none). trailingWindow asks just inside the last aligned sentence's end.
 func (tl Timeline) chapterEndAt(t float64) float64 {
 	if len(tl.Chapters) == 0 {
 		return t
@@ -326,7 +323,24 @@ func (tl Timeline) HealWindows(res Result, extra []Window) []Window {
 		}
 	}
 	wins = append(wins, extra...)
-	return mergeWindows(wins)
+	merged := mergeWindows(wins)
+	var bounded []Window
+	for _, w := range merged {
+		// Divide evenly so the last piece is never a sub-second sliver.
+		parts := int(math.Ceil((w.End - w.Start) / healMax))
+		start := w.Start
+		for i := 1; i <= parts; i++ {
+			end := w.End
+			if i < parts {
+				end = w.Start + (w.End-w.Start)*float64(i)/float64(parts)
+			}
+			piece := w
+			piece.Start, piece.End = start, end
+			bounded = append(bounded, piece)
+			start = end
+		}
+	}
+	return bounded
 }
 
 // trailingWindow is the whole-book stretch a section's trailing run of chars
@@ -339,7 +353,7 @@ func (tl Timeline) trailingWindow(t1, next float64, chars int) (a, b float64, ok
 		return 0, 0, false
 	}
 	a = t1 - healPad
-	b = min(tl.chapterEndAt(a), next+healPad, t1+float64(chars)/healTrailCharsPerSec+healTrailSlack, a+healMax)
+	b = min(tl.chapterEndAt(math.Nextafter(t1, math.Inf(-1))), next+healPad, t1+float64(chars)/healTrailCharsPerSec+healTrailSlack, a+healMax)
 	return a, b, b-a >= healMin
 }
 
