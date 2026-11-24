@@ -533,14 +533,20 @@ func TestTwins(t *testing.T) {
 	}
 }
 
-// SpanMismatch checks both directions before ASIN enrichment.
+// SpanMismatch checks both directions before ASIN enrichment, and that two
+// packs span the same volumes.
 func TestSpanMismatch(t *testing.T) {
 	pack := audibleRec("B0SYN00081", "Iron Vale: Books 5-6", "Ona Fell", "Iron Vale", "5-6")
+	longer := audibleRec("B0SYN00085", "Iron Vale: Books 5-8", "Ona Fell", "Iron Vale", "5-8")
 	vol5 := audibleRec("B0SYN00082", "Iron Vale 5", "Ona Fell", "Iron Vale", "5")
 	single := link.LibraryBook{Path: "Fell/Iron Vale/IV05 - Ash Road", Series: series("Iron Vale", "5")}
 	ranged := link.LibraryBook{Path: "Fell/Iron Vale/IV05-06", Series: series("Iron Vale", "5-6")}
+	opening := link.LibraryBook{Path: "Fell/Iron Vale/IV01-03", Series: series("Iron Vale", "1-3")}
 	box := audibleRec("B0SYN00083", "Iron Vale Box Set", "Ona Fell", "Iron Vale", "")
+	boundedBox := audibleRec("B0SYN00086", "Iron Vale Box Set: Books 5-6", "Ona Fell", "Iron Vale", "")
 	numberedBox := audibleRec("B0SYN00084", box.Title, box.Author, box.Series, "1")
+	labeled := link.LibraryBook{Path: "Fell/Iron Vale/Iron Vale Box Set (Books 4-6)", Title: "Iron Vale Box Set", Series: series("Iron Vale", "")}
+	labeledFirst := link.LibraryBook{Path: "Fell/Iron Vale/Iron Vale Box Set (Books 1-3)", Title: "Iron Vale Box Set", Series: series("Iron Vale", "")}
 	for _, tc := range []struct {
 		rec  source.Record
 		b    link.LibraryBook
@@ -549,11 +555,19 @@ func TestSpanMismatch(t *testing.T) {
 		{pack, single, true},
 		{pack, link.LibraryBook{Path: "Fell/Iron Vale"}, true},
 		{pack, ranged, false},
+		{longer, ranged, true}, // starts where the folder does, ends elsewhere
 		{vol5, single, false},
 		{vol5, ranged, true},
-		{box, ranged, false},
+		{box, opening, false},
+		{box, ranged, true}, // no bounds: a later pack's folder may be another box set
+		{boundedBox, ranged, false},
+		{boundedBox, opening, true},
 		{box, single, true},
 		{numberedBox, ranged, true},
+		{box, labeledFirst, false},
+		{box, labeled, true}, // the folder names a later pack
+		{boundedBox, labeled, true},
+		{vol5, labeled, true},
 	} {
 		if got := SpanMismatch(tc.rec, tc.b); got != tc.want {
 			t.Errorf("SpanMismatch(%q #%s, %q) = %v, want %v", tc.rec.Title, tc.rec.SeriesPosition, tc.b.Path, got, tc.want)

@@ -56,6 +56,16 @@ func readRange(pattern *regexp.Regexp, s string) (volumeRange, bool) {
 	return volumeRange{start, end}, okStart && okEnd
 }
 
+// boundsDisagree reports whether a pack titled title is not the one spanning
+// spans (SpanMismatch): the bounds its title states are none of them, or it
+// states none and no span opens the series (a later box set's folder).
+func boundsDisagree(title string, spans []volumeRange) bool {
+	if span, ok := readRange(titleRange, title); ok {
+		return !slices.Contains(spans, span)
+	}
+	return !slices.ContainsFunc(spans, func(s volumeRange) bool { return s.start <= 1 })
+}
+
 // bookRanges is the distinct ranges b's series list it at.
 func bookRanges(b link.LibraryBook) []volumeRange {
 	var spans []volumeRange

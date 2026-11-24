@@ -3851,7 +3851,13 @@ internal/
             identifies by title without a position. The latter needs a unique
             best pack by name and person. Bounds in its title must agree with
             the folder's range. A single volume cannot claim a listed range
-            by words. An exact ASIN still wins), MatchScored (the match's
+            by words, nor a pack title a single volume. A book labeled a pack
+            only by its title or folder ("Four: A Divergent Collection") is
+            claimed by a single volume that scores better there than on any
+            single, unless it is the series-named opener. A range at 1 that
+            found no pack falls back for display to the best single that is not
+            the series-named opener (firstRangeFallback). An exact ASIN still
+            wins), MatchScored (the match's
             score, match.ScoreASIN for an ASIN), KeepBest
             (of the claims on one path the single best score keeps it; a tie keeps
             none, unless every tied claim is one WorkKey: folded title, folded
@@ -3868,13 +3874,17 @@ internal/
             position in rec's series, else b's main series' only when rec names no
             series or the number is the folder code leading b's folder (bridge#43).
             folderCodeIs follows the server's metadata.FolderCodePosition.
-            C marks a volume in any named series. Other codes use its initials.
+            C marks a volume in any named series. Other codes use the series' initials.
             DH06-2019 and DH06-07x read 6. A pack word or a doubled code
             gives no single position. A proper range keeps both ends.
             A franchise's number alone says nothing. A range
             or no number on either side is neither; MatchScored is not gated by
             it), SpanMismatch (protects ASIN enrichment across packs and single
-            volumes, including a range record's display fallback), Twins (the paths of books listed more than once:
+            volumes, including a range record's display fallback, and between
+            packs: a range record needs the folder's own range, not only its
+            start, and a positionless pack the range its title's bounds name,
+            else, stating none, a range opening the series; a labeled pack's
+            bounds come from its title or folder), Twins (the paths of books listed more than once:
             folded title, authors and series alike, positions by value; no
             enrichment by words), Planner (NewPlanner(books), Plan(rec, mode,
             template): destinations only, each item's RelPath, Kind

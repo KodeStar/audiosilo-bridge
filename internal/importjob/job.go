@@ -662,18 +662,34 @@ func Twins(books []link.LibraryBook) map[string]bool {
 	return out
 }
 
-// SpanMismatch protects ASIN enrichment when only one side spans volumes.
-// A range can still have a display match on the folder of its first volume.
+// SpanMismatch protects ASIN enrichment when only one side spans volumes, or
+// both do but not the same volumes. A range can still have a display match on
+// the folder of its first volume. A range record keeps its ASIN off a listed
+// range that only starts where it does ("1-6" on "1-3"). A positionless pack
+// keeps it off a range its title's bounds don't name, and, with no bounds in
+// its title, off a range that doesn't open the series: a box set matched by
+// name to the only pack folder the library holds may be another box set.
 func SpanMismatch(rec source.Record, b link.LibraryBook) bool {
-	_, ranged := rangeStart(rec.SeriesPosition)
-	pack := packTitle(cmp.Or(rec.Title, rec.TitleShort))
-	if len(bookRanges(b)) > 0 {
+	recSpan, ranged := readRange(rangePosition, rec.SeriesPosition)
+	title := cmp.Or(rec.Title, rec.TitleShort)
+	pack := packTitle(title)
+	if spans := bookRanges(b); len(spans) > 0 {
 		if ranged {
-			return rec.HasSequence
+			return rec.HasSequence || !slices.Contains(spans, recSpan)
 		}
-		return !pack || rec.HasSequence || strings.TrimSpace(rec.SeriesPosition) != ""
+		return !pack || rec.HasSequence || strings.TrimSpace(rec.SeriesPosition) != "" || boundsDisagree(title, spans)
 	}
-	return ranged || pack != (bookPackTitle(b) != "")
+	if ranged || pack != (bookPackTitle(b) != "") {
+		return true
+	}
+	// A labeled pack's bounds can be in its title or its folder's name.
+	var stated []volumeRange
+	for _, name := range []string{b.Title, path.Base(b.Path)} {
+		if span, ok := readRange(titleRange, name); ok && !slices.Contains(stated, span) {
+			stated = append(stated, span)
+		}
+	}
+	return pack && len(stated) > 0 && boundsDisagree(title, stated)
 }
 
 // KeepBest settles books several records claimed. Of the claims on one path:
