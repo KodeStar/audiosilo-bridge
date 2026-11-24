@@ -9,8 +9,13 @@ import (
 	"time"
 )
 
-// SleepCtx waits for d or until ctx ends.
+// SleepCtx waits for d or until ctx ends. A ctx that has already ended always
+// wins, even over a zero or negative d, so a retry loop never goes on after its
+// cancel (an expired timer would otherwise race the ended ctx in the select).
 func SleepCtx(ctx context.Context, d time.Duration) error {
+	if err := ctx.Err(); err != nil || d <= 0 {
+		return err
+	}
 	t := time.NewTimer(d)
 	defer t.Stop()
 	select {

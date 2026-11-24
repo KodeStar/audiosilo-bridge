@@ -25,6 +25,18 @@ func TestSleepCtx(t *testing.T) {
 		if err := <-done; !errors.Is(err, context.Canceled) || time.Since(start) != time.Minute {
 			t.Fatalf("cancelled sleep ended after %v with %v", time.Since(start), err)
 		}
+
+		// An ended ctx wins over a wait that is already due, every time.
+		for _, d := range []time.Duration{-time.Second, 0, time.Nanosecond} {
+			for range 100 {
+				if err := SleepCtx(ctx, d); !errors.Is(err, context.Canceled) {
+					t.Fatalf("SleepCtx(ended, %v) = %v, want the cancel", d, err)
+				}
+			}
+		}
+		if err := SleepCtx(t.Context(), -time.Second); err != nil || time.Since(start) != time.Minute {
+			t.Fatalf("a negative wait waited until %v with %v", time.Since(start), err)
+		}
 	})
 }
 

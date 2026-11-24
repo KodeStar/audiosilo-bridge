@@ -169,12 +169,10 @@ func (b Backoff) Do(ctx context.Context, wait func(context.Context, time.Duratio
 	return fmt.Errorf("the server is still rate limiting the Bridge (attempt %d): %w", attempt, err)
 }
 
-// Wait waits d, or until ctx ends. An ended ctx always wins, so a zero wait
-// (an explicit Retry-After: 0) never lets a cancelled job go on.
+// Wait waits d, or until ctx ends (timeutil.SleepCtx). An ended ctx always
+// wins, so a zero wait (an explicit Retry-After: 0) never lets a cancelled job
+// go on.
 func Wait(ctx context.Context, d time.Duration) error {
-	if err := ctx.Err(); err != nil || d <= 0 {
-		return err
-	}
 	return timeutil.SleepCtx(ctx, d)
 }
 

@@ -158,8 +158,10 @@ internal/
   timeutil/ SleepCtx waits for a duration or context cancellation. Audible,
             agent and pipeline retries, generate, GitHub sign-in, the job
             runner and worker, verify, the scheduler, agentbox, toolfetch,
-            netguard, mapping and the podcast and LibriVox jobs use it.
-            link.Wait checks cancellation first, including for a zero delay.
+            netguard, mapping and the podcast and LibriVox jobs use it, and
+            link.Wait is it. It checks cancellation first, even for a zero or
+            negative delay, so an ended context never loses a race to an
+            expired timer.
             RetryAfter reads seconds or an HTTP date and caps either at 24 h.
             The server link accepts digits only and caps oversized digit strings.
             Audible and feed requests also accept a leading plus and require
