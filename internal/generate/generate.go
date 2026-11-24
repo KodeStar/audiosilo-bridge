@@ -36,7 +36,6 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 	"github.com/kodestar/audiosilo-bridge/internal/timeutil"
-	"github.com/kodestar/audiosilo-bridge/internal/transfer"
 )
 
 // Kind is the job kind.
@@ -1310,7 +1309,7 @@ func (h *Handler) waitMapped(ctx context.Context, r *run, strict bool) error {
 		mount, _ := h.o.Mount(r.lib.ID, r.lib.Root)
 		st, checked := h.o.Libraries.Status(r.lib.ID)
 		switch {
-		case transfer.WritableAt(st, checked, mount):
+		case mapping.WritableAt(st, checked, mount):
 			r.mount = mount
 			r.unparkOwn()
 			return nil

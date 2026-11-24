@@ -27,7 +27,6 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
-	"github.com/kodestar/audiosilo-bridge/internal/transfer"
 )
 
 // Chapters found in the narration (BRIDGE-PLAN.md Phase 1d). A book with no
@@ -347,7 +346,7 @@ func (h *Handler) saveChaptersEarly(ctx context.Context, r *run, b store.Book) b
 func (h *Handler) mappedNow(r *run) bool {
 	mount, _ := h.o.Mount(r.lib.ID, r.lib.Root)
 	st, checked := h.o.Libraries.Status(r.lib.ID)
-	return transfer.WritableAt(st, checked, mount)
+	return mapping.WritableAt(st, checked, mount)
 }
 
 // sidecarsWithoutChapters reports whether the book's .audiosilo/ (at p) holds

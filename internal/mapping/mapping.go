@@ -562,6 +562,12 @@ func (r *Registry) Status(id int64) (link.LibraryStatus, bool) {
 	return r.view(res, r.clock())
 }
 
+// WritableAt reports whether a check (Status's, with whether it stands) lets a
+// job write at mount: standing, for that mount, mapped AND writable there.
+func WritableAt(st link.LibraryStatus, checked bool, mount string) bool {
+	return checked && st.MountPath == mount && st.Mapped && st.Writable
+}
+
 // Statuses returns the last check of every library that has one, for the
 // heartbeat: the state as recorded, not aged (view). A state too old to stand
 // lets nothing write here (Status), but the server takes an unmapped one as

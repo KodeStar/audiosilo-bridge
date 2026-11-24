@@ -187,23 +187,24 @@ endpoint}` plus the engine it wires; `accounts -> {agent, agentproto, ghauth, se
 {contrib, jobs, metaops, store}`; `setup -> link`;
 `api` calls the injected Backend and the injected `auth.Manager` (login, sessions,
 the password), with types from jobs/link/mapping/store/logring/endpoint; `verify -> {fsutil,
-jobs, link, mapping}`; `generate -> {jobs, link, mapping, store, scheduler, pipeline, ...}`
-through its own Engine/Server interfaces; `podcastjob -> {fsutil, jobs, link, mapping, netguard, podcast, secrets, store}`;
+jobs, link, mapping, timeutil}`; `generate -> {jobs, link, mapping, store, scheduler, pipeline, ...}`
+through its own Engine/Server interfaces; `podcastjob -> {fsutil, jobs, link, mapping, netguard, podcast, secrets, store, timeutil}`;
 `podcast -> {fsutil, gofeed, x/net/html, x/text}`; `logring -> podcast`;
 `audible -> {progress, source, timeutil}` (its tagged build also `audiblefake`, which never
 imports `audible`); `importjob -> {link, placement, source,
 audiosilo-server/pkg/match}`; `audibleacct -> {audible, link, secrets, source, store}`;
 `audiblejob -> {audible, audibleacct, fsutil, importjob, jobs, link, mapping, placement,
 source, store, transfer}` (app wires both); `librivoxjob -> {fsutil, importjob, jobs, link,
-mapping, metaops, netguard, placement, transfer, audiosilo-server/pkg/match}`; `audiblesync -> {audible, audibleacct, jobs, link, store}`; `transfer -> {fsutil, jobs, link, mapping, progress}`;
-`jobs -> {link, store, timeutil}`; `mapping -> {fsutil, link}`;
+mapping, metaops, netguard, placement, timeutil, transfer, audiosilo-server/pkg/match}`; `audiblesync -> {audible, audibleacct, jobs, link, store}`; `transfer -> {fsutil, jobs, link, mapping, progress}`;
+`jobs -> {link, store, timeutil}`; `mapping -> {fsutil, link, timeutil}`;
 `link -> timeutil`; `timeutil`, `agentproto`, `endpoint` and `workerproto` are leaves; `config -> {agent,
 agentproto, fsutil, ghauth, pricing, state}`; `workers -> {asr, fsutil,
 scheduler, state, store, transcript, workerproto}`; `worker -> {asr, fsutil, timeutil, workerproto}`
 (never `workers`; its tests drive the real `api` + `workers` in-process); `api`
 reaches the hub through its own `WorkerHub` interface and `workerproto`, and
 serves `workerdist` (a leaf); `agentbox` and `agentrun` each import only
-`agent` + `agentproto` (agentrun also `fsutil`), never each other, and the engine
+`agent` + `agentproto` and the leaf helpers (agentbox `fsutil` + `timeutil`,
+agentrun `fsutil`), never each other, and the engine
 never knows either (agentbox is just an `agent.Runner`). The engine's directions are
 in PACKAGES.md.
 

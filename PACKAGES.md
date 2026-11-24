@@ -2129,7 +2129,7 @@ internal/
             book's work_id agrees with the verdict's. (sidecars' folder-scan job
             manager, candidate overrides and library sightings were not imported.)
             Deps: stdlib
-            HTTP + the meta module + audiosilo-server/pkg/match.
+            HTTP + the meta module + audiosilo-server/pkg/match + source (ParsePosition).
   events/   SSE hub: Publish -> monotonic-id fan-out, ring-buffer replay from
             Last-Event-ID, ephemeral heartbeats, slow-subscriber eviction, optional
             durable-sink persister (feeds store.events)
@@ -2318,7 +2318,8 @@ internal/
             asking again and beating again was a tight loop of heartbeats. A mapping
             edit re-checks only its library (each check stats files and writes a
             probe). Status(id) is one library's last check (a write job needs it
-            mapped AND writable at the mount it uses now). A run asks for one
+            mapped AND writable at the mount it uses now: WritableAt, the rule
+            generate, the Audible and LibriVox waits and both sweeps go by). A run asks for one
             library at a time, its server reads CheckSpacing (250 ms) apart (a
             library whose folder is missing asks nothing and waits for nothing).
             Check and CheckPodcast also return the server's failure when it gave
@@ -4110,14 +4111,14 @@ internal/
             Failure {code, message} as result and error, codes not_writable,
             exists, disk_full, not_found, archive_unavailable, metadata_off,
             never a URL. Deps: fsutil, importjob, jobs, link, mapping, metaops,
-            netguard, placement, transfer, audiosilo-server/pkg/match.
+            netguard, placement, timeutil, transfer, audiosilo-server/pkg/match.
   source/   Record (normalized metadata of one importable book: the ASIN,
             UnavailableReason; Phase 4a: Authors (every credit), SeriesPosition as
             the source spells it, ReleaseDate YYYY-MM-DD or "") (source.go only;
             the Source/Acquirer interfaces and the manager's Key went in Phase 4b;
             the manager's folder walk, probe and OpenAudible reader were not
-            imported). ParsePosition reads a single number for both Audible listings
-            and importjob matching. importjob.rangeStart reads ranges.
+            imported). ParsePosition reads a single number for Audible listings,
+            importjob matching and metaops' series positions. importjob.rangeStart reads ranges.
   transfer/ Local only (SFTP and Index were not kept): CleanRel (mapping.SafeJoin's
             rules, no empty path, no hidden (dot) segment anywhere: the server
             never indexes one), OnDisk(fsys, rel) over a LibraryFS
@@ -4150,7 +4151,7 @@ internal/
             (staging), stopping when the mapping changes.
             Audible imports and LibriVox fetches use MappingWait.Mapped to
             check the pairing and writable mount, yield the download slot and
-            recheck after reclaiming it. WritableAt also guards both sweeps.
+            recheck after reclaiming it (mapping.WritableAt's rule).
             PrivateDir names their files, creates the private directory and
             runs each job's sweep policy. Both use the seven-day StagingMaxAge.
             PrepareProjectDir and Local.Place create library parents through
@@ -5595,18 +5596,18 @@ config}`; `app -> {api, auth, config, jobs, link, logring, mapping, secrets, sto
 verify, web, generate, agentbox, agentproto, agent, endpoint}` plus the engine it wires (asr,
 contrib, events, metaops, pipeline, scheduler, state, supervisor, toolfetch);
 `api -> {auth, jobs, link, logring, mapping, store}` (types only; it calls the
-injected Backend); `verify -> {jobs, link, mapping}`; `jobs -> {link, store, timeutil}`;
-`mapping -> link`; `link -> timeutil`; `endpoint` (the endpoint check, bridge#84) is a
+injected Backend); `verify -> {fsutil, jobs, link, mapping, timeutil}`; `jobs -> {link, store, timeutil}`;
+`mapping -> {fsutil, link, timeutil}`; `link -> timeutil`; `endpoint` (the endpoint check, bridge#84) is a
 leaf (standard library only); `config -> {agent, agentproto, fsutil, ghauth,
 pricing, state}`. `generate -> {jobs, link, mapping, store,
 scheduler, state, pipeline, contrib, chapterdetect, audio, scratch, metaops, ebook, fsutil,
 readalong, timeutil}` (+ the meta
 module's extract/model), its engine and server reached through its own Engine and
 Server interfaces. The agent container: `agentproto` is a leaf (standard library
-only); `agentbox -> {agent, agentproto}`; `agentrun -> {agent, agentproto,
+only); `agentbox -> {agent, agentproto, fsutil, timeutil}`; `agentrun -> {agent, agentproto,
 fsutil}`; neither imports the other, and neither the pipeline nor the scheduler
 knows about either (agentbox is just an agent.Runner). The engine:
-`scheduler -> {store, state, eta, events, scratch}`; `eta -> state` (pure, imported BY
+`scheduler -> {store, state, eta, events, scratch, timeutil}`; `eta -> state` (pure, imported BY
 scheduler - never the reverse);
 `chapterdetect -> audio` (its number words and Silence only); `readalong -> epubcfi`
 (+ x/text) and `epubcfi -> {x/net/html, x/text}`, both pure leaves of the engine;
@@ -5621,5 +5622,5 @@ and the shared clip-floor predicate `qa.ClipStartInRange`/`qa.ClipStartFloorSec`
 and `audiblejob -> {audible, audibleacct, fsutil, importjob, jobs, link, mapping, placement,
 source, store, transfer}` (Phase 4b's import; app wires both;
 neither imports app or api); LibriVox L6: `librivoxjob -> {fsutil, importjob, jobs, link,
-mapping, metaops, netguard, placement, transfer, audiosilo-server/pkg/match}` (app wires it). Handlers marshal DTOs and call into the injected packages; they
+mapping, metaops, netguard, placement, timeutil, transfer, audiosilo-server/pkg/match}` (app wires it). Handlers marshal DTOs and call into the injected packages; they
 hold no logic (state transitions live in `state`, dispatch in `scheduler`).

@@ -23,11 +23,6 @@ const (
 	MappingPoll = time.Second
 )
 
-// WritableAt reports whether the current check permits a write at mount.
-func WritableAt(st link.LibraryStatus, checked bool, mount string) bool {
-	return checked && st.MountPath == mount && st.Mapped && st.Writable
-}
-
 // MappingWait wires the live mapping and the job's progress and failure types.
 type MappingWait struct {
 	Libraries   Libraries
@@ -66,7 +61,7 @@ func (w MappingWait) Mapped(ctx context.Context, job jobs.Job, id int64, rep *jo
 		mount, _ := w.Mount(lib.ID, lib.Root)
 		st, checked := w.Libraries.Status(lib.ID)
 		switch {
-		case WritableAt(st, checked, mount):
+		case mapping.WritableAt(st, checked, mount):
 			rep.Unpark()
 			if !rep.Yielded() {
 				return lib, mount, nil

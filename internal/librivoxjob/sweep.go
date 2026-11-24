@@ -534,7 +534,7 @@ func (h *Handler) writableMount(id int64) (string, bool) {
 	}
 	mount, _ := h.o.Mount(lib.ID, lib.Root)
 	st, checked := h.o.Libraries.Status(lib.ID)
-	if mount == "" || !transfer.WritableAt(st, checked, mount) {
+	if mount == "" || !mapping.WritableAt(st, checked, mount) {
 		return "", false
 	}
 	return mount, true
