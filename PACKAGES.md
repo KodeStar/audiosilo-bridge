@@ -2622,8 +2622,11 @@ internal/
             admin's language (bridge.progress.<code>) and shows message for a code
             it doesn't know, and an older console shows message as before. Codes
             are wire: never rename or reuse one; a new sentence gets a new code and
-            the console a locale key. Free text (an engine stage's label, a park
-            reason built from an error) goes uncoded in Message.
+            the console a locale key (testdata/phrases.json pins the shipped
+            codes and their English, TestPhrasesShipped). Free text (an engine
+            stage's label, a park reason built from an error) goes uncoded in
+            Message. LibraryNotWritable gives library_not_writable's params and
+            the park reason it words, for audiblejob's and librivoxjob's parks.
             Phase 1a: PARK/UNPARK. Reporter.Park(code, msg) reports the job
             needs_attention with msg as its error while it KEEPS RUNNING here (the
             server drops a parked job's lease, as needs_attention has none, and renews

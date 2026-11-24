@@ -180,3 +180,15 @@ func Phrase(code string, params map[string]any) string {
 		return m
 	})
 }
+
+// needsAttention leads a parked progress's phrase; the park's own reason is
+// the sentence without it.
+const needsAttention = "Needs attention: "
+
+// LibraryNotWritable is SayLibraryNotWritable's params for the library named
+// name, and the reason a job parks (or fails) on with it: the phrase without
+// its "Needs attention: " lead.
+func LibraryNotWritable(name string) (params map[string]any, reason string) {
+	params = map[string]any{"library": name}
+	return params, strings.TrimPrefix(Phrase(SayLibraryNotWritable, params), needsAttention)
+}

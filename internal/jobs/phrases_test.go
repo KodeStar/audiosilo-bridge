@@ -5,6 +5,8 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -25,8 +27,11 @@ func TestPhrasesComplete(t *testing.T) {
 		if !ok || len(vs.Names) != 1 || !strings.HasPrefix(vs.Names[0].Name, "Say") {
 			return true
 		}
-		lit, ok := vs.Values[0].(*ast.BasicLit)
-		if !ok {
+		var lit *ast.BasicLit
+		if len(vs.Values) == 1 {
+			lit, _ = vs.Values[0].(*ast.BasicLit)
+		}
+		if lit == nil {
 			t.Fatalf("%s isn't a string constant", vs.Names[0].Name)
 		}
 		code, _ := strconv.Unquote(lit.Value)
@@ -49,6 +54,45 @@ func TestPhrasesComplete(t *testing.T) {
 		if !codes[code] {
 			t.Errorf("phrase %q has no Say constant", code)
 		}
+	}
+}
+
+// The codes shipped are wire (the console's locale keys): none is renamed or
+// dropped, and none changes its sentence unnoticed. A new code is added to
+// testdata/phrases.json, and a reworded one changed there, with the console's
+// bridge.progress.<code> locale keys.
+func TestPhrasesShipped(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile(filepath.Join("testdata", "phrases.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var shipped map[string]string
+	if err := json.Unmarshal(raw, &shipped); err != nil {
+		t.Fatal(err)
+	}
+	for code, tmpl := range shipped {
+		switch got, ok := phrases[code]; {
+		case !ok:
+			t.Errorf("shipped code %q is gone: a code is never renamed or dropped", code)
+		case got != tmpl:
+			t.Errorf("code %q reads %q, shipped as %q: update testdata/phrases.json and the console's locales", code, got, tmpl)
+		}
+	}
+	for code := range phrases {
+		if _, ok := shipped[code]; !ok {
+			t.Errorf("code %q isn't in testdata/phrases.json: add it (and the console's locale key)", code)
+		}
+	}
+}
+
+// LibraryNotWritable's reason is its phrase without the "Needs attention" lead.
+func TestLibraryNotWritable(t *testing.T) {
+	t.Parallel()
+	params, why := LibraryNotWritable("Books")
+	if params["library"] != "Books" || Phrase(SayLibraryNotWritable, params) != needsAttention+why ||
+		!strings.HasPrefix(why, "Library Books must be mapped and writable") {
+		t.Fatalf("params %v, reason %q", params, why)
 	}
 }
 

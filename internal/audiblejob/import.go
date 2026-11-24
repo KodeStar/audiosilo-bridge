@@ -1065,8 +1065,6 @@ func (h *Importer) mapped(ctx context.Context, id int64, rep *jobs.Reporter, ste
 		}
 		mount, _ := h.o.Mount(lib.ID, lib.Root)
 		st, checked := h.o.Libraries.Status(lib.ID)
-		said := map[string]any{"library": lib.Name}
-		why := strings.TrimPrefix(jobs.Phrase(jobs.SayLibraryNotWritable, said), "Needs attention: ")
 		switch {
 		case checked && st.MountPath == mount && st.Mapped && st.Writable:
 			rep.Unpark()
@@ -1084,8 +1082,10 @@ func (h *Importer) mapped(ctx context.Context, id int64, rep *jobs.Reporter, ste
 				rep.Yield()
 			}
 		case strict:
+			_, why := jobs.LibraryNotWritable(lib.Name)
 			return link.Library{}, "", fail(CodeNotWritable, "%s", why)
 		default:
+			said, why := jobs.LibraryNotWritable(lib.Name)
 			h.report(rep, jobs.Progress{Step: step, Code: jobs.SayLibraryNotWritable, Params: said,
 				Extra: map[string]any{"park": map[string]any{"code": CodeNotWritable}}})
 			rep.Park(CodeNotWritable, why)
