@@ -143,7 +143,9 @@ internal/
             from this repository's WhisperCLIReleaseTag, sha256 verified against the release's
             checksums.txt, temp-dir extraction under a hard size budget, --help
             self-check, atomic install + .meta written last; CPU fallback on
-            accelerated self-check failure, device-aware cache hit, stale-cache
+            accelerated self-check failure, device-aware cache hit, an install
+            from an older tag kept when the new checksums.txt lists the same
+            archive sha256 (one manifest fetch, the .meta re-stamped), stale-cache
             degrade when a refresh fails); and ggml ASR models (EnsureModel: size
             floor + .meta sidecar + atomic rename). LocateBinary is the shared
             no-download lookup. A missing artifact degrades gracefully (the stage
