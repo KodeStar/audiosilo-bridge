@@ -165,19 +165,22 @@ func workerInstall(args []string, stdout, stderr io.Writer, remove bool) error {
 		return err
 	}
 	token := f.tokenIn(data)
+	if checkToken && token != "" {
+		// The installer's update asks this before it replaces the old program.
+		// A check that passes stays quiet: the install after it names an
+		// unreadable service, so the update says it once.
+		return nil
+	}
 	// Said before the --bridge check: an unreadable service is why an update
-	// suddenly needs --bridge. The installer's token check says it only when it
-	// refuses, so a check that passes and the install after it don't both say it.
-	if keepErr != nil && (!checkToken || token == "") {
+	// suddenly needs --bridge.
+	if keepErr != nil {
 		_, _ = fmt.Fprintln(stderr, "worker install: the installed service's settings can't be read, so it gets the defaults "+
 			"and the flags given here ("+keepErr.Error()+")")
 	}
 	if checkToken {
-		// The installer's update asks this before it replaces the old program.
-		if token == "" {
-			return errTokenRequired
-		}
-		return nil
+		// Asked only when a service is installed, so not the first time.
+		return fmt.Errorf("worker install: this update needs --token: %s holds no saved worker token "+
+			"(make one on the Bridge's page, Workers); the installed worker is unchanged", data)
 	}
 	if len(kept) > 0 && !*printOnly {
 		_, _ = fmt.Fprintln(stdout, "Keeping the installed service's "+strings.Join(kept, ", ")+" (give a flag to change it).")

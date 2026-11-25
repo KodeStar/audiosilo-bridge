@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"errors"
 	"flag"
 	"io"
 	"os"
@@ -292,7 +291,7 @@ WORKER
 	if err := worker.SaveToken(defaultWorkerDataDir(), "asw_wrong_folder"); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := runScript(); err == nil || !strings.Contains(out, "--token is required") {
+	if out, err := runScript(); err == nil || !strings.Contains(out, "this update needs --token") {
 		t.Fatalf("token only in the default folder: %v\n%s", err, out)
 	}
 	if got, err := os.ReadFile(bin); err != nil || string(got) != "old" {
@@ -331,7 +330,9 @@ func TestWorkerInstallCheckTokenUnreadableService(t *testing.T) {
 		err := workerCmd([]string{"install", "--bridge", "http://bridge", "--check-token"}, io.Discard, &errb)
 		return errb.String(), err
 	}
-	if msg, err := check(); !errors.Is(err, errTokenRequired) || !strings.Contains(msg, "can't be read") {
+	// The refusal names the folder it looked in, and it isn't the first time.
+	if msg, err := check(); err == nil || !strings.Contains(err.Error(), "this update needs --token: "+defaultWorkerDataDir()) ||
+		strings.Contains(err.Error(), "first time") || !strings.Contains(msg, "can't be read") {
 		t.Fatalf("no token: %v, %q", err, msg)
 	}
 	if err := worker.SaveToken(defaultWorkerDataDir(), "asw_default"); err != nil {
