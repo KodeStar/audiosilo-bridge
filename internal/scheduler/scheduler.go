@@ -281,7 +281,8 @@ func (s *Scheduler) Notify() { s.notify() }
 
 // Reconcile squares scheduling truth (DB) with content truth (sentinels) after a
 // crash. It (1) closes every stage run left open (interrupted mid-execution) as
-// failed, so the book re-dispatches its current stage, and (2) for each active
+// failed, so the book re-dispatches its current stage, unless the run wrote its
+// sentinel before the crash (closed ok then: see below), and (2) for each active
 // book, rewinds to the earliest completed stage whose sentinel is missing (a
 // purged work dir), forcing that stage to re-run.
 func (s *Scheduler) Reconcile(ctx context.Context) error {
@@ -292,17 +293,20 @@ func (s *Scheduler) Reconcile(ctx context.Context) error {
 	for _, r := range openRuns {
 		ok := false
 		metrics := json.RawMessage(`{"interrupted":true}`)
-		// A repair can finish on disk just before shutdown. Its stage counter
-		// must include that round when the scheduler resumes from the sentinel.
-		if r.Stage == string(state.Retranscribing) {
-			b, err := s.db.GetBook(ctx, r.BookID)
-			if err != nil {
-				return err
-			}
-			if b.Goal == state.GoalReadalong && b.State == r.Stage {
-				if sn, err := ReadSentinel(b.WorkDir, r.Stage); err == nil && sn.Stage == r.Stage {
-					ok, metrics = true, sn.Result.Metrics
-				}
+		// A stage can finish on disk (its sentinel, the final durable action) just
+		// before shutdown. runStage then resumes from that sentinel without a run of
+		// its own, so this run is the round: a round counter (CountStageSuccesses: the
+		// read-along's one repair round, the paid qa_adjudicating and fix-loop caps)
+		// must include it, or the book gets one round more than its cap. An open run
+		// never coexists with an older sentinel of its stage (runStage skips a stage
+		// whose sentinel exists without opening a run, and every re-entry drops it).
+		b, err := s.db.GetBook(ctx, r.BookID)
+		if err != nil {
+			return err
+		}
+		if b.State == r.Stage {
+			if sn, err := ReadSentinel(b.WorkDir, r.Stage); err == nil && sn.Stage == r.Stage {
+				ok, metrics = true, sn.Result.Metrics
 			}
 		}
 		if err := s.db.FinishStageRun(ctx, r.ID, ok, metrics); err != nil {

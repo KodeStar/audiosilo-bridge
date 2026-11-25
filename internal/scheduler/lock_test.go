@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -534,31 +535,49 @@ func TestReconcileClosesOpenRunsAndRewindsOnMissingSentinel(t *testing.T) {
 	}
 }
 
+// A run that wrote its sentinel just before a crash counts as the round it was
+// (the read-along's repair, a whole run's paid adjudication); one that didn't is
+// closed failed.
 func TestReconcileCountsCompletedReadalongRepair(t *testing.T) {
-	h := newHarness(t)
-	db := h.openDB(t)
-	ctx := t.Context()
-	b, err := db.CreateBook(ctx, store.NewBook{SourcePath: "book", WorkDir: t.TempDir(), Goal: state.GoalReadalong})
-	if err != nil {
-		t.Fatal(err)
-	}
-	stage := string(state.Retranscribing)
-	if err := db.SetBookState(ctx, b.ID, stage, "", "", ""); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.StartStageRun(ctx, b.ID, stage, 1); err != nil {
-		t.Fatal(err)
-	}
-	if err := WriteSentinel(b.WorkDir, stage, StageResult{}); err != nil {
-		t.Fatal(err)
-	}
-	s := New(db, h.hub, NewStubExecutor(0, 0), 1, h.workRoot, false)
-	defer s.wg.Wait()
-	if err := s.Reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if n, err := db.CountStageSuccesses(ctx, b.ID, stage); err != nil || n != 1 {
-		t.Fatalf("completed repairs %d: %v", n, err)
+	for _, c := range []struct {
+		goal     string
+		stage    state.State
+		sentinel bool
+		want     int
+	}{
+		{state.GoalReadalong, state.Retranscribing, true, 1},
+		{"", state.QAAdjudicating, true, 1},
+		{"", state.QAAdjudicating, false, 0},
+	} {
+		t.Run(fmt.Sprintf("%s_%v", c.stage, c.sentinel), func(t *testing.T) {
+			h := newHarness(t)
+			db := h.openDB(t)
+			ctx := t.Context()
+			b, err := db.CreateBook(ctx, store.NewBook{SourcePath: "book", WorkDir: t.TempDir(), Goal: c.goal})
+			if err != nil {
+				t.Fatal(err)
+			}
+			stage := string(c.stage)
+			if err := db.SetBookState(ctx, b.ID, stage, "", "", ""); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.StartStageRun(ctx, b.ID, stage, 1); err != nil {
+				t.Fatal(err)
+			}
+			if c.sentinel {
+				if err := WriteSentinel(b.WorkDir, stage, StageResult{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			s := New(db, h.hub, NewStubExecutor(0, 0), 1, h.workRoot, false)
+			defer s.wg.Wait()
+			if err := s.Reconcile(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if n, err := db.CountStageSuccesses(ctx, b.ID, stage); err != nil || n != c.want {
+				t.Fatalf("completed rounds %d, want %d: %v", n, c.want, err)
+			}
+		})
 	}
 }
 

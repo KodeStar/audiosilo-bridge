@@ -1798,7 +1798,10 @@ internal/
             follows state.PathNext.
   scheduler/ one wake-on-event goroutine over three lanes (ASR cap 1 / agent cap =
             config, series-locked / mechanical cap 2) over an injected Executor +
-            _done/<stage>.json sentinels (the CONTENT truth) and crash reconcile.
+            _done/<stage>.json sentinels (the CONTENT truth) and crash reconcile
+            (an open run is closed failed, or ok when its book is still at that stage
+            with the stage's sentinel written: the crash came after the stage finished,
+            and the round counters (CountStageSuccesses) must count it).
             The ASR lane is ONE serial MLX slot shared by full-book and corrective
             transcription - the post-M9 round REMOVED the separate corrective slot
             (overlapping decodes pushed the second process into the OOM killer on

@@ -249,16 +249,16 @@ func TestCrashWindowResumeNoExtraRun(t *testing.T) {
 	_, _ = db.StartStageRun(ctx, b.ID, string(state.Inspecting), 1)
 	_ = WriteSentinel(b.WorkDir, string(state.Inspecting), StageResult{MarkersContiguous: true})
 
-	// Resume: reconcile closes the open run failed; dispatch skips re-execution and
-	// advances. Then the stub carries the book to done.
+	// Resume: reconcile closes the open run ok (its sentinel says it completed);
+	// dispatch skips re-execution and advances. Then the stub carries the book to done.
 	exec := NewStubExecutor(1*time.Millisecond, 3*time.Millisecond)
 	books := runUntil(t, db, h.hub, exec, 2, allDone, waitLimit)
 	if !allDone(books) {
 		t.Fatal("did not resume to completion")
 	}
 
-	// inspecting has exactly ONE run: the reconcile-closed (failed) one. The skip
-	// path must NOT have added an ok=1 run.
+	// inspecting has exactly ONE run: the reconcile-closed one, ok because it wrote
+	// its sentinel. The skip path must NOT have added a second run.
 	runs, _ := db.ListStageRuns(ctx, b.ID)
 	total, ok := 0, 0
 	for _, r := range runs {
@@ -269,8 +269,8 @@ func TestCrashWindowResumeNoExtraRun(t *testing.T) {
 			}
 		}
 	}
-	if total != 1 || ok != 0 {
-		t.Fatalf("inspecting stage_runs total=%d ok=%d, want 1/0 (no extra ok on skip-resume)", total, ok)
+	if total != 1 || ok != 1 {
+		t.Fatalf("inspecting stage_runs total=%d ok=%d, want 1/1 (no extra run on skip-resume)", total, ok)
 	}
 }
 
