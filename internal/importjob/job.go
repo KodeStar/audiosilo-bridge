@@ -473,6 +473,40 @@ func PositionAgrees(rec source.Record, b link.LibraryBook) (agrees, disagrees bo
 	return got == want, got != want
 }
 
+// OtherVolume reports whether rec names another volume of its series than
+// the one b holds, so b takes no ASIN from it (the poll's enrichment and
+// joinedBooks). Their series numbers disagree (PositionAgrees), unless both
+// titles name the same book ("New Spring" at 0 on Audible and 0.5 in the
+// library). Or b's title is rec's series name and a number ("Iron Vale 3")
+// that is not rec's: its position, else 1 for a title that is the series name.
+// The matcher's bare-title rule matches the opener's title to a numbered
+// sequel's folder, and PositionAgrees says nothing when rec has no position or
+// b's series is spelled otherwise ("Iron Vale Saga").
+func OtherVolume(rec source.Record, b link.LibraryBook) bool {
+	if rec.Series == "" {
+		return false
+	}
+	title := cmp.Or(rec.Title, rec.TitleShort)
+	own := match.Fold(match.CleanTitle(title, rec.Series))
+	theirs := strings.TrimSpace(match.CleanTitle(b.Title, rec.Series))
+	same := own != "" && own == match.Fold(theirs)
+	if _, disagrees := PositionAgrees(rec, b); disagrees {
+		return !same || volumeNumber.MatchString(own) || seriesNamedTitle(title, rec.Series)
+	}
+	if same || !volumeNumber.MatchString(theirs) {
+		return false
+	}
+	n, _ := source.ParsePosition(theirs)
+	if want, ok := source.ParsePosition(rec.SeriesPosition); ok {
+		return want != n
+	}
+	return n != 1 && seriesNamedTitle(title, rec.Series)
+}
+
+// volumeNumber is a title that is only a volume's number ("3", "0.5"), not
+// one such as "1984".
+var volumeNumber = regexp.MustCompile(`^\d{1,3}(?:\.\d+)?$`)
+
 // folderCode is a leading series code on a folder name, as the server reads
 // one: one to five letters, maybe a space, a number of one to three digits
 // with maybe a decimal part ("DH06 - Land of Magic", "DF15.5 Brief Cases"),

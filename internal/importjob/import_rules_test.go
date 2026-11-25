@@ -664,3 +664,40 @@ func TestLabeledPackOverride(t *testing.T) {
 		})
 	}
 }
+
+// OtherVolume keeps a title's ASIN off a book holding another volume: by
+// series number, or by the number a book's title gives after rec's series name
+// when the numbers can't be compared (no position, the series spelled
+// otherwise). The same title under two numberings is the same book.
+func TestOtherVolume(t *testing.T) {
+	au := []string{"Ona Fell"}
+	vol := func(title, name, pos string) link.LibraryBook {
+		return link.LibraryBook{Path: "Fell/IV/" + title, Title: title, Authors: au, Series: series(name, pos)}
+	}
+	for _, tc := range []struct {
+		title, pos string
+		b          link.LibraryBook
+		want       bool
+	}{
+		{"Iron Vale", "1", vol("Iron Vale 3", "Iron Vale", "3"), true},
+		{"Iron Vale", "", vol("Iron Vale 3", "Iron Vale", "3"), true},
+		{"Iron Vale", "1", vol("Iron Vale 3", "Iron Vale Saga", "3"), true},
+		{"Iron Vale", "", vol("Iron Vale 3", "Iron Vale Saga", "3"), true},
+		{"Iron Vale", "1", vol("Iron Vale", "Iron Vale", "3"), true},
+		{"Iron Vale", "", vol("Iron Vale 1", "Iron Vale Saga", "1"), false},
+		{"Iron Vale", "1", vol("Iron Vale", "Iron Vale", "1"), false},
+		{"Iron Vale 3", "3", vol("Iron Vale 3", "Iron Vale Saga", "3"), false},
+		{"Ash Road", "2", vol("Iron Vale 3", "Iron Vale Saga", ""), true},
+		{"Ash Road", "", vol("Iron Vale 3", "Iron Vale Saga", ""), false},
+		// One book numbered two ways keeps its ASIN; two titles do not.
+		{"New Spring", "0", vol("New Spring", "Iron Vale", "0.5"), false},
+		{"Iron Vale: New Spring", "0", vol("New Spring", "Iron Vale", "0.5"), false},
+		{"Ash Road", "2", vol("Ember", "Iron Vale", "3"), true},
+		{"1984", "1", vol("1984", "Iron Vale", "1"), false},
+	} {
+		r := audibleRec("B0SYN00090", tc.title, "Ona Fell", "Iron Vale", tc.pos)
+		if got := OtherVolume(r, tc.b); got != tc.want {
+			t.Errorf("OtherVolume(%q #%s, %q %v) = %v, want %v", tc.title, tc.pos, tc.b.Title, tc.b.Series, got, tc.want)
+		}
+	}
+}

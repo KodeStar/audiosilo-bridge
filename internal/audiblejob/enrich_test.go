@@ -337,6 +337,42 @@ func TestPollOtherVolumeNotEnriched(t *testing.T) {
 	}
 }
 
+// TestPollTitleNumberNotEnriched: with no position to compare, or the
+// series spelled otherwise, the number a book's title gives after the series
+// name still keeps the opener's ASIN off a sequel's folder; one book numbered
+// two ways keeps its ASIN.
+func TestPollTitleNumberNotEnriched(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		book link.LibraryBook
+		rec  source.Record
+		want map[string]string
+	}{
+		{"opener without a position", link.LibraryBook{Path: "Fell/Iron Vale/IV03", Title: "Iron Vale 3", Authors: []string{"Ona Fell"},
+			Series: []link.SeriesRef{{Name: "Iron Vale", Position: "3"}}},
+			source.Record{ASIN: "B0VALE0001", Title: "Iron Vale", Author: "Ona Fell", Series: "Iron Vale"}, map[string]string{}},
+		{"series spelled otherwise", link.LibraryBook{Path: "Fell/IV/Iron Vale 3", Title: "Iron Vale 3", Authors: []string{"Ona Fell"},
+			Series: []link.SeriesRef{{Name: "Iron Vale Saga", Position: "3"}}},
+			source.Record{ASIN: "B0VALE0001", Title: "Iron Vale", Author: "Ona Fell", Series: "Iron Vale", SeriesPosition: "1", Sequence: 1, HasSequence: true},
+			map[string]string{}},
+		{"numbered two ways", link.LibraryBook{Path: "Fell/Iron Vale/New Spring", Title: "New Spring", Authors: []string{"Ona Fell"},
+			Series: []link.SeriesRef{{Name: "Iron Vale", Position: "0.5"}}},
+			source.Record{ASIN: "B0VALE0000", Title: "New Spring", Author: "Ona Fell", Series: "Iron Vale", SeriesPosition: "0", HasSequence: true},
+			map[string]string{"Fell/Iron Vale/New Spring": "B0VALE0000"}},
+	} {
+		fs := &fakeServer{pageSize: 500, books: []link.LibraryBook{tc.book}}
+		h := setup(t, fs, &stubAccounts{acct: account(), recs: []source.Record{tc.rec}})
+		res, err := run(t, h, "acct0001")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Matched != 1 || fmt.Sprint(fs.enrichedNow()) != fmt.Sprint(tc.want) {
+			t.Fatalf("%s: result = %+v, enriched %v, want %v", tc.name, res, fs.enrichedNow(), tc.want)
+		}
+	}
+}
+
 // TestPollPackOnVolumeNotEnriched: a pack whose title fell back to the folder
 // at its first volume's position matches it, but that folder may hold one
 // volume, so the pack's ASIN never goes onto it; a pack on its own range

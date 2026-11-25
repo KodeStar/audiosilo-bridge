@@ -3594,10 +3594,10 @@ internal/
             empty library sends one empty final call, so the server marks every
             title gone), then Enrich (enrich.go) for each matched book without an
             ASIN that no second title claimed (counted from the claims: contested), no preorder matched
-            (not out yet: another edition), whose claim's series number does not
-            disagree with the book's (Claim.Disagrees: volume 1's bare title matches
-            a numbered sequel's folder, and with the sequel not owned would be its
-            only claim), and the spans agree (importjob.SpanMismatch).
+            (not out yet: another edition), that holds no other volume than the
+            title (importjob.OtherVolume: volume 1's bare title matches a numbered
+            sequel's folder, and with the sequel not owned would be its only
+            claim), and the spans agree (importjob.SpanMismatch).
             A folder at the first volume's position may hold that volume alone.
             Enrichment is PACED: one PUT per 200 ms, a 429 waits
             its Retry-After (else 1 to 2 s with jitter, doubling) and halves the pace (to 2 s at the
@@ -3693,8 +3693,10 @@ internal/
             waited out as the poll's enrichment does, enrichLimit, then enriched
             false). The books of the library the file could join (joinedBooks: at
             its own path, its folder or a disc set's folder above it) each get a
-            verdict, the BookMatcher picking that book for the title, not
-            SpanMismatch and not a twin (importjob.Twins, bridge#64); the book the rescan answers decides: one of those takes
+            verdict, the BookMatcher picking that book for the title, the
+            book holding no other volume (OtherVolume, the poll's rule), not
+            SpanMismatch and not a twin (importjob.Twins,
+            bridge#64); the book the rescan answers decides: one of those takes
             the ASIN only on its verdict, any other is new (the title's own, a pack
             placed as a pack included) and takes it, except the parent of a disc
             folder destination: the server joins a disc there only beside another
@@ -3875,6 +3877,11 @@ internal/
             (agrees/disagrees: rec's SeriesPosition as one number against b's
             position in rec's series, else b's main series' only when rec names no
             series or the number is the folder code leading b's folder (bridge#43).
+            OtherVolume(rec, b) gates enrichment: the positions disagree, unless
+            both titles clean to the same words (one book numbered two ways:
+            "New Spring" 0 and 0.5), or b's title is rec's series name and a
+            number (1 to 3 digits) other than rec's position, or than 1 for a
+            series-named title with none, whatever b's series is called.
             folderCodeIs follows the server's metadata.FolderCodePosition.
             C marks a volume in any named series. Other codes use the series' initials.
             DH06-2019 and DH06-07x read 6. A pack word or a doubled code
