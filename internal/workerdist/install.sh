@@ -56,7 +56,7 @@ service_program() {
 		if [ -x /usr/bin/plutil ]; then
 			/usr/bin/plutil -convert xml1 -o - -- "$service_file" 2>/dev/null
 		else
-			cat "$service_file"
+			cat "$service_file" 2>/dev/null
 		fi | awk '/<key>ProgramArguments<\/key>/ { args = 1; next }
 			args && /<\/array>/ { exit }
 			args && /<string>/ { if ($0 !~ /<\/string>[ \t]*$/) exit; sub(/^[ \t]*<string>/, ""); sub(/<\/string>[ \t]*$/, ""); print; exit }'
