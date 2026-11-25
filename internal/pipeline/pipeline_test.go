@@ -674,6 +674,11 @@ func TestASRSegmentProvenanceAndRates(t *testing.T) {
 		p.Segments[2].Backend != fake.ID() || p.Segments[2].Model != setup.Model || p.Segments[3] != fake.remote() {
 		t.Fatalf("routes %v, provenance %+v", routes, p)
 	}
+	// The configured settings stay what KeptTranscription compares; the map names
+	// the decoders.
+	if p.Model != "earlier-model" || p.decodedModel() != "mixed" {
+		t.Fatalf("model %q, decoded %q", p.Model, p.decodedModel())
+	}
 	if _, err := exe.Execute(t.Context(), book, state.Sanitizing, scheduler.StageReport{}); err != nil {
 		t.Fatal(err)
 	}
@@ -681,6 +686,24 @@ func TestASRSegmentProvenanceAndRates(t *testing.T) {
 		tr, err := transcript.ReadNormalized(filepath.Join(work, transcript.JSONDir), chapter)
 		if err != nil || tr.Model != model {
 			t.Fatalf("chapter %d model %q: %v", chapter, tr.Model, err)
+		}
+	}
+}
+
+func TestDecodedModel(t *testing.T) {
+	worker := asr.Decode{Model: "worker-model"}
+	for _, c := range []struct {
+		name string
+		p    asrProvenance
+		want string
+	}{
+		{"no segments: the configured model", asrProvenance{Model: "ggml"}, "ggml"},
+		{"every segment on the worker", asrProvenance{Model: "ggml", Segments: map[int]asr.Decode{1: worker, 2: worker}}, "worker-model"},
+		{"mixed routes", asrProvenance{Model: "ggml", Segments: map[int]asr.Decode{1: worker, 2: {Model: "ggml"}}}, "mixed"},
+		{"detected chapters keep the windows", asrProvenance{Model: "ggml", Windows: map[int]asr.Decode{1: worker}}, "worker-model"},
+	} {
+		if got := c.p.decodedModel(); got != c.want {
+			t.Errorf("%s: %q, want %q", c.name, got, c.want)
 		}
 	}
 }

@@ -1221,7 +1221,8 @@ internal/
             on energies from an ffmpeg f32le pipe per chapter FLAC (only the energies
             kept), and writes readalong/map.json, words.json and align_report.json
             (coverage, first-pass coverage, heal windows and seconds, snap stats, ebook
-            sha256, resplit). The map's generator.asr is path.Base of asr.json's model.
+            sha256, resplit). The map's generator.asr is path.Base of the model the
+            segments in asr.json share ("mixed" when they differ, else its model).
             qa_sweep for goal readalong (readalongSweep): a dirty report writes
             qa.MechanicalPlan and goes to retranscribing once per run, using
             CountStageSuccesses. A continue from sanitizing retires that success,
@@ -5161,7 +5162,8 @@ internal/
             Detect report the route available now. Each completed segment records its
             actual backend, device, model, route and decode time in asr.json. Detected
             chapters retain the original window numbers under windows. Old raws use
-            the saved stage defaults. The scheduler learns local and remote rates
+            the saved stage defaults. The top-level backend, model and language stay
+            the configured ones KeptTranscription compares, whoever decoded. The scheduler learns local and remote rates
             separately and the heartbeat reads the current route on each beat.
   worker/   Phase 1b, `audiosilo-bridge worker`: client (token + protocol header on
             every call; the FLAC checked by size and sha256), Run (Select +

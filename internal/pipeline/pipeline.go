@@ -582,6 +582,11 @@ const asrInfoName = "asr.json"
 // asrProvenance is the persisted backend/model/language the asr stage used, plus
 // the manifest fingerprint that gates a resume against a changed edition and the
 // chapters an ASR run accepted as legitimately empty.
+//
+// Backend, Model and Language are the run's configured settings, the ones
+// KeptTranscription compares with a new run's: a worker's decode never changes
+// them, or a book a worker helped with would never be reused. What decoded each
+// segment is in Segments (Windows once chapter detection has renumbered them).
 type asrProvenance struct {
 	Backend       string             `json:"backend"`
 	Model         string             `json:"model"`
@@ -935,21 +940,6 @@ func (e *Executor) asrStage(ctx context.Context, book store.Book, r scheduler.St
 		done++
 		if r.Progress != nil {
 			r.Progress(done, total)
-		}
-	}
-	if len(prov.Segments) == total {
-		summary := prov.Segments[manifest.Chapters[0].Chapter]
-		for _, seg := range prov.Segments {
-			if summary.Backend != seg.Backend {
-				summary.Backend = "mixed"
-			}
-			if summary.Model != seg.Model {
-				summary.Model = "mixed"
-			}
-		}
-		prov.Backend, prov.Model = summary.Backend, summary.Model
-		if err := writeASRProvenance(book.WorkDir, prov); err != nil {
-			return scheduler.StageResult{}, err
 		}
 	}
 	e.accountScratch(ctx, book)
@@ -1314,6 +1304,29 @@ func writeASRProvenance(workDir string, p asrProvenance) error {
 		return err
 	}
 	return fsutil.WriteFileAtomic(filepath.Join(workDir, asrInfoName), append(out, '\n'), 0o644)
+}
+
+// decodedModel names the model that decoded the transcripts: the one every
+// recorded segment shares, "mixed" when they differ, else the configured model.
+func (p asrProvenance) decodedModel() string {
+	segs := p.Segments
+	if len(segs) == 0 {
+		segs = p.Windows
+	}
+	model := ""
+	for _, seg := range segs {
+		switch {
+		case seg.Model == "" || seg.Model == model:
+		case model == "":
+			model = seg.Model
+		default:
+			return "mixed"
+		}
+	}
+	if model == "" {
+		return p.Model
+	}
+	return model
 }
 
 // readASRProvenance loads the asr.json provenance, returning a zero value (blank

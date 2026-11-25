@@ -304,7 +304,7 @@ func (e *Executor) readalongAlign(ctx context.Context, book store.Book, r schedu
 		return scheduler.StageResult{}, fmt.Errorf("readalong_aligning: onset snap: %w", err)
 	}
 
-	asrName := readASRProvenance(book.WorkDir).Model
+	asrName := readASRProvenance(book.WorkDir).decodedModel()
 	m, err := readalong.Build(res, text, tl, req.Ebook, readalong.Generator{
 		Version: req.Version, ASR: path.Base(filepath.ToSlash(asrName)), Now: time.Now(),
 	})
