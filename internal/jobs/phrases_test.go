@@ -33,6 +33,7 @@ func TestPhrasesComplete(t *testing.T) {
 		}
 		if lit == nil {
 			t.Fatalf("%s isn't a string constant", vs.Names[0].Name)
+			return false
 		}
 		code, _ := strconv.Unquote(lit.Value)
 		if codes[code] {
