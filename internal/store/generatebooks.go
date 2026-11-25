@@ -470,17 +470,16 @@ func (db *DB) SumBudgetCostSince(ctx context.Context, since time.Time) (float64,
 type FinishedBook struct {
 	Kind        string
 	DurationSec float64
-	Chapters    int
 	CostUSD     float64
 }
 
-// FinishedBooks returns every done book's kind, duration, chapter count and
+// FinishedBooks returns every done book's kind, duration and
 // agent spend (superseded runs included), oldest first. A chapters-only book
 // (goal chapters) is left out: it is done without characters or recaps, so its
 // zero spend would drag the per-hour estimate down.
 func (db *DB) FinishedBooks(ctx context.Context) ([]FinishedBook, error) {
 	rows, err := db.sql.QueryContext(ctx,
-		`SELECT b.kind, b.duration_sec, b.chapters, COALESCE((SELECT SUM(`+budgetCostSQL+`)
+		`SELECT b.kind, b.duration_sec, COALESCE((SELECT SUM(`+budgetCostSQL+`)
 		     FROM stage_runs WHERE stage_runs.book_id = b.id), 0)
 		   FROM books b WHERE b.state = 'done' AND b.goal = '' ORDER BY b.id`)
 	if err != nil {
@@ -490,7 +489,7 @@ func (db *DB) FinishedBooks(ctx context.Context) ([]FinishedBook, error) {
 	var out []FinishedBook
 	for rows.Next() {
 		var f FinishedBook
-		if err := rows.Scan(&f.Kind, &f.DurationSec, &f.Chapters, &f.CostUSD); err != nil {
+		if err := rows.Scan(&f.Kind, &f.DurationSec, &f.CostUSD); err != nil {
 			return nil, err
 		}
 		out = append(out, f)

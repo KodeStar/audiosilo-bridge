@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/contrib"
+	"github.com/kodestar/audiosilo-bridge/internal/eta"
 	"github.com/kodestar/audiosilo-bridge/internal/events"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/pipeline"
@@ -636,12 +637,12 @@ func present(workDir string) bool {
 func TestEstimateFrom(t *testing.T) {
 	t.Parallel()
 	e := estimateFrom(nil)
-	if e.ASRSecondsPerAudioHour != SeedASRSecondsPerAudioHour || e.AgentUSDPerAudioHour != nil || e.AgentUSDPerEbook != nil || e.Samples != 0 {
+	if e.ASRSecondsPerAudioHour != eta.SeedASRSecondsPerAudioHour || e.AgentUSDPerAudioHour != nil || e.AgentUSDPerEbook != nil || e.Samples != 0 {
 		t.Fatalf("no history = %+v", e)
 	}
 	books := []store.FinishedBook{
-		{Kind: "audio", DurationSec: 3 * 3600, Chapters: 30, CostUSD: 9},
-		{Kind: "audio", DurationSec: 1 * 3600, Chapters: 10, CostUSD: 3},
+		{Kind: "audio", DurationSec: 3 * 3600, CostUSD: 9},
+		{Kind: "audio", DurationSec: 1 * 3600, CostUSD: 3},
 		{Kind: "audio", DurationSec: 0, CostUSD: 50}, // never inspected: no hours to divide by
 		{Kind: "ebook", CostUSD: 4},
 		{Kind: "ebook", CostUSD: 6},
@@ -662,7 +663,7 @@ func TestEstimates(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	e, err := Estimates(context.Background(), db, AgentState{Backend: "claude", Ready: true, Subscription: true}, 100, time.Now())
 	if err != nil || e.AgentBackend != "claude" || !e.AgentReady || !e.Subscription || e.MonthlyBudgetUSD != 100 ||
-		e.MonthSpentUSD != 0 || e.ASRSecondsPerAudioHour != SeedASRSecondsPerAudioHour {
+		e.MonthSpentUSD != 0 || e.ASRSecondsPerAudioHour != eta.SeedASRSecondsPerAudioHour {
 		t.Fatalf("estimates = %+v, %v", e, err)
 	}
 }

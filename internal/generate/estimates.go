@@ -11,10 +11,6 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
 
-// SeedASRSecondsPerAudioHour is the ASR estimate before this Bridge has learned
-// its own rate: a quarter of the audio's length, a CPU whisper.cpp ballpark.
-const SeedASRSecondsPerAudioHour = eta.SeedASRSecondsPerAudioHour
-
 // AgentState is what the estimates say about the agent container.
 type AgentState struct {
 	Backend      string
@@ -46,7 +42,7 @@ func Estimates(ctx context.Context, db *store.DB, agent AgentState, monthlyBudge
 // audio books (a long book weighs more), per ebook it averages the ebooks; nil
 // until a finished book of that kind gives one.
 func estimateFrom(books []store.FinishedBook) *link.SidecarEstimates {
-	e := &link.SidecarEstimates{ASRSecondsPerAudioHour: SeedASRSecondsPerAudioHour}
+	e := &link.SidecarEstimates{ASRSecondsPerAudioHour: eta.SeedASRSecondsPerAudioHour}
 	var (
 		audioHours, audioCost float64
 		ebooks, audioBooks    int
