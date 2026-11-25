@@ -341,9 +341,13 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		// edition: its ASIN would stay on that book for good. A pack matched
 		// to a folder that holds no range may be one volume: not the pack's.
 		// Nor does a book the library holds twice (a twin): the title's words
-		// can't tell the copies apart.
-		if claimed[c.Path] == 1 && b.ASIN == "" && titles[i].State != link.AudiblePreorder && !importjob.SpanMismatch(rec, b) &&
-			!twins[b.Path] {
+		// can't tell the copies apart. Nor does a book holding another
+		// volume (importjob.OtherVolume: its series number, or the number its
+		// title gives, is not the title's): the opening volume's bare title
+		// matches a numbered sequel's folder ("Road to Craft" on "Road to
+		// Craft 3") and, the sequel not owned, would be its only claim.
+		if claimed[c.Path] == 1 && b.ASIN == "" && titles[i].State != link.AudiblePreorder && !importjob.OtherVolume(rec, b) &&
+			!importjob.SpanMismatch(rec, b) && !twins[b.Path] {
 			hits = append(hits, hit{path: b.Path, asin: rec.ASIN})
 		}
 	}

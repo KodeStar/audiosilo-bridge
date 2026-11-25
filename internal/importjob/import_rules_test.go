@@ -280,16 +280,39 @@ func TestFolderCodeIsServerVectors(t *testing.T) {
 		{"FWM01 - He Who Fights With Monsters - Book 1", "He Who Fights With Monsters", 1, 0},
 		{"DF15.5 Brief Cases", "Dresden Files", 15.5, 0},
 		{"PH15 - 15", "Primal Hunter", 15, 0},
+		// A range (an omnibus) keeps its end.
 		{"LAM05-06", "Legend of the Arch Magus", 5, 6},
-		{"LAM05\u201306 - Omnibus", "Legend of the Arch Magus", 5, 6},
+		{"LAM05–06 - Omnibus", "Legend of the Arch Magus", 5, 6},
 		{"DF15.5-16", "Dresden Files", 15.5, 16},
 		{"LAM06-05", "Legend of the Arch Magus", 0, 0},
 		{"LAM05-05", "Legend of the Arch Magus", 0, 0},
-		{"LAM05-06x", "Legend of the Arch Magus", 0, 0},
+		{"LAM05-06x", "Legend of the Arch Magus", 5, 0},
 		{"LAM05-0612", "Legend of the Arch Magus", 0, 0},
 		{"LAM05-06-07", "Legend of the Arch Magus", 0, 0},
 		{"LAM05-06 - 07 Omnibus", "Legend of the Arch Magus", 5, 6},
+		// The code written twice on a range is an omnibus, not its first volume.
+		{"DH01-DH03", "Dragon Heart", 0, 0},
+		{"DH01 – dh03 Omnibus", "Dragon Heart", 0, 0},
+		{"C1-C3 Box Set", "Dragon Heart", 0, 0},
+		{"DH06 - DH Side Story", "Dragon Heart", 6, 0},
+		// A pack word: a single position is none, a range still reads.
+		{"LAM05-06a - Omnibus", "Legend of the Arch Magus", 0, 0},
+		{"DH01 - Books 1-3", "Dragon Heart", 0, 0},
+		{"DH01 – books 1 – 3", "Dragon Heart", 0, 0},
+		{"DH06 Boxed Set", "Dragon Heart", 0, 0},
+		{"DH06 - Boxset", "Dragon Heart", 0, 0},
+		{"DH06 - The Complete Collection", "Dragon Heart", 0, 0},
+		{"C02 - Box Set", "Dragon Heart", 0, 0},
+		{"DH06 - Book 6", "Dragon Heart", 6, 0},
+		{"DH06 - Collectors", "Dragon Heart", 6, 0},
 		{"DH06 - 07 Land", "Dragon Heart", 6, 0},
+		{"DH06-2019 - Land", "Dragon Heart", 6, 0},
+		{"DH06–07x", "Dragon Heart", 6, 0},
+		{"DH06-07xyz", "Dragon Heart", 0, 0},
+		{"DH06-2019-07", "Dragon Heart", 0, 0},
+		{"c02 Soulsmith", "Dragon Heart", 2, 0},
+		{"C02-03", "Dragon Heart", 2, 3},
+		{"C02", "", 0, 0},
 		{"DH06-Land", "Dragon Heart", 6, 0},
 		{"HALO 07-08", "Halo", 0, 0},
 		{"EE07 - Forged in Blood Part 2", "Emperor's Edge", 7, 0},
@@ -297,10 +320,12 @@ func TestFolderCodeIsServerVectors(t *testing.T) {
 		{"WT01", "World-Tree", 1, 0},
 		{"C04 - Skysworn", "Cradle", 4, 0},
 		{"dh06 - land of magic.m4b", "Dragon Heart", 6, 0},
+		// A franchise's own numbering: the code isn't the series' initials.
 		{"HALO 07 - Evolutions (M4B)", "Halo", 0, 0},
 		{"MB01 - The Final Empire", "Mistborn", 0, 0},
 		{"AF05 - Legion's Fifth Vault", "Divine Apostasy", 0, 0},
 		{"CD1", "02 - How to Be a Pirate", 0, 0},
+		// No code, or not one.
 		{"01. The Enchanted Wood", "The Faraway Tree", 0, 0},
 		{"Brief Cases", "Dresden Files", 0, 0},
 		{"DH06x - Land", "Dragon Heart", 0, 0},
@@ -508,13 +533,22 @@ func TestTwins(t *testing.T) {
 	}
 }
 
-// SpanMismatch: a pack (a range position) matched to a book with no range is a
-// mismatch; a pack on a range book, or a single volume anywhere, is not.
+// SpanMismatch checks both directions before ASIN enrichment, and that two
+// packs span the same volumes.
 func TestSpanMismatch(t *testing.T) {
 	pack := audibleRec("B0SYN00081", "Iron Vale: Books 5-6", "Ona Fell", "Iron Vale", "5-6")
+	longer := audibleRec("B0SYN00085", "Iron Vale: Books 5-8", "Ona Fell", "Iron Vale", "5-8")
 	vol5 := audibleRec("B0SYN00082", "Iron Vale 5", "Ona Fell", "Iron Vale", "5")
 	single := link.LibraryBook{Path: "Fell/Iron Vale/IV05 - Ash Road", Series: series("Iron Vale", "5")}
 	ranged := link.LibraryBook{Path: "Fell/Iron Vale/IV05-06", Series: series("Iron Vale", "5-6")}
+	opening := link.LibraryBook{Path: "Fell/Iron Vale/IV01-03", Series: series("Iron Vale", "1-3")}
+	box := audibleRec("B0SYN00083", "Iron Vale Box Set", "Ona Fell", "Iron Vale", "")
+	boundedBox := audibleRec("B0SYN00086", "Iron Vale Box Set: Books 5-6", "Ona Fell", "Iron Vale", "")
+	numberedBox := audibleRec("B0SYN00084", box.Title, box.Author, box.Series, "1")
+	labeled := link.LibraryBook{Path: "Fell/Iron Vale/Iron Vale Box Set (Books 4-6)", Title: "Iron Vale Box Set", Series: series("Iron Vale", "")}
+	labeledFirst := link.LibraryBook{Path: "Fell/Iron Vale/Iron Vale Box Set (Books 1-3)", Title: "Iron Vale Box Set", Series: series("Iron Vale", "")}
+	unbounded := link.LibraryBook{Path: "Fell/Iron Vale/Iron Vale Box Set", Title: "Iron Vale Box Set", Series: series("Iron Vale", "")}
+	firstBox := audibleRec("B0SYN00087", "Iron Vale Box Set: Books 1-3", "Ona Fell", "Iron Vale", "")
 	for _, tc := range []struct {
 		rec  source.Record
 		b    link.LibraryBook
@@ -523,11 +557,147 @@ func TestSpanMismatch(t *testing.T) {
 		{pack, single, true},
 		{pack, link.LibraryBook{Path: "Fell/Iron Vale"}, true},
 		{pack, ranged, false},
+		{longer, ranged, true}, // starts where the folder does, ends elsewhere
 		{vol5, single, false},
-		{vol5, ranged, false},
+		{vol5, ranged, true},
+		{box, opening, false},
+		{box, ranged, true}, // no bounds: a later pack's folder may be another box set
+		{boundedBox, ranged, false},
+		{boundedBox, opening, true},
+		{box, single, true},
+		{numberedBox, ranged, true},
+		{box, labeledFirst, false},
+		{box, labeled, true}, // the folder names a later pack
+		{boundedBox, labeled, true},
+		{vol5, labeled, true},
+		// A labeled pack stating no bounds is taken for the opening one, as a
+		// title stating none is: a title naming later bounds keeps off it.
+		{box, unbounded, false},
+		{firstBox, unbounded, false},
+		{boundedBox, unbounded, true},
 	} {
 		if got := SpanMismatch(tc.rec, tc.b); got != tc.want {
 			t.Errorf("SpanMismatch(%q #%s, %q) = %v, want %v", tc.rec.Title, tc.rec.SeriesPosition, tc.b.Path, got, tc.want)
+		}
+	}
+}
+
+func TestPositionlessPack(t *testing.T) {
+	const name = "Iron Vale"
+	book := func(path, title, pos string) link.LibraryBook {
+		return link.LibraryBook{Path: path, Title: title, Authors: []string{"Ona Fell"}, Series: series(name, pos)}
+	}
+	one := book("one", "Iron Vale", "1")
+	alias := book("franchise", name, "1")
+	alias.Series = append(alias.Series, link.SeriesRef{Name: "Iron Vale Worlds", Position: "1"})
+	first := book("first pack", "Iron Vale Box Set", "1-3")
+	later := book("later pack", "Iron Vale Box Set", "4-6")
+	for _, tc := range []struct {
+		name, title, pos string
+		books            []link.LibraryBook
+		want             string
+	}{
+		{"box set against range", "Iron Vale Box Set", "", []link.LibraryBook{one, first}, first.Path},
+		{"folder names the pack, track title is uninformative", "Iron Vale Omnibus, Books 1-3", "", []link.LibraryBook{book("Book 1 - Omnibus, Books 1-3", "End Credits", "1")}, "Book 1 - Omnibus, Books 1-3"},
+		{"numbered pack with its own folder label", "Iron Vale: Origin Box Set (5-8)", "2", []link.LibraryBook{book("Book 2 - Iron Vale Origin Box Set (5-8)", "End Credits", "2")}, "Book 2 - Iron Vale Origin Box Set (5-8)"},
+		{"range folder named for series", "Iron Vale Box Set", "", []link.LibraryBook{book("pack", name, "1-3")}, "pack"},
+		{"single against range", "Iron Vale", "1", []link.LibraryBook{first}, ""},
+		{"single without position against range", "Iron Vale", "", []link.LibraryBook{first}, ""},
+		{"pack against single", "Iron Vale Box Set", "", []link.LibraryBook{one}, ""},
+		{"range against opening volume under a second series", "Iron Vale: Books 1-3", "1-3", []link.LibraryBook{alias}, ""},
+		{"range against range", "Iron Vale: Books 1-3", "1-3", []link.LibraryBook{one, later, first}, first.Path},
+		{"other bounds in title", "Iron Vale: Books 4-6", "", []link.LibraryBook{first, later}, later.Path},
+		{"range cannot fall back to another labeled pack", "Iron Vale Box Set: Books 1-3", "1-3", []link.LibraryBook{book("other", "Iron Vale Box Set: Books 4-6", "1")}, ""},
+		{"same start, other end", "Iron Vale: Books 1-5", "", []link.LibraryBook{first}, ""},
+		// A labeled pack's bounds count from its folder too, its title stating none.
+		{"bounds in the folder only", "Iron Vale Box Set: Books 1-3", "", []link.LibraryBook{book("Iron Vale Box Set (Books 4-6)", "Iron Vale Box Set", "")}, ""},
+		{"range against folder bounds", "Iron Vale: Books 1-3", "1-3", []link.LibraryBook{book("Iron Vale Box Set (Books 4-6)", "Iron Vale Box Set", ""),
+			book("Iron Vale Box Set (Books 1-3)", "Iron Vale Box Set", "")}, "Iron Vale Box Set (Books 1-3)"},
+		// Two copies of one pack (Twins) are no tie: the first is the match, and
+		// Twins keeps the ASIN off both.
+		{"copies of one pack", "Iron Vale Box Set", "", []link.LibraryBook{book("copy one/Iron Vale Box Set", "Iron Vale Box Set", ""),
+			book("copy two/Iron Vale Box Set", "Iron Vale Box Set", "")}, "copy one/Iron Vale Box Set"},
+		{"equally good packs", "Iron Vale Box Set", "", []link.LibraryBook{later, first}, ""},
+		{"stated single position", "Iron Vale Box Set", "1", []link.LibraryBook{first}, ""},
+		{"other series by same author", "Iron Vale Box Set", "", []link.LibraryBook{{Path: "other", Title: "North Wind Box Set", Authors: one.Authors, Series: series("North Wind", "1-3")}}, ""},
+		// One pack listed under two spellings of its series scores alike under
+		// each: that is one book, not a tie between two.
+		{"pack under two spellings of its series", "Iron Vale Box Set", "", []link.LibraryBook{{Path: "both", Title: name, Authors: one.Authors,
+			Series: []link.SeriesRef{{Name: name, Position: "1-3"}, {Name: "The Iron Vale Series", Position: "1-3"}}}}, "both"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := audibleRec("B0SYN00081", tc.title, "Ona Fell", name, tc.pos)
+			got, ok := MatchInBooks(tc.books, rec)
+			if got.Path != tc.want || ok != (tc.want != "") {
+				t.Fatalf("matched %q (%v), want %q", got.Path, ok, tc.want)
+			}
+		})
+	}
+}
+
+// A store can leave a collection label off a title ("Four" for "Four: A
+// Divergent Collection"): a single volume claims a book labeled as a pack only
+// when nothing scores better, never when it is the series-named opening
+// volume, and never takes its ASIN (SpanMismatch).
+func TestLabeledPackOverride(t *testing.T) {
+	four := link.LibraryBook{Path: "Roth/Divergent/Four", Title: "Four: A Divergent Collection", Authors: []string{"Vera Roth"}, Series: series("Divergent", "")}
+	box := link.LibraryBook{Path: "Roth/Divergent/Divergent Box Set", Title: "Divergent Box Set", Authors: four.Authors, Series: series("Divergent", "")}
+	opener := link.LibraryBook{Path: "Roth/Divergent/Divergent", Title: "Divergent", Authors: four.Authors, Series: series("Divergent", "1")}
+	for _, tc := range []struct {
+		name, title, pos string
+		books            []link.LibraryBook
+		want             string
+	}{
+		{"label left off the title", "Four", "", []link.LibraryBook{four}, four.Path},
+		{"series-named opener", "Divergent", "1", []link.LibraryBook{box}, ""},
+		{"opener beside its own volume", "Divergent", "1", []link.LibraryBook{box, opener}, opener.Path},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := audibleRec("B0SYN00091", tc.title, "Vera Roth", "Divergent", tc.pos)
+			got, ok := MatchInBooks(tc.books, rec)
+			if got.Path != tc.want || ok != (tc.want != "") {
+				t.Fatalf("matched %q (%v), want %q", got.Path, ok, tc.want)
+			}
+			if ok && got.Path == four.Path && !SpanMismatch(rec, got) {
+				t.Fatalf("a single volume on a labeled pack may take its ASIN")
+			}
+		})
+	}
+}
+
+// OtherVolume keeps a title's ASIN off a book holding another volume: by
+// series number, or by the number a book's title gives after rec's series name
+// when the numbers can't be compared (no position, the series spelled
+// otherwise). The same title under two numberings is the same book.
+func TestOtherVolume(t *testing.T) {
+	au := []string{"Ona Fell"}
+	vol := func(title, name, pos string) link.LibraryBook {
+		return link.LibraryBook{Path: "Fell/IV/" + title, Title: title, Authors: au, Series: series(name, pos)}
+	}
+	for _, tc := range []struct {
+		title, pos string
+		b          link.LibraryBook
+		want       bool
+	}{
+		{"Iron Vale", "1", vol("Iron Vale 3", "Iron Vale", "3"), true},
+		{"Iron Vale", "", vol("Iron Vale 3", "Iron Vale", "3"), true},
+		{"Iron Vale", "1", vol("Iron Vale 3", "Iron Vale Saga", "3"), true},
+		{"Iron Vale", "", vol("Iron Vale 3", "Iron Vale Saga", "3"), true},
+		{"Iron Vale", "1", vol("Iron Vale", "Iron Vale", "3"), true},
+		{"Iron Vale", "", vol("Iron Vale 1", "Iron Vale Saga", "1"), false},
+		{"Iron Vale", "1", vol("Iron Vale", "Iron Vale", "1"), false},
+		{"Iron Vale 3", "3", vol("Iron Vale 3", "Iron Vale Saga", "3"), false},
+		{"Ash Road", "2", vol("Iron Vale 3", "Iron Vale Saga", ""), true},
+		{"Ash Road", "", vol("Iron Vale 3", "Iron Vale Saga", ""), false},
+		// One book numbered two ways keeps its ASIN; two titles do not.
+		{"New Spring", "0", vol("New Spring", "Iron Vale", "0.5"), false},
+		{"Iron Vale: New Spring", "0", vol("New Spring", "Iron Vale", "0.5"), false},
+		{"Ash Road", "2", vol("Ember", "Iron Vale", "3"), true},
+		{"1984", "1", vol("1984", "Iron Vale", "1"), false},
+	} {
+		r := audibleRec("B0SYN00090", tc.title, "Ona Fell", "Iron Vale", tc.pos)
+		if got := OtherVolume(r, tc.b); got != tc.want {
+			t.Errorf("OtherVolume(%q #%s, %q %v) = %v, want %v", tc.title, tc.pos, tc.b.Title, tc.b.Series, got, tc.want)
 		}
 	}
 }

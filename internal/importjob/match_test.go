@@ -165,7 +165,7 @@ func TestBookMatcherSameAsBest(t *testing.T) {
 			q.Narrators = []string{rec.Narrator}
 		}
 		wantI, wantScore, wantOK := match.BestWith(m.cands, q, match.ImportOptions())
-		gotI, gotScore, gotOK := m.best(q, false)
+		gotI, gotScore, gotOK := m.best(q, rec.SeriesPosition)
 		if gotI != wantI || gotOK != wantOK || gotScore != wantScore {
 			t.Errorf("%q by %q: best = %d %.2f %v, match.BestWith = %d %.2f %v", rec.Title, rec.Author, gotI, gotScore, gotOK, wantI, wantScore, wantOK)
 		}
@@ -203,6 +203,48 @@ func TestBookMatcherReusesPartitions(t *testing.T) {
 			if got.Path != tc.want || ok != (tc.want != "") || fresh.Path != got.Path || freshOK != ok || freshScore != score {
 				t.Errorf("pass %d, %q: got %q %.2f %v, want %q, fresh %q %.2f %v", pass, tc.rec.Title,
 					got.Path, score, ok, tc.want, fresh.Path, freshScore, freshOK)
+			}
+		}
+	}
+}
+
+func TestPackAndSeriesNamedVolumeOne(t *testing.T) {
+	for _, tc := range []struct {
+		title    string
+		position string
+		match    bool
+	}{
+		{"The Expanse Box Set", "", false},
+		{"The Expanse: The Complete Collection", "", false},
+		{"The Expanse: Books 1-3", "1-3", false},
+		{"The Expanse 1-3", "", false},
+		{"The Expanse (1–3)", "", false},
+		{"The Expanse", "", true},
+		{"The Expanse (Unabridged)", "", true},
+	} {
+		for _, otherSeries := range []string{"Expanse", "Expanse Saga"} {
+			opener := audibleRec("", "The Expanse", "J. Corey", "Expanse", "1")
+			other := audibleRec("", tc.title, "J. Corey", otherSeries, tc.position)
+			for _, pair := range [][2]source.Record{{opener, other}, {other, opener}} {
+				rec, b := pair[0], pair[1]
+				book := link.LibraryBook{Path: "book", Authors: b.Authors, Title: b.Title, Series: series(b.Series, b.SeriesPosition)}
+				if _, ok := MatchInBooks([]link.LibraryBook{book}, rec); ok != tc.match {
+					t.Errorf("record %q (#%s in %q), book %q (#%s in %q): matched %v, want %v", rec.Title, rec.SeriesPosition, rec.Series, b.Title, b.SeriesPosition, b.Series, ok, tc.match)
+				}
+			}
+		}
+	}
+}
+
+// A numbered sequel cannot claim the opening book. The reverse claim's role
+// in deciding whether to write an ASIN is covered by TestMatcherContestedVolumes.
+func TestNumberedSequelAgainstOpeningVolume(t *testing.T) {
+	books := []link.LibraryBook{{Path: "one", Title: "The Expanse", Authors: []string{"J. Corey"}, Series: series("Expanse", "1")}}
+	for _, name := range []string{"Expanse", "Expanse Saga"} {
+		for _, pos := range []string{"", "2"} {
+			rec := audibleRec("", "The Expanse 2", "J. Corey", name, pos)
+			if b, ok := MatchInBooks(books, rec); ok {
+				t.Errorf("%q #%s in %q claimed %q", rec.Title, pos, name, b.Path)
 			}
 		}
 	}
