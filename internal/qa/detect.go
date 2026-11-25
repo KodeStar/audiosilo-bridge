@@ -421,11 +421,11 @@ func normalizeASCII(s string) string {
 	return strings.Join(strings.Fields(b.String()), " ")
 }
 
-// LoopWords is how many of text's words lie inside a 6-gram loop: covered by an
+// loopWords is how many of text's words lie inside a 6-gram loop: covered by an
 // occurrence of any 6-gram (over its Unicode-normalized words) repeated at least 5
 // times, cross_segment_scan.py's "not natural prose" threshold. A read-along's
 // adoption rule weighs it (repair.AdoptFreshReadalong): a loop's words are noise.
-func LoopWords(text string) int {
+func loopWords(text string) int {
 	toks := strings.Fields(normalizeUnicode(text))
 	n := 0
 	for _, hit := range loopCoverage(toks) {
@@ -493,7 +493,7 @@ func ReadalongNoise(t transcript.Transcript) int {
 	repeatedSegments(t.Segments, func(first transcript.Segment, count int) {
 		duplicateWords += (count - 1) * len(strings.Fields(first.Text))
 	})
-	noise := max(duplicateWords, LoopWords(text))
+	noise := max(duplicateWords, loopWords(text))
 	if len(tailRateOutliers([]chapterDoc{{t: t}})) > 0 {
 		noise = max(noise, tailWords)
 	}

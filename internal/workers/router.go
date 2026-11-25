@@ -15,9 +15,6 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 )
 
-// IDWorker is the Router's backend id while it sends segments to a worker.
-const IDWorker = asr.IDWorker
-
 // The park messages of a book waiting for a worker: the fallback is wait, or
 // the Bridge has no speech recognition of its own to fall back on.
 const (
@@ -63,7 +60,7 @@ func (r *Router) ID() string {
 	if r.local() {
 		return r.Local.ID()
 	}
-	return IDWorker
+	return asr.IDWorker
 }
 
 // Detect reports what a segment would run on now: the local backend, or a
@@ -74,11 +71,11 @@ func (r *Router) Detect(ctx context.Context) (asr.Capability, error) {
 	case r.local():
 		return r.LocalCap, nil
 	case r.Hub.Connected():
-		return asr.Capability{Backend: IDWorker, Available: true, Device: "remote"}, nil
+		return asr.Capability{Backend: asr.IDWorker, Available: true, Device: "remote"}, nil
 	case r.Wait():
-		return asr.Capability{Backend: IDWorker, Available: true, Device: "remote", Detail: "no worker connected; segments wait for one"}, nil
+		return asr.Capability{Backend: asr.IDWorker, Available: true, Device: "remote", Detail: "no worker connected; segments wait for one"}, nil
 	}
-	return asr.Capability{Backend: IDWorker, Available: true, Device: "remote", Detail: noLocalMsg + "; segments wait for a worker"}, nil
+	return asr.Capability{Backend: asr.IDWorker, Available: true, Device: "remote", Detail: noLocalMsg + "; segments wait for a worker"}, nil
 }
 
 // EnsureReady prepares the local backend when segments would run on it now

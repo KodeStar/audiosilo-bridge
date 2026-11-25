@@ -735,9 +735,9 @@ func TestRunLoudErrors(t *testing.T) {
 	})
 }
 
-// LoopWords counts the words a 6-gram repeated 5 or more times covers: a run of
+// loopWords counts the words a 6-gram repeated 5 or more times covers: a run of
 // one word, a looped phrase, none in prose, and a phrase said four times only.
-func TestLoopWords(t *testing.T) {
+func TestLoopWordsCount(t *testing.T) {
 	prose := "Buck did not read the newspapers, or he would have known that trouble was brewing."
 	for _, c := range []struct {
 		name string
@@ -750,7 +750,7 @@ func TestLoopWords(t *testing.T) {
 		{"a phrase said four times", prose + strings.Repeat(" and the dogs ran on", 4), 0},
 		{"empty", "", 0},
 	} {
-		if got := LoopWords(c.text); got != c.want {
+		if got := loopWords(c.text); got != c.want {
 			t.Errorf("%s: %d, want %d", c.name, got, c.want)
 		}
 	}

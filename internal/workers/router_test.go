@@ -102,7 +102,7 @@ func TestRouterFallback(t *testing.T) {
 	if err := r.Transcribe(context.Background(), job(t)); parkCode(err) != state.ParkASRWorkerWaiting {
 		t.Fatalf("wait = %v", err)
 	}
-	if c, _ := r.Detect(context.Background()); !c.Available || c.Backend != IDWorker {
+	if c, _ := r.Detect(context.Background()); !c.Available || c.Backend != asr.IDWorker {
 		t.Fatalf("detect, wait = %+v", c)
 	}
 	if local.runs.Load() != 1 {
@@ -114,7 +114,7 @@ func TestRouterFallback(t *testing.T) {
 	if err := none.Transcribe(context.Background(), job(t)); parkCode(err) != state.ParkASRWorkerWaiting {
 		t.Fatalf("no local = %v", err)
 	}
-	if c, _ := none.Detect(context.Background()); !c.Available || c.Backend != IDWorker || none.CanRun() {
+	if c, _ := none.Detect(context.Background()); !c.Available || c.Backend != asr.IDWorker || none.CanRun() {
 		t.Fatalf("detect, no local = %+v", c)
 	}
 }
@@ -135,7 +135,7 @@ func TestRouterRemote(t *testing.T) {
 			_ = h.Result(ctx, id, task.ID, workerproto.ResultMeta{Attempt: task.Attempt, Backend: "mlx-whisper", Model: "worker-model", Device: "metal", DecodeSeconds: 8}, []byte(okRaw))
 		}
 	}()
-	if r.ID() != IDWorker {
+	if r.ID() != asr.IDWorker {
 		t.Fatalf("id = %s", r.ID())
 	}
 	j := job(t)
