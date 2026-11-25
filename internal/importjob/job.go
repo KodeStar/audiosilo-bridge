@@ -304,7 +304,7 @@ func NewBookMatcher(books []link.LibraryBook) *BookMatcher {
 				single = append(single, j)
 				return
 			}
-			m.packs = append(m.packs, newPackCandidate(j, c, label, spans))
+			m.packs = append(m.packs, newPackCandidate(j, c, b, label, spans))
 			if len(spans) == 0 {
 				labeled = append(labeled, j)
 			}
@@ -668,7 +668,9 @@ func Twins(books []link.LibraryBook) map[string]bool {
 // range that only starts where it does ("1-6" on "1-3"). A positionless pack
 // keeps it off a range its title's bounds don't name, and, with no bounds in
 // its title, off a range that doesn't open the series: a box set matched by
-// name to the only pack folder the library holds may be another box set.
+// name to the only pack folder the library holds may be another box set. A
+// pack labeled only by its title or folder that states no bounds is taken
+// for the opening one alike, so a title naming later bounds keeps off it.
 func SpanMismatch(rec source.Record, b link.LibraryBook) bool {
 	recSpan, ranged := readRange(rangePosition, rec.SeriesPosition)
 	title := cmp.Or(rec.Title, rec.TitleShort)
@@ -682,14 +684,15 @@ func SpanMismatch(rec source.Record, b link.LibraryBook) bool {
 	if ranged || pack != (bookPackTitle(b) != "") {
 		return true
 	}
-	// A labeled pack's bounds can be in its title or its folder's name.
-	var stated []volumeRange
-	for _, name := range []string{b.Title, path.Base(b.Path)} {
-		if span, ok := readRange(titleRange, name); ok && !slices.Contains(stated, span) {
-			stated = append(stated, span)
-		}
+	if !pack {
+		return false // two single volumes
 	}
-	return pack && len(stated) > 0 && boundsDisagree(title, stated)
+	// A labeled pack's bounds can be in its title or its folder's name.
+	if stated := statedRanges(b); len(stated) > 0 {
+		return boundsDisagree(title, stated)
+	}
+	span, bounded := readRange(titleRange, title)
+	return bounded && span.start > 1
 }
 
 // KeepBest settles books several records claimed. Of the claims on one path:

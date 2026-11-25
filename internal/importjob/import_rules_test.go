@@ -547,6 +547,8 @@ func TestSpanMismatch(t *testing.T) {
 	numberedBox := audibleRec("B0SYN00084", box.Title, box.Author, box.Series, "1")
 	labeled := link.LibraryBook{Path: "Fell/Iron Vale/Iron Vale Box Set (Books 4-6)", Title: "Iron Vale Box Set", Series: series("Iron Vale", "")}
 	labeledFirst := link.LibraryBook{Path: "Fell/Iron Vale/Iron Vale Box Set (Books 1-3)", Title: "Iron Vale Box Set", Series: series("Iron Vale", "")}
+	unbounded := link.LibraryBook{Path: "Fell/Iron Vale/Iron Vale Box Set", Title: "Iron Vale Box Set", Series: series("Iron Vale", "")}
+	firstBox := audibleRec("B0SYN00087", "Iron Vale Box Set: Books 1-3", "Ona Fell", "Iron Vale", "")
 	for _, tc := range []struct {
 		rec  source.Record
 		b    link.LibraryBook
@@ -568,6 +570,11 @@ func TestSpanMismatch(t *testing.T) {
 		{box, labeled, true}, // the folder names a later pack
 		{boundedBox, labeled, true},
 		{vol5, labeled, true},
+		// A labeled pack stating no bounds is taken for the opening one, as a
+		// title stating none is: a title naming later bounds keeps off it.
+		{box, unbounded, false},
+		{firstBox, unbounded, false},
+		{boundedBox, unbounded, true},
 	} {
 		if got := SpanMismatch(tc.rec, tc.b); got != tc.want {
 			t.Errorf("SpanMismatch(%q #%s, %q) = %v, want %v", tc.rec.Title, tc.rec.SeriesPosition, tc.b.Path, got, tc.want)
@@ -602,6 +609,10 @@ func TestPositionlessPack(t *testing.T) {
 		{"other bounds in title", "Iron Vale: Books 4-6", "", []link.LibraryBook{first, later}, later.Path},
 		{"range cannot fall back to another labeled pack", "Iron Vale Box Set: Books 1-3", "1-3", []link.LibraryBook{book("other", "Iron Vale Box Set: Books 4-6", "1")}, ""},
 		{"same start, other end", "Iron Vale: Books 1-5", "", []link.LibraryBook{first}, ""},
+		// A labeled pack's bounds count from its folder too, its title stating none.
+		{"bounds in the folder only", "Iron Vale Box Set: Books 1-3", "", []link.LibraryBook{book("Iron Vale Box Set (Books 4-6)", "Iron Vale Box Set", "")}, ""},
+		{"range against folder bounds", "Iron Vale: Books 1-3", "1-3", []link.LibraryBook{book("Iron Vale Box Set (Books 4-6)", "Iron Vale Box Set", ""),
+			book("Iron Vale Box Set (Books 1-3)", "Iron Vale Box Set", "")}, "Iron Vale Box Set (Books 1-3)"},
 		{"equally good packs", "Iron Vale Box Set", "", []link.LibraryBook{later, first}, ""},
 		{"stated single position", "Iron Vale Box Set", "1", []link.LibraryBook{first}, ""},
 		{"other series by same author", "Iron Vale Box Set", "", []link.LibraryBook{{Path: "other", Title: "North Wind Box Set", Authors: one.Authors, Series: series("North Wind", "1-3")}}, ""},

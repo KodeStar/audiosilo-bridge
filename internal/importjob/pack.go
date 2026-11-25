@@ -66,7 +66,7 @@ func boundsDisagree(title string, spans []volumeRange) bool {
 	return !slices.ContainsFunc(spans, func(s volumeRange) bool { return s.start <= 1 })
 }
 
-// bookRanges is the distinct ranges b's series list it at.
+// bookRanges is the distinct ranges b's series positions list.
 func bookRanges(b link.LibraryBook) []volumeRange {
 	var spans []volumeRange
 	for _, s := range b.Series {
@@ -75,6 +75,19 @@ func bookRanges(b link.LibraryBook) []volumeRange {
 		}
 	}
 	return spans
+}
+
+// statedRanges is the distinct bounds a pack labeled by its title or folder
+// states in either: "Iron Vale Box Set" in "Iron Vale Box Set (Books 4-6)"
+// spans 4-6 whichever of the two is its label.
+func statedRanges(b link.LibraryBook) []volumeRange {
+	var stated []volumeRange
+	for _, name := range []string{b.Title, path.Base(b.Path)} {
+		if span, ok := readRange(titleRange, name); ok && !slices.Contains(stated, span) {
+			stated = append(stated, span)
+		}
+	}
+	return stated
 }
 
 // packName is a pack's own name, so packs match on it: words such as
@@ -96,7 +109,8 @@ func packName(title, series string) string {
 
 // packCandidate is one pack candidate scored by its name: ord is its index in
 // BookMatcher.cands, ranged whether the listing gives it a range (spans then
-// holds those, else the range its label states, if any), index its names.
+// holds those, else the bounds its title or folder states, statedRanges),
+// index its names.
 type packCandidate struct {
 	ord    int
 	ranged bool
@@ -104,14 +118,12 @@ type packCandidate struct {
 	index  *match.Index
 }
 
-// newPackCandidate prepares book as a pack under its title's name and, when
-// it differs, its label's.
-func newPackCandidate(ord int, book match.Book, label string, spans []volumeRange) packCandidate {
+// newPackCandidate prepares b's candidate book as a pack under its title's
+// name and, when it differs, its label's.
+func newPackCandidate(ord int, book match.Book, b link.LibraryBook, label string, spans []volumeRange) packCandidate {
 	ranged := len(spans) > 0
 	if !ranged {
-		if span, ok := readRange(titleRange, label); ok {
-			spans = []volumeRange{span}
-		}
+		spans = statedRanges(b)
 	}
 	book.Title = packName(book.Title, book.Series)
 	names := []match.Book{book}

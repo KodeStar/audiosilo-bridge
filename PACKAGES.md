@@ -3849,8 +3849,9 @@ internal/
             title's "Pack 3" never stands in for it. A listed range such as
             LAM05-06 is eligible for a range starting at 5 or a pack Audible
             identifies by title without a position. The latter needs a unique
-            best pack by name and person. Bounds in its title must agree with
-            the folder's range. A single volume cannot claim a listed range
+            best pack by name and person. Bounds in its title
+            must agree with the folder's range, or with those a labeled pack's
+            title or folder states. A single volume cannot claim a listed range
             by words, nor a pack title a single volume. A book labeled a pack
             only by its title or folder ("Four: A Divergent Collection") is
             claimed by a single volume that scores better there than on any
@@ -3884,7 +3885,9 @@ internal/
             packs: a range record needs the folder's own range, not only its
             start, and a positionless pack the range its title's bounds name,
             else, stating none, a range opening the series; a labeled pack's
-            bounds come from its title or folder), Twins (the paths of books listed more than once:
+            bounds come from its title or folder, and one stating none is taken
+            for the opening pack, so a title naming later bounds keeps off it),
+            Twins (the paths of books listed more than once:
             folded title, authors and series alike, positions by value; no
             enrichment by words), Planner (NewPlanner(books), Plan(rec, mode,
             template): destinations only, each item's RelPath, Kind
