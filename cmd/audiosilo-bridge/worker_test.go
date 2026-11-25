@@ -85,7 +85,7 @@ func TestCarryForward(t *testing.T) {
 
 			// Nothing given: everything kept (named in flag order).
 			fs, f := parsedFlags(t)
-			kept, err := carryForward(fs, svc)
+			kept, _, err := carryForward(fs, svc)
 			if err != nil || strings.Join(kept, " ") != "--backend --bridge --data --model --whisper-cli" {
 				t.Fatalf("kept %q, %v", kept, err)
 			}
@@ -99,7 +99,7 @@ func TestCarryForward(t *testing.T) {
 
 			// Explicit flags win, an empty one included (clearing --model).
 			fs, f = parsedFlags(t, "--bridge", "http://10.0.0.2:8091", "--backend", "auto", "--model", "", "--data", "/new")
-			kept, err = carryForward(fs, svc)
+			kept, _, err = carryForward(fs, svc)
 			if err != nil || strings.Join(kept, " ") != "--whisper-cli" {
 				t.Fatalf("kept %q, %v", kept, err)
 			}
@@ -112,11 +112,11 @@ func TestCarryForward(t *testing.T) {
 	// No service: a first install keeps nothing and says nothing.
 	fs, f := parsedFlags(t)
 	def := *f.data
-	if kept, err := carryForward(fs, worker.Service{GOOS: "linux", Home: t.TempDir()}); err != nil || kept != nil || *f.data != def {
+	if kept, _, err := carryForward(fs, worker.Service{GOOS: "linux", Home: t.TempDir()}); err != nil || kept != nil || *f.data != def {
 		t.Fatalf("no service: %q, %v", kept, err)
 	}
 	// No service manager: Install says so.
-	if kept, err := carryForward(fs, worker.Service{GOOS: "windows", Home: t.TempDir()}); err != nil || kept != nil {
+	if kept, _, err := carryForward(fs, worker.Service{GOOS: "windows", Home: t.TempDir()}); err != nil || kept != nil {
 		t.Fatalf("windows: %q, %v", kept, err)
 	}
 	// Malformed: nothing kept, an error.
@@ -135,7 +135,7 @@ func TestCarryForward(t *testing.T) {
 			writeFile(t, svc, tc.text)
 			fs, f := parsedFlags(t, "--backend", "mlx-whisper")
 			def := *f.data
-			kept, err := carryForward(fs, svc)
+			kept, _, err := carryForward(fs, svc)
 			if err == nil || kept != nil || *f.data != def || *f.backend != "mlx-whisper" {
 				t.Fatalf("kept %q, %v, data %q", kept, err, *f.data)
 			}
@@ -375,5 +375,33 @@ func TestWorkerInstallDataAndModelOverrides(t *testing.T) {
 	}
 	if err := workerCmd([]string{"install", "--print", "--reset-model", "--model", "small"}, io.Discard, io.Discard); err == nil {
 		t.Fatal("accepted both a model override and a reset")
+	}
+
+	// An install that moves the service to the environment's folder says so,
+	// naming both. Service managers that succeed, all fakes, let it finish.
+	fakes := t.TempDir()
+	for name, text := range map[string]string{"launchctl": "#!/bin/sh\n[ \"$1\" = print ] && exit 1\nexit 0\n", "systemctl": "#!/bin/sh\nexit 0\n"} {
+		if err := os.WriteFile(filepath.Join(fakes, name), []byte(text), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", fakes+string(os.PathListSeparator)+os.Getenv("PATH"))
+	install := func(args ...string) string {
+		t.Helper()
+		var out bytes.Buffer
+		if err := workerCmd(append([]string{"install", "--token", "asw_x"}, args...), &out, io.Discard); err != nil {
+			t.Fatal(err)
+		}
+		return out.String()
+	}
+	if out := install(); !strings.Contains(out, "Using "+workerDataEnv+"'s data folder "+envData+" instead of the installed service's "+filepath.Join(home, "old")) {
+		t.Fatalf("no notice for the moved data folder:\n%s", out)
+	}
+	// Now the service runs from it, and an explicit --data is no surprise.
+	if out := install(); strings.Contains(out, "instead of") {
+		t.Fatalf("a notice with the same folder:\n%s", out)
+	}
+	if out := install("--data", filepath.Join(home, "explicit")); strings.Contains(out, "instead of") {
+		t.Fatalf("a notice for an explicit --data:\n%s", out)
 	}
 }

@@ -5240,7 +5240,8 @@ internal/
             --token) the command line didn't give, so an update keeps a
             customised worker. On install, --data takes precedence over
             AUDIOSILO_WORKER_DATA, followed by the installed folder and the
-            default. --reset-model clears the saved model override. A file that doesn't
+            default; the environment replacing a different installed folder
+            prints one line naming both. --reset-model clears the saved model override. A file that doesn't
             parse keeps nothing and says so on stderr. Uninstall names the
             kept --data. The client appends each route to the --bridge path as
             written (EscapedPath), so a proxy prefix's "(" or "!" reaches it

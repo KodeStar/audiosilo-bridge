@@ -111,7 +111,11 @@ func workerInstall(args []string, stdout, stderr io.Writer, remove bool) error {
 		// Mark the empty value explicit so carryForward skips the saved model.
 		_ = fs.Set("model", "")
 	}
+	envData := ""
 	if !remove && os.Getenv(workerDataEnv) != "" {
+		if !dataSet(fs) {
+			envData = *f.data
+		}
 		// An explicit --data already holds the right value. Otherwise this
 		// marks its environment default as an override for carryForward.
 		_ = fs.Set("data", *f.data)
@@ -122,7 +126,7 @@ func workerInstall(args []string, stdout, stderr io.Writer, remove bool) error {
 	}
 	// An update (or an uninstall) keeps what the installed service runs with
 	// unless the command line says otherwise.
-	kept, keepErr := carryForward(fs, worker.Service{GOOS: runtime.GOOS, Home: home})
+	kept, savedData, keepErr := carryForward(fs, worker.Service{GOOS: runtime.GOOS, Home: home})
 	bin, err := os.Executable()
 	if err != nil {
 		return err
@@ -185,6 +189,13 @@ func workerInstall(args []string, stdout, stderr io.Writer, remove bool) error {
 	if len(kept) > 0 && !*printOnly {
 		_, _ = fmt.Fprintln(stdout, "Keeping the installed service's "+strings.Join(kept, ", ")+" (give a flag to change it).")
 	}
+	if envData != "" && savedData != "" && !*printOnly {
+		// A stale export would otherwise move the worker without a word.
+		if saved, err := filepath.Abs(savedData); err == nil && filepath.Clean(saved) != data {
+			_, _ = fmt.Fprintln(stdout, "Using "+workerDataEnv+"'s data folder "+data+" instead of the installed service's "+
+				saved+" (unset it to keep that one).")
+		}
+	}
 	if svc.BridgeURL == "" {
 		return errors.New("worker install: --bridge is required (the Bridge page's address)")
 	}
@@ -222,40 +233,42 @@ func workerInstall(args []string, stdout, stderr io.Writer, remove bool) error {
 // service's value, read back from svc's file and parsed with the flags that
 // wrote it, so an update keeps a customised worker's --data, --backend,
 // --model, --whisper-cli and --bridge. It returns the flags
-// it kept as "--name". No service file is a first install (nothing kept, no
+// it kept as "--name" and the service's --data, kept or not. No service file is a first install (nothing kept, no
 // error); one that doesn't read as `worker install` writes it is an error, and
 // nothing is kept (the defaults apply).
-func carryForward(fs *flag.FlagSet, svc worker.Service) ([]string, error) {
+func carryForward(fs *flag.FlagSet, svc worker.Service) (kept []string, savedData string, err error) {
 	argv, err := svc.InstalledArgs()
 	if errors.Is(err, iofs.ErrNotExist) || errors.Is(err, worker.ErrUnsupported) {
-		return nil, nil // a first install, or no service manager (Install says so)
+		return nil, "", nil // a first install, or no service manager (Install says so)
 	}
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if len(argv) < 2 || argv[1] != "worker" {
-		return nil, errors.New("the service doesn't run `audiosilo-bridge worker`")
+		return nil, "", errors.New("the service doesn't run `audiosilo-bridge worker`")
 	}
 	prev := flag.NewFlagSet("installed service", flag.ContinueOnError)
 	prev.SetOutput(io.Discard)
 	addWorkerFlags(prev)
 	if err := prev.Parse(argv[2:]); err != nil {
-		return nil, fmt.Errorf("the service's flags: %w", err)
+		return nil, "", fmt.Errorf("the service's flags: %w", err)
 	}
 	if prev.NArg() > 0 {
-		return nil, fmt.Errorf("the service's flags: unexpected %q", prev.Arg(0))
+		return nil, "", fmt.Errorf("the service's flags: unexpected %q", prev.Arg(0))
 	}
 	given := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
-	var kept []string
 	prev.Visit(func(f *flag.Flag) {
+		if f.Name == "data" {
+			savedData = f.Value.String()
+		}
 		if given[f.Name] || f.Name == "token" {
 			return
 		}
 		_ = fs.Set(f.Name, f.Value.String()) // string flags: Set can't fail
 		kept = append(kept, "--"+f.Name)
 	})
-	return kept, nil
+	return kept, savedData, nil
 }
 
 // defaultWorkerDataDir is $AUDIOSILO_WORKER_DATA, else ~/.audiosilo-bridge-worker.
