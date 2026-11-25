@@ -85,6 +85,8 @@ func workerCmd(args []string, stdout, stderr io.Writer) error {
 		ASR: asr.SelectConfig{Backend: *f.backend, Model: *f.model, WhisperCLIPath: *f.whisperCLI, AutoDownload: true}})
 }
 
+var errTokenRequired = errors.New("worker install: --token is required the first time (make one on the Bridge's page, Workers)")
+
 func workerInstall(args []string, stdout, stderr io.Writer, remove bool) error {
 	name := "worker install"
 	if remove {
@@ -167,13 +169,22 @@ func workerInstall(args []string, stdout, stderr io.Writer, remove bool) error {
 	if keepErr != nil {
 		_, _ = fmt.Fprintln(stderr, "worker install: the installed service's settings can't be read, so it gets the defaults "+
 			"and the flags given here ("+keepErr.Error()+")")
-	} else if len(kept) > 0 && !*printOnly && !checkToken {
+	}
+	token := f.tokenIn(data)
+	if checkToken {
+		// The installer's update asks this before it replaces the old program.
+		if token == "" {
+			return errTokenRequired
+		}
+		return nil
+	}
+	if keepErr == nil && len(kept) > 0 && !*printOnly {
 		_, _ = fmt.Fprintln(stdout, "Keeping the installed service's "+strings.Join(kept, ", ")+" (give a flag to change it).")
 	}
 	if svc.BridgeURL == "" {
 		return errors.New("worker install: --bridge is required (the Bridge page's address)")
 	}
-	if *printOnly && !checkToken {
+	if *printOnly {
 		text, err := svc.Render()
 		if err != nil {
 			return err
@@ -181,12 +192,8 @@ func workerInstall(args []string, stdout, stderr io.Writer, remove bool) error {
 		_, _ = fmt.Fprint(stdout, text)
 		return nil
 	}
-	token := f.tokenIn(data)
 	if token == "" {
-		return errors.New("worker install: --token is required the first time (make one on the Bridge's page, Workers)")
-	}
-	if checkToken {
-		return nil
+		return errTokenRequired
 	}
 	if err := worker.SaveToken(data, token); err != nil {
 		return err

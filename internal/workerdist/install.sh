@@ -42,8 +42,11 @@ die() {
 	exit 1
 }
 
-# Only the program's folder is needed here. The downloaded worker checks
-# credentials with the same flag and service-file readers it uses to install.
+# service_program prints the program the installed worker service runs (the
+# launchd agent's first ProgramArguments string, the systemd user unit's first
+# ExecStart word, "quoted" or bare), nothing when there is none or it can't be
+# read plainly. Only its folder is needed here: the downloaded worker reads the
+# rest of the service's settings itself (--check-token).
 service_program() {
 	[ -f "$service_file" ] || return 0
 	case "$os" in
@@ -65,20 +68,11 @@ service_program() {
 			else if (match($0, /^[^" \t]+/)) {
 				word = substr($0, 1, RLENGTH)
 				if (index(word, "\047")) exit
-			}
+			} else exit
 			print word
 			exit
 		}' "$service_file" 2>/dev/null || true
 		;;
-	esac
-}
-
-# plain prints $1 when it is an absolute path the service file holds as is
-# (nothing it had to escape: \ % $ & < >), else nothing.
-plain() {
-	case "$1" in
-	*[\\%\$\&\<\>]*) ;;
-	/*) printf '%s\n' "$1" ;;
 	esac
 }
 
@@ -87,9 +81,10 @@ plain() {
 # folder this user can write (a path the file had to escape included: pass
 # --dir then).
 installed_dir() {
-	prog=$(plain "$(service_program)")
+	prog=$(service_program)
 	case "$prog" in
-	*/) return 0 ;;
+	# One the service file had to escape (\ % $ & < >) doesn't read as is.
+	*[\\%\$\&\<\>]* | */) return 0 ;;
 	/*/*) ;;
 	*) return 0 ;;
 	esac
