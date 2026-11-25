@@ -5289,8 +5289,9 @@ internal/
             runs, moves it to <dir>/audiosilo-bridge and runs `worker install` (or
             `worker` with --run). On a tokenless update with no data or token in
             the environment, the downloaded binary runs worker install --check-token
-            before replacing the old binary. It resolves the service's --data with
-            the installer's parser, including escaped paths. A first install or
+            before replacing the old binary, so the data folder is found by
+            `worker install`'s own carryForward, escaped paths included (the
+            script reads no --data itself). A first install or
             foreground start takes AUDIOSILO_WORKER_DATA or the default. Its tests run it end to end with a fake curl
             (and a fake uname for the other OS's service file), each run in a
             temp HOME holding service files rendered by worker.Service, so no

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"flag"
 	"io"
 	"os"
@@ -266,9 +267,16 @@ WORKER
 	if err := os.WriteFile(filepath.Join(home, "curl"), []byte(curl), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// The check runs the real `worker install`: should it ever go on to
+	// install, these fail instead of reaching this computer's own service.
+	for _, name := range []string{"launchctl", "systemctl"} {
+		if err := os.WriteFile(filepath.Join(home, name), []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
 	t.Setenv("PATH", home+":"+os.Getenv("PATH"))
-	runScript := func() (string, error) {
-		cmd := exec.Command("sh")
+	runScript := func(args ...string) (string, error) {
+		cmd := exec.Command("sh", append([]string{"-s", "--"}, args...)...)
 		cmd.Stdin = strings.NewReader(script)
 		out, err := cmd.CombinedOutput()
 		return string(out), err
@@ -287,6 +295,41 @@ WORKER
 	}
 	if out, err := runScript(); err != nil || !strings.Contains(out, "installed via "+bin) {
 		t.Fatalf("token in escaped service data folder: %v\n%s", err, out)
+	}
+	// A --run start looks where `worker` does (the default), not in the
+	// service's --data.
+	if err := os.Remove(filepath.Join(defaultWorkerDataDir(), worker.TokenFileName)); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runScript("--run"); err == nil || !strings.Contains(out, "--token is required") {
+		t.Fatalf("--run with the token only in the service's data folder: %v\n%s", err, out)
+	}
+}
+
+// The installer's token check names an unreadable service only when it
+// refuses: one that passes leaves it to the install that follows.
+func TestWorkerInstallCheckTokenUnreadableService(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("worker install supports macOS and Linux")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv(workerDataEnv, "")
+	t.Setenv(workerTokenEnv, "")
+	writeFile(t, worker.Service{GOOS: runtime.GOOS, Home: home}, "not a service file")
+	check := func() (string, error) {
+		var errb bytes.Buffer
+		err := workerCmd([]string{"install", "--bridge", "http://bridge", "--check-token"}, io.Discard, &errb)
+		return errb.String(), err
+	}
+	if msg, err := check(); !errors.Is(err, errTokenRequired) || !strings.Contains(msg, "can't be read") {
+		t.Fatalf("no token: %v, %q", err, msg)
+	}
+	if err := worker.SaveToken(defaultWorkerDataDir(), "asw_default"); err != nil {
+		t.Fatal(err)
+	}
+	if msg, err := check(); err != nil || msg != "" {
+		t.Fatalf("a saved token: %v, %q", err, msg)
 	}
 }
 

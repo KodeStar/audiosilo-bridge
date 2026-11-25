@@ -164,13 +164,14 @@ func workerInstall(args []string, stdout, stderr io.Writer, remove bool) error {
 		}
 		return err
 	}
+	token := f.tokenIn(data)
 	// Said before the --bridge check: an unreadable service is why an update
-	// suddenly needs --bridge.
-	if keepErr != nil {
+	// suddenly needs --bridge. The installer's token check says it only when it
+	// refuses, so a check that passes and the install after it don't both say it.
+	if keepErr != nil && (!checkToken || token == "") {
 		_, _ = fmt.Fprintln(stderr, "worker install: the installed service's settings can't be read, so it gets the defaults "+
 			"and the flags given here ("+keepErr.Error()+")")
 	}
-	token := f.tokenIn(data)
 	if checkToken {
 		// The installer's update asks this before it replaces the old program.
 		if token == "" {
@@ -178,7 +179,7 @@ func workerInstall(args []string, stdout, stderr io.Writer, remove bool) error {
 		}
 		return nil
 	}
-	if keepErr == nil && len(kept) > 0 && !*printOnly {
+	if len(kept) > 0 && !*printOnly {
 		_, _ = fmt.Fprintln(stdout, "Keeping the installed service's "+strings.Join(kept, ", ")+" (give a flag to change it).")
 	}
 	if svc.BridgeURL == "" {
