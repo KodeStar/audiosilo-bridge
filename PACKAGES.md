@@ -635,7 +635,8 @@ internal/
             (never-blindly-adopt full-chapter plausibility). AdoptFreshReadalong is goal
             readalong's rule (Phase 3c-1). It rejects a crammed fresh run, a collapse
             from a narration-rate original, or increased filler. A clean original must
-            retain its word count. With filler it must retain 80% of the words outside it.
+            retain its word count. With filler it may lose no more of the words outside
+            it than the filler found, and at most 20% of them.
             Sparse originals and unknown durations are judged by the available word counts.
             The full-chapter and clip machinery use an injected
             ClipCutter (ffmpeg) + a Transcribe func so it stays unit-testable. The

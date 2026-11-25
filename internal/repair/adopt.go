@@ -79,9 +79,11 @@ func AdoptFresh(original, fresh AdoptStats) AdoptDecision {
 	return AdoptDecision{Adopt: false, Reason: "both plausible, fresh not longer; keep original"}
 }
 
-// readalongMinKept is the share of a looped original's words outside its loops a
-// fresh read-along re-run must keep: below it the fresh run dropped narration (a
-// collapse). Every word of a loop-free original is narration, so it needs all of them.
+// readalongMinKept is the share of an original's words outside its filler a fresh
+// read-along re-run must keep at the least: below it the fresh run dropped narration
+// (a collapse). The slack below all of them is for filler the detectors may have
+// counted as narration, so it never exceeds the filler they found: every word of an
+// original with none is narration, and a 12-word fast tail allows 12 words, not 20%.
 const readalongMinKept = 0.8
 
 // AdoptFreshReadalong is a read-along book's adoption rule (Phase 3c-1): the
@@ -93,23 +95,22 @@ const readalongMinKept = 0.8
 //   - fresh crammed, or sparse where the original had a narration-rate word count
 //     -> keep original (the heal takes that span).
 //   - fresh loops over more words than the original -> keep original.
-//   - fresh keeps under 80% of a looped original's words outside its loops, or
-//     fewer words than an original with no detected filler -> keep original.
+//   - fresh keeps fewer of the original's words outside its filler than all of
+//     them less the filler found, at most 20% (readalongMinKept): it dropped
+//     narration                                     -> keep original.
 //   - otherwise                                      -> adopt.
 //
 // generate's whole run keeps AdoptFresh. Pure and table-tested.
 func AdoptFreshReadalong(original, fresh AdoptStats) AdoptDecision {
-	minKept := readalongMinKept
-	if original.LoopWords == 0 {
-		minKept = 1 // a fresh run that reaches that case is loop-free too
-	}
+	narration := float64(original.Words - original.LoopWords)
+	required := narration - min((1-readalongMinKept)*narration, float64(original.LoopWords))
 	switch {
 	case fresh.wpm() > plausibleMaxWPM ||
 		(fresh.DurationSec > 0 && fresh.wpm() < plausibleMinWPM && original.wpm() >= plausibleMinWPM):
 		return AdoptDecision{Adopt: false, Reason: reasonFreshImplausible}
 	case fresh.LoopWords > original.LoopWords:
 		return AdoptDecision{Adopt: false, Reason: "fresh run loops over more words; keep original"}
-	case float64(fresh.Words-fresh.LoopWords) < minKept*float64(original.Words-original.LoopWords):
+	case float64(fresh.Words-fresh.LoopWords) < required:
 		return AdoptDecision{Adopt: false, Reason: "fresh run dropped narration the original had outside its loops; keep original"}
 	}
 	return AdoptDecision{Adopt: true, Reason: "fresh run no loopier and keeps the narration; adopt"}

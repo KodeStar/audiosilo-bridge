@@ -364,6 +364,7 @@ func TestAdoptFreshReadalong(t *testing.T) {
 		{"no original transcript, plausible loop-free fresh", AdoptStats{DurationSec: dur}, clean, true},
 		{"mostly music, shorter clean reading", AdoptStats{Words: 50, LoopWords: 15, DurationSec: dur}, AdoptStats{Words: 35, DurationSec: dur}, true},
 		{"silence, empty readings", AdoptStats{DurationSec: dur}, AdoptStats{DurationSec: dur}, true},
+		{"fast-tail original, fresh without the burst", AdoptStats{Words: 3412, LoopWords: 12, DurationSec: dur}, clean, true},
 		// Denied: clearly worse.
 		{"loop-free original, fresh a little shorter", clean, AdoptStats{Words: 3300, DurationSec: dur}, false},
 		{"almost-all-loop original, collapsed fresh", allLoop, AdoptStats{Words: 200, DurationSec: dur}, false},
@@ -374,6 +375,8 @@ func TestAdoptFreshReadalong(t *testing.T) {
 		{"fresh loops more", AdoptStats{Words: 3400, LoopWords: 10, DurationSec: dur}, AdoptStats{Words: 3500, LoopWords: 600, DurationSec: dur}, false},
 		{"fresh collapsed", cotw, AdoptStats{Words: 1200, DurationSec: dur}, false},
 		{"fresh dropped narration a clean original had", clean, AdoptStats{Words: 2000, DurationSec: dur}, false},
+		// A little filler allows that many words lost, never a fifth of the chapter.
+		{"fast-tail original, fresh dropped a tenth", AdoptStats{Words: 3412, LoopWords: 12, DurationSec: dur}, AdoptStats{Words: 3100, DurationSec: dur}, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			d := AdoptFreshReadalong(c.original, c.fresh)
