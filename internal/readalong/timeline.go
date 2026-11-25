@@ -267,7 +267,8 @@ func (tl Timeline) chapterEndAt(t float64) float64 {
 // (healTrailCharsPerSec), never past its chapter's end nor the next section's first
 // aligned sentence, at most 600 s; each cut at a FILE boundary into one window per
 // file (each again 2 to 600 s); then the extra windows (tail_verdicts, the
-// transcript check's loops) are added and overlapping windows in a file merged.
+// transcript check's loops) are added, overlapping windows in a file merged, and a
+// merged window over 600 s divided evenly into clips of at most 600 s.
 func (tl Timeline) HealWindows(res Result, extra []Window) []Window {
 	// nextT0[i] is the start of the first aligned sentence after section i.
 	nextT0 := make([]float64, len(res.Sections))

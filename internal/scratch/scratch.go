@@ -108,8 +108,9 @@ type artifact struct {
 
 // audioArtifacts are reclaimed for every book: the split chapters/, the local copy of
 // the source split-source/, the agent staged-context dirs under _runs/, and the
-// tail-clip / full-chapter re-transcription scratch. Only chapters/ is a stage INPUT,
-// so only splitting has a sentinel to invalidate.
+// tail-clip / read-along heal / full-chapter re-transcription scratch (readalong/heal/
+// only: the map beside it stays, so a write a park held up still finishes). Only
+// chapters/ is a stage INPUT, so only splitting has a sentinel to invalidate.
 //
 // split-source/ is listed against splitting too, for the size rather than the
 // sentinel: it is a full copy of the (often multi-GB) source audio, and a split that
@@ -207,9 +208,10 @@ func HasReclaimable(workRoot, workDir string, kind state.Kind) bool {
 
 // Purge deletes a book's reclaimable scratch - the split chapters/ and split-source/
 // directories, the agent staged-context dirs (_runs/), and the
-// tail-clip/re-transcription scratch (clips/, retranscribe/) - while KEEPING the durables (probe.json, manifest.json,
+// tail-clip/heal/re-transcription scratch (clips/, readalong/heal/, retranscribe/) - while KEEPING the durables (probe.json, manifest.json,
 // transcripts, facts, sidecars). It is a no-op when the work dir is absent. The
-// deletion is confined to workRoot.
+// deletion is confined to workRoot, through an os.Root on the work dir, so a
+// symlink inside it never reaches outside.
 //
 // kind selects the extra ebook layers (see ebookArtifacts); an empty or unknown kind
 // is treated as audio, so a pre-migration book reclaims exactly what it always did.
