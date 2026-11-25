@@ -476,10 +476,12 @@ jobs:
           TAG="whisper-${UPSTREAM_REF}"
           if [[ "$BUILD_REV" != "1" ]]; then TAG+="-$BUILD_REV"; fi
           TITLE="whisper.cpp binaries ${UPSTREAM_REF} (build ${BUILD_REV})"
-          # Refuse to clobber an existing published release - a deliberate rebuild
-          # bumps build_rev, which yields a fresh tag.
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "release $TAG already exists - bump build_rev to rebuild"; exit 1
+          # Refuse to clobber an existing published release, or to attach one to
+          # a tag that already exists (it would publish at that tag's commit) -
+          # a deliberate rebuild bumps build_rev, which yields a fresh tag.
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
+            gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" >/dev/null 2>&1; then
+            echo "release or tag $TAG already exists - bump build_rev to rebuild"; exit 1
           fi
           gh release create "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
