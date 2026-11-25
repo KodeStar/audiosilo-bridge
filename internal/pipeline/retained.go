@@ -65,7 +65,8 @@ func (e *Executor) ASRSettings() ASRSettings {
 // KeptTranscription checks every raw chapter against the manifest and its
 // recorded ASR fingerprint and settings (want, the new run's). Older runs can
 // predate the fingerprint or the settings: only a recorded setting that differs
-// from a known one rules the transcript out.
+// from a known one rules the transcript out, or a record of segments decoded
+// under two configured settings (asrProvenance.SettingsChanged).
 func KeptTranscription(ctx context.Context, dir string, m audio.Manifest, want ASRSettings) (bool, error) {
 	if len(m.Chapters) == 0 {
 		return false, nil
@@ -80,7 +81,7 @@ func KeptTranscription(ctx context.Context, dir string, m audio.Manifest, want A
 	case !errors.Is(err, os.ErrNotExist):
 		return false, err
 	}
-	if settingDiffers(provenance.Model, want.Model) || settingDiffers(provenance.Language, want.Language) {
+	if provenance.SettingsChanged || settingDiffers(provenance.Model, want.Model) || settingDiffers(provenance.Language, want.Language) {
 		return false, nil
 	}
 	if sum := provenance.ManifestSHA; sum != "" {

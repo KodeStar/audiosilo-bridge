@@ -679,6 +679,10 @@ func TestASRSegmentProvenanceAndRates(t *testing.T) {
 	if p.Model != "earlier-model" || p.decodedModel() != "mixed" {
 		t.Fatalf("model %q, decoded %q", p.Model, p.decodedModel())
 	}
+	// Chapter 2 was decoded here under another configured model than chapter 1's.
+	if !p.SettingsChanged {
+		t.Fatal("a resume under changed settings wasn't recorded")
+	}
 	if _, err := exe.Execute(t.Context(), book, state.Sanitizing, scheduler.StageReport{}); err != nil {
 		t.Fatal(err)
 	}
@@ -688,6 +692,53 @@ func TestASRSegmentProvenanceAndRates(t *testing.T) {
 			t.Fatalf("chapter %d model %q: %v", chapter, tr.Model, err)
 		}
 	}
+}
+
+// A transcript decoded under two configured models is reused by neither; a record
+// with no raw kept (none made yet, or the transcript tier purged) is replaced by
+// the settings that make them.
+func TestASRProvenanceSettingsChange(t *testing.T) {
+	m := audio.Manifest{Chapters: []audio.Chapter{{Chapter: 1}, {Chapter: 2}, {Chapter: 3}}}
+	exe := NewExecutor(Config{DataDir: t.TempDir(), ASR: fakeASR(newFakeBackend())}) // fake-model, en
+	book := func(t *testing.T, complete int) store.Book {
+		work := t.TempDir()
+		writeManifest(t, work, 3)
+		seedFLACs(t, work, 3)
+		for ch := 1; ch <= complete; ch++ {
+			seedRawTranscript(t, work, ch)
+		}
+		// With nothing kept, a mixed record is one whose raws were purged since.
+		prior := asrProvenance{Backend: "earlier", Model: "earlier-model", Language: "en", SettingsChanged: complete == 0}
+		if err := writeASRProvenance(work, prior); err != nil {
+			t.Fatal(err)
+		}
+		b := store.Book{ID: 1, WorkDir: work}
+		if _, err := exe.Execute(t.Context(), b, state.ASR, scheduler.StageReport{}); err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	t.Run("mixed", func(t *testing.T) {
+		b := book(t, 1)
+		for _, want := range []string{"earlier-model", "fake-model"} {
+			if kept, err := KeptTranscription(t.Context(), b.WorkDir, m, ASRSettings{Model: want, Language: "en"}); err != nil || kept {
+				t.Fatalf("reused for %s: %v %v", want, kept, err)
+			}
+		}
+	})
+	t.Run("nothing kept", func(t *testing.T) {
+		b := book(t, 0)
+		p := readASRProvenance(b.WorkDir)
+		if p.Model != "fake-model" || p.SettingsChanged {
+			t.Fatalf("provenance %+v", p)
+		}
+		if _, err := os.Stat(filepath.Join(b.WorkDir, transcript.RawDir, ".pending")); !os.IsNotExist(err) {
+			t.Fatalf("the staging dir stayed: %v", err)
+		}
+		if kept, err := KeptTranscription(t.Context(), b.WorkDir, m, ASRSettings{Model: "fake-model", Language: "en"}); err != nil || !kept {
+			t.Fatalf("not reused: %v %v", kept, err)
+		}
+	})
 }
 
 func TestDecodedModel(t *testing.T) {

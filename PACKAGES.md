@@ -5171,7 +5171,10 @@ internal/
             actual backend, device, model, route and decode time in asr.json. Detected
             chapters retain the original window numbers under windows. Old raws use
             the saved stage defaults. The top-level backend, model and language stay
-            the configured ones KeptTranscription compares, whoever decoded. The scheduler learns local and remote rates
+            the configured ones KeptTranscription compares, whoever decoded; a resume
+            that decodes under another configured model (locally) or language marks
+            asr.json settings_changed, which KeptTranscription never reuses (with no
+            raw made yet, the new settings simply replace the recorded ones). The scheduler learns local and remote rates
             separately and the heartbeat reads the current route on each beat.
   worker/   Phase 1b, `audiosilo-bridge worker`: client (token + protocol header on
             every call; the FLAC checked by size and sha256), Run (Select +

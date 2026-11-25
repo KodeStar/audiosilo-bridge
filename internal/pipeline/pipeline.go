@@ -596,6 +596,11 @@ type asrProvenance struct {
 	Segments      map[int]asr.Decode `json:"segments,omitempty"`
 	// Detection synthesizes new chapters from the original window decodes.
 	Windows map[int]asr.Decode `json:"windows,omitempty"`
+	// SettingsChanged: a resumed run decoded segments under a configured model or
+	// language other than the one above (changed while the earlier raws were
+	// kept), so no one setting describes the transcript and KeptTranscription
+	// never reuses it.
+	SettingsChanged bool `json:"settings_changed,omitempty"`
 }
 
 // inspect probes the book's source audio, writes probe.json + manifest.json, and
@@ -854,11 +859,28 @@ func (e *Executor) asrStage(ctx context.Context, book store.Book, r scheduler.St
 	if err := os.MkdirAll(rawDir, 0o750); err != nil {
 		return scheduler.StageResult{}, err
 	}
+	total := len(manifest.Chapters)
+	// Progress baseline: count the chapters already transcribed on entry (a resume) so
+	// the FIRST report reflects prior work and an already-complete chapter never ticks
+	// the counter. This keeps the scheduler's EWMA unit span (first..last reported done)
+	// measuring only what THIS run actually transcribed - a resume that did 3 of 84
+	// records 3 units, not 84. The predicate matches the loop's skip test (rawComplete).
+	completed := 0
+	for _, ch := range manifest.Chapters {
+		if rawComplete(filepath.Join(rawDir, transcript.RawName(ch.Chapter))) {
+			completed++
+		}
+	}
 	// Record the fingerprint at stage START so a crash mid-loop still lets a later
-	// resume detect a subsequent manifest change.
+	// resume detect a subsequent manifest change. With no raw kept (a first run, or
+	// the transcript tier purged, which keeps asr.json) nothing recorded describes
+	// the transcript this run makes: its settings are the configured ones.
 	prov := prior
-	if prov.Backend == "" {
+	if prov.Backend == "" || completed == 0 {
 		prov.Backend, prov.Model, prov.Language = setup.Backend.ID(), setup.Model, setup.Language
+	}
+	if completed == 0 {
+		prov.SettingsChanged, prov.Segments, prov.EmptyChapters = false, nil, nil
 	}
 	prov.ManifestSHA = fp
 	if prov.Segments == nil {
@@ -872,18 +894,6 @@ func (e *Executor) asrStage(ctx context.Context, book store.Book, r scheduler.St
 	pending := filepath.Join(rawDir, ".pending")
 	if err := os.MkdirAll(pending, 0o750); err != nil {
 		return scheduler.StageResult{}, err
-	}
-	total := len(manifest.Chapters)
-	// Progress baseline: count the chapters already transcribed on entry (a resume) so
-	// the FIRST report reflects prior work and an already-complete chapter never ticks
-	// the counter. This keeps the scheduler's EWMA unit span (first..last reported done)
-	// measuring only what THIS run actually transcribed - a resume that did 3 of 84
-	// records 3 units, not 84. The predicate matches the loop's skip test (rawComplete).
-	completed := 0
-	for _, ch := range manifest.Chapters {
-		if rawComplete(filepath.Join(rawDir, transcript.RawName(ch.Chapter))) {
-			completed++
-		}
 	}
 	done := completed
 	if r.Progress != nil {
@@ -916,6 +926,12 @@ func (e *Executor) asrStage(ctx context.Context, book store.Book, r scheduler.St
 		if err != nil {
 			return scheduler.StageResult{}, err
 		}
+		// The configured settings changed since the kept raws were made (the stage
+		// start took the configured ones when none were kept): the transcript is
+		// mixed (a worker decodes with its own model, but the configured language).
+		if settingDiffers(prov.Language, setup.Language) || (!decoded.Remote && settingDiffers(prov.Model, setup.Model)) {
+			prov.SettingsChanged = true
+		}
 		prov.Segments[ch.Chapter] = decoded
 		prov.EmptyChapters = slices.DeleteFunc(prov.EmptyChapters, func(n int) bool { return n == ch.Chapter })
 		if empty {
@@ -942,6 +958,9 @@ func (e *Executor) asrStage(ctx context.Context, book store.Book, r scheduler.St
 			r.Progress(done, total)
 		}
 	}
+	// Every raw is published: what is left in .pending is a backend's side output,
+	// or an attempt a crash cut short.
+	_ = os.RemoveAll(pending)
 	e.accountScratch(ctx, book)
 
 	result := scheduler.StageResult{
