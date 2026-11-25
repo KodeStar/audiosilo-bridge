@@ -108,8 +108,9 @@ type artifact struct {
 
 // audioArtifacts are reclaimed for every book: the split chapters/, the local copy of
 // the source split-source/, the agent staged-context dirs under _runs/, and the
-// tail-clip / full-chapter re-transcription scratch. Only chapters/ is a stage INPUT,
-// so only splitting has a sentinel to invalidate.
+// tail-clip / read-along heal / full-chapter re-transcription scratch (readalong/heal/
+// only: the map beside it stays, so a write a park held up still finishes). Only
+// chapters/ is a stage INPUT, so only splitting has a sentinel to invalidate.
 //
 // split-source/ is listed against splitting too, for the size rather than the
 // sentinel: it is a full copy of the (often multi-GB) source audio, and a split that
@@ -127,6 +128,7 @@ var audioArtifacts = []artifact{
 	{Dir: audio.WindowAudioDir},
 	{Dir: agent.RunsDir},
 	{Dir: repair.ClipsDir},
+	{Dir: readalong.HealPath},
 	{Dir: repair.RetranscribeDir},
 }
 
@@ -206,9 +208,10 @@ func HasReclaimable(workRoot, workDir string, kind state.Kind) bool {
 
 // Purge deletes a book's reclaimable scratch - the split chapters/ and split-source/
 // directories, the agent staged-context dirs (_runs/), and the
-// tail-clip/re-transcription scratch (clips/, retranscribe/) - while KEEPING the durables (probe.json, manifest.json,
+// tail-clip/heal/re-transcription scratch (clips/, readalong/heal/, retranscribe/) - while KEEPING the durables (probe.json, manifest.json,
 // transcripts, facts, sidecars). It is a no-op when the work dir is absent. The
-// deletion is confined to workRoot.
+// deletion is confined to workRoot, through an os.Root on the work dir, so a
+// symlink inside it never reaches outside.
 //
 // kind selects the extra ebook layers (see ebookArtifacts); an empty or unknown kind
 // is treated as audio, so a pre-migration book reclaims exactly what it always did.
@@ -217,10 +220,35 @@ func Purge(workRoot, workDir string, kind state.Kind) error {
 	if !ok {
 		return nil // nothing safe to remove
 	}
+	rootPath, err := filepath.Abs(workRoot)
+	if err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(rootPath, wd)
+	if err != nil {
+		return err
+	}
+	workspace, err := os.OpenRoot(rootPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer func() { _ = workspace.Close() }()
+	root, err := workspace.OpenRoot(rel)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	// Every directory is tried: one the root refuses (a symlink out of the work
+	// dir) must not keep the others, an ebook's source prose above all, on disk.
+	var errs []error
 	for _, a := range artifactsFor(kind) {
-		if err := os.RemoveAll(filepath.Join(wd, a.Dir)); err != nil {
-			return err
-		}
+		errs = append(errs, root.RemoveAll(a.Dir))
 	}
 	// AFTER the directories, and never in front of them. The extract manifest is a
 	// DURABLE the purge deliberately keeps, but it carries each section's opening
@@ -230,9 +258,9 @@ func Purge(workRoot, workDir string, kind state.Kind) error {
 	// prose to protect kilobytes of it. The manifest lives at the work-dir root, so
 	// the sweep cannot affect whether this can run.
 	if kind == state.KindEbook {
-		return ebook.StripHeads(wd)
+		errs = append(errs, ebook.StripHeads(wd))
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // The transcript tier (the Bridge's transcript retention, decision 5): what holds
@@ -244,12 +272,10 @@ func Purge(workRoot, workDir string, kind state.Kind) error {
 // audio book's transcripts-corrected/ as a durable; this tier is where it goes.)
 // windows/ is a chapterless book's window layer (Phase 1d: the windows' raw
 // transcripts and the detection); its chapters_detected.json (titles only) stays,
-// like the manifest. readalong/heal/ is the read-along heal's raw transcripts
-// (Phase 3c); readalong/map.json (CFIs and times only) stays, so a write a park
-// held up can still finish.
+// like the manifest. Purge already reclaims the read-along heal scratch.
 var transcriptDirs = []string{
 	transcript.RawDir, transcript.JSONDir, transcript.TextDir, transcript.RepairedDir, spelling.CorrectedDir,
-	audio.WindowsDir, readalong.HealPath,
+	audio.WindowsDir,
 }
 
 // transcriptFiles quote the transcript at the work dir's root: the spelling

@@ -155,7 +155,9 @@ type Book struct {
 	Series    string
 	SeriesPos string
 	// Chapters is the manifest chapter count (0 = unknown -> DefaultChapters).
-	Chapters int
+	Chapters    int
+	DurationSec float64
+	RemoteASR   bool
 	// Progress is the per-stage done/total keyed by stage name (may be nil).
 	Progress map[string]Progress
 	// MaxAgentsPerBook is the fan-out width for supported stages. Zero preserves
@@ -165,6 +167,24 @@ type Book struct {
 	// chapters only (Phase 1d), so its path goes from asr to chapter_detecting and
 	// ends there (state.PathNext).
 	Goal string
+}
+
+// SeedASRSecondsPerAudioHour is the first-pass estimate until a route has decoded audio.
+const SeedASRSecondsPerAudioHour = 900
+
+// ASRRateKey names the rates-table row, measured in decode seconds per audio hour.
+func ASRRateKey(remote bool) string {
+	if remote {
+		return "asr_remote_per_audio_hour"
+	}
+	return "asr_local_per_audio_hour"
+}
+
+func ASRSecondsPerAudioHour(rates map[string]float64, remote bool) float64 {
+	if rate := rates[ASRRateKey(remote)]; rate > 0 {
+		return rate
+	}
+	return SeedASRSecondsPerAudioHour
 }
 
 // UnitIsBook reports whether a stage is measured in whole books (one unit per run)
@@ -194,7 +214,12 @@ func Observe(stage string, wallclockSeconds float64, units int, current map[stri
 	if r, has := current[stage]; has {
 		old = r
 	}
-	return Alpha*observed + (1-Alpha)*old, true
+	return Blend(observed, old), true
+}
+
+// Blend folds one observation into a prior rate: the EWMA every learned rate uses.
+func Blend(observed, old float64) float64 {
+	return Alpha*observed + (1-Alpha)*old
 }
 
 // segment is one lane-bound piece of a book's remaining path: the stage, the lane it
@@ -285,7 +310,23 @@ func remainingSegments(b Book, rates map[string]float64) []segment {
 		}
 		isCurrent := cur == b.State
 		units := stageRemainingUnits(b, cur, isCurrent)
-		seconds := float64(units) * rateFor(cur, rates)
+		var seconds float64
+		if cur == state.ASR {
+			// ASR is learned per audio hour on the route the next segment takes.
+			hoursPerChapter := stageUnits[state.ASR].seed / SeedASRSecondsPerAudioHour
+			if b.DurationSec > 0 {
+				hoursPerChapter = b.DurationSec / 3600 / float64(stageTotalUnits(b, cur))
+			}
+			seconds = hoursPerChapter * ASRSecondsPerAudioHour(rates, b.RemoteASR) * float64(units)
+		} else {
+			seconds = float64(units) * rateFor(cur, rates)
+		}
+		// Heal progress counts windows. The rate is for one complete alignment.
+		if cur == state.ReadalongAligning && isCurrent {
+			if p := b.Progress[string(cur)]; p.Total > 0 {
+				seconds /= float64(p.Total)
+			}
+		}
 		if state.SupportsAgentFanout(cur) && units > 0 {
 			fanout := b.MaxAgentsPerBook
 			if fanout < 1 {

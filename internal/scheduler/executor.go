@@ -48,9 +48,11 @@ type ProgressFunc func(done, total int)
 // Any field may be nil (a stage guards each call); the zero StageReport is a valid
 // no-op reporter for tests.
 type StageReport struct {
-	Progress  ProgressFunc
-	Note      func(msg string)
-	Heartbeat func()
+	// ASRDecoded reports a completed first-pass segment, excluding setup, waits and retries.
+	ASRDecoded func(remote bool, audioSeconds, decodeSeconds float64)
+	Progress   ProgressFunc
+	Note       func(msg string)
+	Heartbeat  func()
 }
 
 // RateSample is a stage's own report of how much work it did in ONE run, used to update

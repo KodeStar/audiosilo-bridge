@@ -302,9 +302,6 @@ func (h *Handler) prepareContinue(ctx context.Context, b store.Book, to state.St
 			return err
 		}
 	}
-	if state.Order(to) < state.Order(state.QASweep) {
-		return pipeline.ResetReadalongRepair(b.WorkDir)
-	}
 	return nil
 }
 
@@ -321,7 +318,7 @@ func (h *Handler) createReadalong(ctx context.Context, eng Engine, r *run) error
 	if err != nil {
 		return err
 	}
-	if _, err := readalong.OpenEPUB(ebook); err != nil {
+	if err := readalong.CheckEPUB(ebook); err != nil {
 		return pipeline.ReadalongEbookErr(err)
 	}
 	// The map's times are the server's file lengths (decision 10): one it doesn't

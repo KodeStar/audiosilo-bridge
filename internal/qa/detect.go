@@ -78,16 +78,8 @@ func repeatedRuns(docs []chapterDoc) []RepeatedRun {
 		if d.number == 0 {
 			continue
 		}
-		segs := d.t.Segments
-		runStart := -1
-		runLen := 0
-		prev := ""
-		prevIndex := -1
-		emit := func() {
-			if runStart == -1 || runLen < repeatRunMin {
-				return
-			}
-			startT := segs[runStart].Start // Python `segs[run_start].get("start", 0) or 0`; Start is always set here
+		repeatedSegments(d.t.Segments, func(first transcript.Segment, count int) {
+			startT := first.Start // Python `segs[run_start].get("start", 0) or 0`; Start is always set here
 			pos := 0.0
 			if d.duration != 0 {
 				pos = startT / d.duration
@@ -99,35 +91,36 @@ func repeatedRuns(docs []chapterDoc) []RepeatedRun {
 			out = append(out, RepeatedRun{
 				Chapter:  d.number,
 				Kind:     kind,
-				Length:   runLen,
+				Length:   count,
 				StartSec: startT,
-				Snippet:  TruncateRunes(segs[runStart].Text, snippetLen),
+				Snippet:  TruncateRunes(first.Text, snippetLen),
 			})
-		}
-		for i, seg := range segs {
-			cur := normalizeUnicode(seg.Text)
-			if cur == "" {
-				// Empty/zero-duration backend artifacts do not interrupt adjacent speech.
-				continue
-			}
-			if cur == prev {
-				if runStart == -1 {
-					runStart = prevIndex
-					runLen = 2
-				} else {
-					runLen++
-				}
-			} else {
-				emit()
-				runStart = -1
-				runLen = 0
-			}
-			prev = cur
-			prevIndex = i
-		}
-		emit()
+		})
 	}
 	return out
+}
+
+// repeatedSegments visits each consecutive run, ignoring empty timestamp records.
+func repeatedSegments(segments []transcript.Segment, visit func(transcript.Segment, int)) {
+	previous := ""
+	var first transcript.Segment
+	count := 0
+	for _, seg := range segments {
+		current := normalizeUnicode(seg.Text)
+		if current == "" {
+			continue
+		}
+		if current != previous {
+			if count >= repeatRunMin {
+				visit(first, count)
+			}
+			first, previous, count = seg, current, 0
+		}
+		count++
+	}
+	if count >= repeatRunMin {
+		visit(first, count)
+	}
 }
 
 // lowConfidence ports qa_sweep.py's low-confidence tally: per chapter (excluding
@@ -428,12 +421,34 @@ func normalizeASCII(s string) string {
 	return strings.Join(strings.Fields(b.String()), " ")
 }
 
-// LoopWords is how many of text's words lie inside a 6-gram loop: covered by an
+// loopWords is how many of text's words lie inside a 6-gram loop: covered by an
 // occurrence of any 6-gram (over its Unicode-normalized words) repeated at least 5
 // times, cross_segment_scan.py's "not natural prose" threshold. A read-along's
 // adoption rule weighs it (repair.AdoptFreshReadalong): a loop's words are noise.
-func LoopWords(text string) int {
-	toks := strings.Fields(normalizeUnicode(text))
+// It counts text's own (whitespace-separated) words, the unit AdoptStats.Words
+// counts in: normalizing splits "don't" or "well-known" into two tokens, and
+// counting tokens would make a loop of them more words than the text has,
+// shrinking the narration a fresh run is held to.
+func loopWords(text string) int {
+	var toks []string
+	var owner []int // the text word each token came from
+	for i, w := range strings.Fields(text) {
+		for _, tok := range strings.Fields(normalizeUnicode(w)) {
+			toks = append(toks, tok)
+			owner = append(owner, i)
+		}
+	}
+	n, last := 0, -1
+	for k, hit := range loopCoverage(toks) {
+		if hit && owner[k] != last {
+			n++
+			last = owner[k]
+		}
+	}
+	return n
+}
+
+func loopCoverage(toks []string) []bool {
 	keys := make([]string, max(0, len(toks)-gramSize+1))
 	counts := make(map[string]int, len(keys))
 	for i := range keys {
@@ -448,13 +463,53 @@ func LoopWords(text string) int {
 			}
 		}
 	}
-	n := 0
-	for _, c := range covered {
-		if c {
-			n++
+	return covered
+}
+
+// LoopSpans locates contiguous stretches of repeated words. A refrain separated by
+// narration may occur throughout a chapter without forming a local loop.
+func LoopSpans(t transcript.Transcript) [][2]float64 {
+	var tokens []string
+	var segments []int
+	for i, seg := range t.Segments {
+		words := strings.Fields(normalizeUnicode(seg.Text))
+		tokens = append(tokens, words...)
+		for range words {
+			segments = append(segments, i)
 		}
 	}
-	return n
+	covered := loopCoverage(tokens)
+	var spans [][2]float64
+	for i := 0; i < len(covered); {
+		if !covered[i] {
+			i++
+			continue
+		}
+		start := i
+		for i < len(covered) && covered[i] {
+			i++
+		}
+		if _, count := TopGram(tokens[start:i]); count >= crossThreshold {
+			spans = append(spans, [2]float64{t.Segments[segments[start]].Start, t.Segments[segments[i-1]].End})
+		}
+	}
+	return spans
+}
+
+// ReadalongNoise counts suspected filler for the adoption check. Short repeated
+// segments and the final burst of a fast tail can escape the 6-gram detector.
+// Use the largest signal because the detectors can cover the same words.
+func ReadalongNoise(t transcript.Transcript) int {
+	text := transcript.PlainText(t)
+	duplicateWords := 0
+	repeatedSegments(t.Segments, func(first transcript.Segment, count int) {
+		duplicateWords += (count - 1) * len(strings.Fields(first.Text))
+	})
+	noise := max(duplicateWords, loopWords(text))
+	if len(tailRateOutliers([]chapterDoc{{t: t}})) > 0 {
+		noise = max(noise, tailWords)
+	}
+	return min(noise, len(strings.Fields(text)))
 }
 
 // TopGram returns the most common 6-gram in toks and its count, breaking ties by

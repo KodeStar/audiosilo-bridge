@@ -80,11 +80,25 @@ type Capability struct {
 	Detail    string `json:"detail"`
 }
 
+// IDWorker identifies the routed backend while it would dispatch to a worker.
+const IDWorker = "worker"
+
+// Decode describes the successful attempt for one segment. A worker supplies
+// its own model, device and decode time.
+type Decode struct {
+	Backend string  `json:"backend"`
+	Device  string  `json:"device"`
+	Model   string  `json:"model"`
+	Remote  bool    `json:"remote"`
+	Seconds float64 `json:"decode_seconds,omitempty"`
+}
+
 // Job is one chapter transcription: the input FLAC, the directory the raw output
 // is written into (the backend names the file from the FLAC stem), the chapter
 // number, an optional initial prompt (VERIFIED spellings only - never seeded
 // guesses, which make a wrong spelling recur), and the language.
 type Job struct {
+	Result        *Decode // optional destination for the actual route and decode time
 	Audio         string
 	OutDir        string
 	Chapter       int

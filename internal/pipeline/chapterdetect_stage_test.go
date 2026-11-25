@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/asr"
 	"github.com/kodestar/audiosilo-bridge/internal/audio"
 	"github.com/kodestar/audiosilo-bridge/internal/chapterdetect"
 	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
@@ -181,6 +182,12 @@ func TestChapterDetectStage(t *testing.T) {
 		owJSON("Chapter@0.5 One@0.9 it_began@2.2", "and@4 on@4.5"),
 		owJSON("Chapter@2.5 Two@2.9 it_ended@4.2"))
 	e := NewExecutor(Config{FFmpeg: ffmpeg})
+	prov := readASRProvenance(book.WorkDir)
+	worker := asr.Decode{Backend: "mlx-whisper", Model: "worker-model", Remote: true}
+	prov.Segments = map[int]asr.Decode{1: worker}
+	if err := writeASRProvenance(book.WorkDir, prov); err != nil {
+		t.Fatal(err)
+	}
 	// fromSource says whether a run split chapters from the source (its note).
 	run := func() (fromSource bool) {
 		t.Helper()
@@ -221,7 +228,11 @@ func TestChapterDetectStage(t *testing.T) {
 		t.Fatalf("chapter 2 raw holds the wrong words: %s", b)
 	}
 	fp, _ := manifestFingerprint(book.WorkDir)
-	if readASRProvenance(book.WorkDir).ManifestSHA != fp {
+	prov = readASRProvenance(book.WorkDir)
+	if len(prov.Segments) != 0 || prov.Windows[1] != worker {
+		t.Fatalf("window provenance after chapter detection: %+v", prov)
+	}
+	if prov.ManifestSHA != fp {
 		t.Fatal("asr.json doesn't carry the detected manifest's fingerprint")
 	}
 	for ch := 1; ch <= 2; ch++ {

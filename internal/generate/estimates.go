@@ -4,15 +4,12 @@ import (
 	"context"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/eta"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/pipeline"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
-
-// SeedASRSecondsPerAudioHour is the ASR estimate before this Bridge has learned
-// its own rate: a quarter of the audio's length, a CPU whisper.cpp ballpark.
-const SeedASRSecondsPerAudioHour = 900
 
 // AgentState is what the estimates say about the agent container.
 type AgentState struct {
@@ -22,14 +19,10 @@ type AgentState struct {
 }
 
 // Estimates computes the heartbeat's sidecars estimates (contract section 2)
-// from the store: the ASR stage's learned rate, the finished books' agent spend
+// from the store, including the finished books' agent spend
 // per hour of audio and per ebook, and this month's spend against the budget.
 func Estimates(ctx context.Context, db *store.DB, agent AgentState, monthlyBudgetUSD float64, now time.Time) (*link.SidecarEstimates, error) {
 	books, err := db.FinishedBooks(ctx)
-	if err != nil {
-		return nil, err
-	}
-	rate, hasRate, err := db.GetRate(ctx, string(state.ASR))
 	if err != nil {
 		return nil, err
 	}
@@ -38,23 +31,22 @@ func Estimates(ctx context.Context, db *store.DB, agent AgentState, monthlyBudge
 	if err != nil {
 		return nil, err
 	}
-	e := estimateFrom(books, rate, hasRate)
+	e := estimateFrom(books)
 	e.AgentBackend, e.AgentReady, e.Subscription = agent.Backend, agent.Ready, agent.Subscription
 	e.MonthlyBudgetUSD, e.MonthSpentUSD = monthlyBudgetUSD, Cents(spent)
 	return e, nil
 }
 
-// estimateFrom is the figures' arithmetic. The ASR stage's rate is seconds per
-// chapter, so it is scaled by the finished audio books' chapters per hour; with
-// no rate or no such book the seed stands. Agent spend per audio hour sums the
+// estimateFrom summarizes spend and supplies the seed ASR estimate. The heartbeat
+// fills in the active route's live rate on every beat. Spend per hour sums the
 // audio books (a long book weighs more), per ebook it averages the ebooks; nil
 // until a finished book of that kind gives one.
-func estimateFrom(books []store.FinishedBook, asrRate float64, hasRate bool) *link.SidecarEstimates {
-	e := &link.SidecarEstimates{ASRSecondsPerAudioHour: SeedASRSecondsPerAudioHour}
+func estimateFrom(books []store.FinishedBook) *link.SidecarEstimates {
+	e := &link.SidecarEstimates{ASRSecondsPerAudioHour: eta.SeedASRSecondsPerAudioHour}
 	var (
-		audioHours, audioCost, chapterHours float64
-		chapters, ebooks, audioBooks        int
-		ebookCost                           float64
+		audioHours, audioCost float64
+		ebooks, audioBooks    int
+		ebookCost             float64
 	)
 	for _, b := range books {
 		switch state.ParseKind(b.Kind) {
@@ -68,10 +60,6 @@ func estimateFrom(books []store.FinishedBook, asrRate float64, hasRate bool) *li
 			audioBooks++
 			audioHours += b.DurationSec / 3600
 			audioCost += b.CostUSD
-			if b.Chapters > 0 {
-				chapters += b.Chapters
-				chapterHours += b.DurationSec / 3600
-			}
 		}
 	}
 	e.Samples = ebooks + audioBooks
@@ -82,9 +70,6 @@ func estimateFrom(books []store.FinishedBook, asrRate float64, hasRate bool) *li
 	if ebooks > 0 {
 		v := Cents(ebookCost / float64(ebooks))
 		e.AgentUSDPerEbook = &v
-	}
-	if hasRate && asrRate > 0 && chapterHours > 0 {
-		e.ASRSecondsPerAudioHour = float64(int64(asrRate * float64(chapters) / chapterHours))
 	}
 	return e
 }

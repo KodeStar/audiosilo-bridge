@@ -83,16 +83,6 @@ func readReadalongRequest(workDir string) (ReadalongRequest, error) {
 	return req, nil
 }
 
-// ResetReadalongRepair forgets the mechanical loop-repair round, so a run continued
-// from its transcripts again (sanitizing) gets its one round (decision 4).
-func ResetReadalongRepair(workDir string) error {
-	err := os.Remove(filepath.Join(workDir, readalong.RepairedPath))
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	return err
-}
-
 // ForgetTranscription drops asr.json, the provenance naming the manifest the kept
 // raws were transcribed from: a run continued from inspecting (its transcripts gone,
 // or its audio changed) makes a new manifest, which asr would otherwise take for
@@ -105,27 +95,22 @@ func ForgetTranscription(workDir string) error {
 	return err
 }
 
-// readalongRepaired reports whether the book's one mechanical repair round ran.
-func readalongRepaired(workDir string) bool {
-	return fsutil.IsFile(filepath.Join(workDir, readalong.RepairedPath))
-}
-
-func markReadalongRepaired(workDir string) error {
-	return fsutil.WriteFileAtomic(filepath.Join(workDir, readalong.RepairedPath), []byte("1\n"), 0o644)
-}
-
 // readalongSweep is qa_sweep's routing for goal readalong (decision 4): a report
 // that isn't clean gets ONE mechanical repair round (qa.MechanicalPlan, no agent)
 // and goes to retranscribing; after that round, or with nothing a re-transcription
 // could fix, the book goes on to readalong_aligning clean or not (the gap heal
 // covers what is left), the stage note naming the chapters left.
-func readalongSweep(workDir string, rep *qa.Report, r scheduler.StageReport) (bool, error) {
+func (e *Executor) readalongSweep(ctx context.Context, book store.Book, rep *qa.Report, r scheduler.StageReport) (bool, error) {
 	if rep.Clean() {
 		return false, nil
 	}
-	if !readalongRepaired(workDir) {
+	rounds, err := e.db.CountStageSuccesses(ctx, book.ID, string(state.Retranscribing))
+	if err != nil {
+		return false, err
+	}
+	if rounds == 0 {
 		if plan := qa.MechanicalPlan(rep); plan != nil && plan.RetranscribeNeeded() {
-			if err := qa.WritePlan(workDir, plan); err != nil {
+			if err := qa.WritePlan(book.WorkDir, plan); err != nil {
 				return false, fmt.Errorf("qa_sweep: write the mechanical plan: %w", err)
 			}
 			if r.Note != nil {
@@ -214,33 +199,6 @@ func readalongTimeline(m audio.Manifest, files []ReadalongFile) (readalong.Timel
 	return readalong.Compose(m.Style, chs, af)
 }
 
-// transcriptLoops are the loops the transcript check finds in the transcripts the
-// alignment reads (a cross-segment 6-gram loop's first to last second), as heal
-// windows: the mechanical round writes no tail verdicts, and a re-align reuses the
-// kept transcripts, loops and all. A check that can't run heals nothing extra.
-func (e *Executor) transcriptLoops(book store.Book, m audio.Manifest, tl readalong.Timeline) []readalong.Window {
-	hits, err := qa.CrossSegment(qa.Input{WorkDir: book.WorkDir, Durations: chapterDurations(m.Chapters)})
-	if err != nil {
-		e.log.Warn("readalong_aligning: the transcript check couldn't run; healing without its loops", "book", book.ID, "err", err)
-		return nil
-	}
-	return readalongLoopWindows(hits, tl)
-}
-
-// readalongLoopWindows are the located cross-segment loops as windows.
-func readalongLoopWindows(hits []qa.CrossSegmentHit, tl readalong.Timeline) []readalong.Window {
-	var out []readalong.Window
-	for _, h := range hits {
-		if h.FirstSec == nil || h.LastSec == nil {
-			continue
-		}
-		if w, ok := tl.LoopWindow(h.Chapter, *h.FirstSec, *h.LastSec); ok {
-			out = append(out, w)
-		}
-	}
-	return out
-}
-
 // readalongAlign is the readalong_aligning stage.
 func (e *Executor) readalongAlign(ctx context.Context, book store.Book, r scheduler.StageReport) (scheduler.StageResult, error) {
 	ffmpeg, _ := e.ensureTools()
@@ -270,6 +228,7 @@ func (e *Executor) readalongAlign(ctx context.Context, book store.Book, r schedu
 		rep.Resplit = n
 	}
 
+	var loops []readalong.Window
 	words := map[int][]readalong.Word{}
 	for _, c := range manifest.Chapters {
 		tr, err := transcript.ReadNormalized(filepath.Join(book.WorkDir, transcript.JSONDir), c.Chapter)
@@ -280,6 +239,11 @@ func (e *Executor) readalongAlign(ctx context.Context, book store.Book, r schedu
 			return scheduler.StageResult{}, fmt.Errorf("readalong_aligning: read chapter %d's transcript: %w", c.Chapter, err)
 		}
 		words[c.Chapter] = transcriptWords(tr)
+		for _, span := range qa.LoopSpans(tr) {
+			if w, ok := tl.LoopWindow(c.Chapter, span[0], span[1]); ok {
+				loops = append(loops, w)
+			}
+		}
 	}
 
 	epub, err := readalong.OpenEPUB(req.Ebook)
@@ -300,13 +264,11 @@ func (e *Executor) readalongAlign(ctx context.Context, book store.Book, r schedu
 	if err != nil {
 		return scheduler.StageResult{}, fmt.Errorf("readalong_aligning: read the tail verdicts: %w", err)
 	}
-	var loops []readalong.Window
 	for ch, v := range verdicts {
 		if w, ok := tl.ChapterWindow(ch, v.ClipStart, v.ClipEnd); ok {
 			loops = append(loops, w)
 		}
 	}
-	loops = append(loops, e.transcriptLoops(book, manifest, tl)...)
 	wins := tl.HealWindows(first, loops)
 	rep.HealLoopWindows = len(loops)
 	patches, err := e.healWindows(ctx, book, r, tl, wins, ffmpeg)
@@ -342,7 +304,7 @@ func (e *Executor) readalongAlign(ctx context.Context, book store.Book, r schedu
 		return scheduler.StageResult{}, fmt.Errorf("readalong_aligning: onset snap: %w", err)
 	}
 
-	asrName := readASRProvenance(book.WorkDir).Model
+	asrName := readASRProvenance(book.WorkDir).decodedModel()
 	m, err := readalong.Build(res, text, tl, req.Ebook, readalong.Generator{
 		Version: req.Version, ASR: path.Base(filepath.ToSlash(asrName)), Now: time.Now(),
 	})

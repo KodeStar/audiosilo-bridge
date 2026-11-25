@@ -36,6 +36,9 @@ func TestChaptersGoal(t *testing.T) {
 	if err := db.SetBookState(ctx, b.ID, "done", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.SetProgress(ctx, b.ID, "chapter_detecting", 35, 36); err != nil {
+		t.Fatal(err)
+	}
 	if got, err := db.FinishedBooks(ctx); err != nil || len(got) != 0 {
 		t.Fatalf("finished = %+v, %v; a chapters book has no characters to count", got, err)
 	}
@@ -56,6 +59,9 @@ func TestChaptersGoal(t *testing.T) {
 	}
 	if g, err := db.GetGenerateBook(ctx, 7); err != nil || g.BookID == nil || *g.BookID != b.ID || g.EndedAt != "" {
 		t.Fatalf("the job's mapping = %+v, %v", g, err)
+	}
+	if p, err := db.ListProgress(ctx, b.ID); err != nil || len(p) != 0 {
+		t.Fatalf("continued progress %v: %v", p, err)
 	}
 	// Denied: a whole-pipeline book (this one now) isn't a chapters book.
 	if err := db.SetBookState(ctx, b.ID, "done", "", "", ""); err != nil {
@@ -267,6 +273,9 @@ func TestContinueReadalong(t *testing.T) {
 		t.Fatalf("a book a stage may run = %v, want ErrNotContinuable", err)
 	}
 	parked := mk("/lib/B", string(state.SpellingResearch), string(state.StatusNeedsAttention))
+	if err := db.SetProgress(ctx, parked.ID, string(state.ReadalongAligning), 35, 36); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.ContinueReadalong(ctx, parked.ID, string(state.Done), string(state.ReadalongAligning), "", job(2)); !errors.Is(err, ErrNotContinuable) {
 		t.Fatalf("not where the caller looked = %v, want ErrNotContinuable", err)
 	}
@@ -276,6 +285,10 @@ func TestContinueReadalong(t *testing.T) {
 	if err := db.ContinueReadalong(ctx, parked.ID, string(state.SpellingResearch), string(state.ReadalongAligning), "", job(2)); err != nil {
 		t.Fatal(err)
 	}
+	if p, err := db.ListProgress(ctx, parked.ID); err != nil || len(p) != 0 {
+		t.Fatalf("continued progress %v: %v", p, err)
+	}
+
 	got, _ := db.GetBook(ctx, parked.ID)
 	if got.Goal != "" || got.State != string(state.ReadalongAligning) || got.Status != "" || got.Error != "" ||
 		got.Kind != "audio" || got.Series != "S" || got.Title != "T" {

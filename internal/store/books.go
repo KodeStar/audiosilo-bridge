@@ -731,6 +731,9 @@ func (db *DB) ContinueChapters(ctx context.Context, id int64, from, to string, n
 	} else if err != nil {
 		return err
 	}
+	if err := clearProgress(ctx, tx, id); err != nil {
+		return err
+	}
 	if job.ServerJobID != 0 {
 		job.BookID = &id
 		if err := putGenerateBook(ctx, tx, job); err != nil {
@@ -738,6 +741,13 @@ func (db *DB) ContinueChapters(ctx context.Context, id int64, from, to string, n
 		}
 	}
 	return tx.Commit()
+}
+
+// clearProgress drops a continued book's stage counters: the earlier run's (35 of
+// 36, say) would show against the stage it goes on at until that stage reports.
+func clearProgress(ctx context.Context, tx *sql.Tx, id int64) error {
+	_, err := tx.ExecContext(ctx, `DELETE FROM progress WHERE book_id=?`, id)
+	return err
 }
 
 // ContinueReadalong turns an audio engine book that stopped at from into a
@@ -769,6 +779,9 @@ func (db *DB) ContinueReadalong(ctx context.Context, id int64, from, to, goal st
 	if err := checkAffected(res, err); errors.Is(err, ErrNotFound) {
 		return ErrNotContinuable
 	} else if err != nil {
+		return err
+	}
+	if err := clearProgress(ctx, tx, id); err != nil {
 		return err
 	}
 	if fresh {

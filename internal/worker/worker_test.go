@@ -224,6 +224,7 @@ func TestWorkerSendsKeptResults(t *testing.T) {
 	task, _ := s.hub.Claim(context.Background(), id, 5*time.Second)
 	if task == nil {
 		t.Fatal("no task")
+		return
 	}
 	sp, _ := openSpool(filepath.Join(data, "spool"))
 	raw := filepath.Join(sp.rawDir(), "x.json")

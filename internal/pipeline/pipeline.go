@@ -34,6 +34,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -402,6 +403,13 @@ func (e *Executor) ToolPaths() (ffmpeg, ffprobe string) {
 	return e.ffmpeg, e.ffprobe
 }
 
+// RemoteASR reports which route would handle a new segment now.
+func (e *Executor) RemoteASR() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.asr.Backend != nil && e.asr.Backend.ID() == asr.IDWorker
+}
+
 // ensureASR re-selects a backend when the frozen one is unavailable, adopting a
 // now-available result for this and future runs. Detect is cheap (PATH/stat).
 func (e *Executor) ensureASR(ctx context.Context) ASRSetup {
@@ -574,12 +582,25 @@ const asrInfoName = "asr.json"
 // asrProvenance is the persisted backend/model/language the asr stage used, plus
 // the manifest fingerprint that gates a resume against a changed edition and the
 // chapters an ASR run accepted as legitimately empty.
+//
+// Backend, Model and Language are the run's configured settings, the ones
+// KeptTranscription compares with a new run's: a worker's decode never changes
+// them, or a book a worker helped with would never be reused. What decoded each
+// segment is in Segments (Windows once chapter detection has renumbered them).
 type asrProvenance struct {
-	Backend       string `json:"backend"`
-	Model         string `json:"model"`
-	Language      string `json:"language"`
-	ManifestSHA   string `json:"manifest_sha,omitempty"`
-	EmptyChapters []int  `json:"empty_chapters,omitempty"`
+	Backend       string             `json:"backend"`
+	Model         string             `json:"model"`
+	Language      string             `json:"language"`
+	ManifestSHA   string             `json:"manifest_sha,omitempty"`
+	EmptyChapters []int              `json:"empty_chapters,omitempty"`
+	Segments      map[int]asr.Decode `json:"segments,omitempty"`
+	// Detection synthesizes new chapters from the original window decodes.
+	Windows map[int]asr.Decode `json:"windows,omitempty"`
+	// SettingsChanged: a resumed run decoded segments under a configured model or
+	// language other than the one above (changed while the earlier raws were
+	// kept), so no one setting describes the transcript and KeptTranscription
+	// never reuses it.
+	SettingsChanged bool `json:"settings_changed,omitempty"`
 }
 
 // inspect probes the book's source audio, writes probe.json + manifest.json, and
@@ -838,13 +859,6 @@ func (e *Executor) asrStage(ctx context.Context, book store.Book, r scheduler.St
 	if err := os.MkdirAll(rawDir, 0o750); err != nil {
 		return scheduler.StageResult{}, err
 	}
-	// Record the fingerprint at stage START so a crash mid-loop still lets a later
-	// resume detect a subsequent manifest change.
-	if err := writeASRProvenance(book.WorkDir, asrProvenance{
-		Backend: setup.Backend.ID(), Model: setup.Model, Language: setup.Language, ManifestSHA: fp,
-	}); err != nil {
-		return scheduler.StageResult{}, fmt.Errorf("asr: write provenance: %w", err)
-	}
 	total := len(manifest.Chapters)
 	// Progress baseline: count the chapters already transcribed on entry (a resume) so
 	// the FIRST report reflects prior work and an already-complete chapter never ticks
@@ -857,16 +871,34 @@ func (e *Executor) asrStage(ctx context.Context, book store.Book, r scheduler.St
 			completed++
 		}
 	}
+	// Record the fingerprint at stage START so a crash mid-loop still lets a later
+	// resume detect a subsequent manifest change. With no raw kept (a first run, or
+	// the transcript tier purged, which keeps asr.json) nothing recorded describes
+	// the transcript this run makes: its settings are the configured ones.
+	prov := prior
+	if prov.Backend == "" || completed == 0 {
+		prov.Backend, prov.Model, prov.Language = setup.Backend.ID(), setup.Model, setup.Language
+	}
+	if completed == 0 {
+		prov.SettingsChanged, prov.Segments, prov.EmptyChapters = false, nil, nil
+	}
+	prov.ManifestSHA = fp
+	if prov.Segments == nil {
+		prov.Segments = make(map[int]asr.Decode)
+	}
+	if err := writeASRProvenance(book.WorkDir, prov); err != nil {
+		return scheduler.StageResult{}, fmt.Errorf("asr: write provenance: %w", err)
+	}
+	// Publish a completed raw only after its provenance is durable. A crash
+	// between the two writes leaves a segment to decode again on resume.
+	pending := filepath.Join(rawDir, ".pending")
+	if err := os.MkdirAll(pending, 0o750); err != nil {
+		return scheduler.StageResult{}, err
+	}
 	done := completed
 	if r.Progress != nil {
 		r.Progress(done, total)
 	}
-	// Time only the transcription loop (backend selection, model/binary download via
-	// readyASR, and the provenance write are excluded), and count only chapters this run
-	// actually transcribes (done - completed), so the learned rate is not skewed by a
-	// resume or a first-run model fetch.
-	asrStart := time.Now()
-	var emptyChapters []int
 	for _, ch := range manifest.Chapters {
 		if err := ctx.Err(); err != nil {
 			return scheduler.StageResult{}, err // clean pause/cancel/shutdown; completed chapters remain
@@ -888,12 +920,31 @@ func (e *Executor) asrStage(ctx context.Context, book store.Book, r scheduler.St
 		if !fsutil.IsFile(flac) {
 			return scheduler.StageResult{}, fmt.Errorf("asr: chapter %d FLAC missing (%s); split must run first", ch.Chapter, flac)
 		}
-		empty, err := e.transcribeChapter(ctx, r, setup, flac, rawDir, rawPath, ch)
+		var decoded asr.Decode
+		pendingRaw := filepath.Join(pending, transcript.RawName(ch.Chapter))
+		empty, err := e.transcribeChapter(ctx, r, setup, flac, pending, pendingRaw, ch, &decoded)
 		if err != nil {
 			return scheduler.StageResult{}, err
 		}
+		// The configured settings changed since the kept raws were made (the stage
+		// start took the configured ones when none were kept): the transcript is
+		// mixed (a worker decodes with its own model, but the configured language).
+		if settingDiffers(prov.Language, setup.Language) || (!decoded.Remote && settingDiffers(prov.Model, setup.Model)) {
+			prov.SettingsChanged = true
+		}
+		prov.Segments[ch.Chapter] = decoded
+		prov.EmptyChapters = slices.DeleteFunc(prov.EmptyChapters, func(n int) bool { return n == ch.Chapter })
 		if empty {
-			emptyChapters = append(emptyChapters, ch.Chapter)
+			prov.EmptyChapters = append(prov.EmptyChapters, ch.Chapter)
+		}
+		if err := writeASRProvenance(book.WorkDir, prov); err != nil {
+			return scheduler.StageResult{}, err
+		}
+		if err := os.Rename(pendingRaw, rawPath); err != nil {
+			return scheduler.StageResult{}, err
+		}
+		if r.ASRDecoded != nil {
+			r.ASRDecoded(decoded.Remote, ch.Duration, decoded.Seconds)
 		}
 		// Freeze the raw output: it is durable audit evidence the sanitize stage only
 		// reads, so make it read-only (immutability guard). It is a non-secret
@@ -907,14 +958,9 @@ func (e *Executor) asrStage(ctx context.Context, book store.Book, r scheduler.St
 			r.Progress(done, total)
 		}
 	}
-	asrSeconds := time.Since(asrStart).Seconds()
-
-	if err := writeASRProvenance(book.WorkDir, asrProvenance{
-		Backend: setup.Backend.ID(), Model: setup.Model, Language: setup.Language,
-		ManifestSHA: fp, EmptyChapters: emptyChapters,
-	}); err != nil {
-		return scheduler.StageResult{}, fmt.Errorf("asr: write provenance: %w", err)
-	}
+	// Every raw is published: what is left in .pending is a backend's side output,
+	// or an attempt a crash cut short.
+	_ = os.RemoveAll(pending)
 	e.accountScratch(ctx, book)
 
 	result := scheduler.StageResult{
@@ -922,11 +968,10 @@ func (e *Executor) asrStage(ctx context.Context, book store.Book, r scheduler.St
 		// are found in them next (chapter_detecting).
 		Windowed: manifest.Style == audio.StyleWindows,
 		Metrics: metrics(map[string]any{
-			"backend":       setup.Backend.ID(),
-			"model":         setup.Model,
+			"backend":       prov.Backend,
+			"model":         prov.Model,
 			"chapter_count": total,
 		}),
-		RateSample: rateSample(done-completed, asrSeconds),
 	}
 	if err := scheduler.WriteSentinel(book.WorkDir, string(state.ASR), result); err != nil {
 		return scheduler.StageResult{}, err
@@ -975,7 +1020,7 @@ func asrDecodeTimeoutMsg(chapter int, bound time.Duration) string {
 // The two retries are independent: an empty NoContext decode still gets its one empty-retry.
 // Every decode attempt starts from a clean rawPath. A genuine transcription/completeness
 // error is returned as-is.
-func (e *Executor) transcribeChapter(ctx context.Context, r scheduler.StageReport, setup ASRSetup, flac, rawDir, rawPath string, ch audio.Chapter) (empty bool, err error) {
+func (e *Executor) transcribeChapter(ctx context.Context, r scheduler.StageReport, setup ASRSetup, flac, rawDir, rawPath string, ch audio.Chapter, decoded *asr.Decode) (empty bool, err error) {
 	chapter := ch.Chapter
 	bound := asrChapterDecodeBound(ch.Duration)
 	// noContext escalates on a decode timeout (context-conditioning drives the collapse we
@@ -991,11 +1036,13 @@ func (e *Executor) transcribeChapter(ctx context.Context, r scheduler.StageRepor
 		// InitialPrompt is intentionally empty: verified spellings come from the spelling
 		// stage. Seeding a guess would make a wrong spelling recur.
 		job := asr.Job{Audio: flac, OutDir: rawDir, Chapter: chapter, Language: setup.Language, NoContext: noContext,
-			Start: ch.Start, Duration: ch.Duration}
+			Start: ch.Start, Duration: ch.Duration, Result: decoded}
 		// Bound this decode: a repetition-collapse decode would otherwise run for hours. A
 		// slow chapter has no mid-chapter progress to report, so the heartbeat ticker keeps
 		// the supervisor's stale-heartbeat/no_progress detectors from killing a healthy decode
 		// within the bound.
+		*decoded = asr.Decode{Backend: setup.Backend.ID(), Device: setup.Cap.Device, Model: setup.Model}
+		started := time.Now()
 		dctx, cancel := context.WithTimeout(ctx, bound)
 		terr := transcribeWithHeartbeat(dctx, r, "asr", chapter, func() error {
 			return setup.Backend.Transcribe(dctx, job)
@@ -1020,6 +1067,9 @@ func (e *Executor) transcribeChapter(ctx context.Context, r scheduler.StageRepor
 				return false, scheduler.ParkWithCode(state.ParkASRDecodeTimeout, asrDecodeTimeoutMsg(chapter, bound))
 			}
 			return false, fmt.Errorf("asr: transcribe chapter %d: %w", chapter, terr)
+		}
+		if !decoded.Remote && decoded.Seconds == 0 {
+			decoded.Seconds = time.Since(started).Seconds()
 		}
 		if !rawComplete(rawPath) {
 			return false, fmt.Errorf("asr: chapter %d produced an incomplete transcript", chapter)
@@ -1103,6 +1153,9 @@ func (e *Executor) sanitize(ctx context.Context, book store.Book, r scheduler.St
 			return scheduler.StageResult{}, fmt.Errorf("sanitize: read chapter %d: %w", chNum, err)
 		}
 		meta := transcript.Meta{Chapter: chNum, Backend: prov.Backend, Model: prov.Model, Language: prov.Language}
+		if segment, ok := prov.Segments[chNum]; ok {
+			meta.Backend, meta.Model = segment.Backend, segment.Model
+		}
 		if err := deriveChapterLayers(book.WorkDir, raw, meta); err != nil {
 			return scheduler.StageResult{}, fmt.Errorf("sanitize: %w", err)
 		}
@@ -1170,7 +1223,7 @@ func (e *Executor) qaSweep(ctx context.Context, book store.Book, r scheduler.Sta
 	}
 	retranscribe := false
 	if book.Goal == state.GoalReadalong {
-		if retranscribe, err = readalongSweep(book.WorkDir, rep, r); err != nil {
+		if retranscribe, err = e.readalongSweep(ctx, book, rep, r); err != nil {
 			return scheduler.StageResult{}, err
 		}
 	}
@@ -1270,6 +1323,29 @@ func writeASRProvenance(workDir string, p asrProvenance) error {
 		return err
 	}
 	return fsutil.WriteFileAtomic(filepath.Join(workDir, asrInfoName), append(out, '\n'), 0o644)
+}
+
+// decodedModel names the model that decoded the transcripts: the one every
+// recorded segment shares, "mixed" when they differ, else the configured model.
+func (p asrProvenance) decodedModel() string {
+	segs := p.Segments
+	if len(segs) == 0 {
+		segs = p.Windows
+	}
+	model := ""
+	for _, seg := range segs {
+		switch {
+		case seg.Model == "" || seg.Model == model:
+		case model == "":
+			model = seg.Model
+		default:
+			return "mixed"
+		}
+	}
+	if model == "" {
+		return p.Model
+	}
+	return model
 }
 
 // readASRProvenance loads the asr.json provenance, returning a zero value (blank

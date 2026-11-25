@@ -128,12 +128,13 @@ func parkExtra(code, retryAt string) map[string]any {
 
 // view is what a poll of the engine book found, for describe.
 type view struct {
-	book     store.Book
-	progress []store.Progress
-	eta      int64
-	hasETA   bool
-	costUSD  float64
-	source   string
+	waitingASR bool
+	book       store.Book
+	progress   []store.Progress
+	eta        int64
+	hasETA     bool
+	costUSD    float64
+	source     string
 }
 
 // describe turns the engine book into the job's progress (contract section 1):
@@ -142,6 +143,10 @@ type view struct {
 func describe(v view) jobs.Progress {
 	b := v.book
 	st := state.State(b.State)
+	extra := map[string]any{"stage": b.State, "source": v.source, "cost_usd": Cents(v.costUSD)}
+	if v.waitingASR {
+		return jobs.Progress{Step: stepWaiting, Code: jobs.SayASRTurnWait, Extra: extra}
+	}
 	pr := jobs.Progress{Step: b.State, Message: stageLabels[st]}
 	if pr.Message == "" {
 		pr.Message = b.State
@@ -155,7 +160,6 @@ func describe(v view) jobs.Progress {
 			pr.Message = fmt.Sprintf("%s (%d of %d)", pr.Message, p.Done, p.Total)
 		}
 	}
-	extra := map[string]any{"stage": b.State, "source": v.source, "cost_usd": Cents(v.costUSD)}
 	switch state.Status(b.Status) {
 	case state.StatusNeedsAttention:
 		extra["park"] = parkExtra(b.ParkCode, b.RetryAt)

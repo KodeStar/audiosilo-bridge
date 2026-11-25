@@ -16,6 +16,7 @@ import (
 //
 // Placeholders are i18next's ({{name}}), each filled from Progress.Params.
 const (
+	SayASRTurnWait           = "asr_turn_wait"
 	SayStarting              = "starting"
 	SayFinished              = "finished"
 	SayEngineStarting        = "engine_starting"
@@ -89,6 +90,7 @@ const (
 
 // phrases are the codes' English sentences, which Progress.Text fills in.
 var phrases = map[string]string{
+	SayASRTurnWait:           "Waiting for a turn to use speech recognition",
 	SayStarting:              "Starting",
 	SayFinished:              "Finished",
 	SayEngineStarting:        "Waiting for the engine to start",

@@ -56,21 +56,11 @@ type EPUB struct {
 // OpenEPUB reads the EPUB at path (a regular file of at most MaxEbookBytes),
 // refuses DRM, and parses its container and OPF.
 func OpenEPUB(p string) (*EPUB, error) {
-	f, err := os.Open(p) //nolint:gosec // the caller resolved it through the checked mapping
+	f, _, err := openEbookFile(p)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
-	info, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if !info.Mode().IsRegular() {
-		return nil, ErrNotEPUB
-	}
-	if info.Size() > MaxEbookBytes {
-		return nil, ErrEbookTooBig
-	}
 	raw, err := io.ReadAll(io.LimitReader(f, MaxEbookBytes+1))
 	if err != nil {
 		return nil, err
@@ -81,14 +71,54 @@ func OpenEPUB(p string) (*EPUB, error) {
 	return ReadEPUB(raw)
 }
 
+// CheckEPUB checks the zip directory, rights, container and package before ASR.
+// The alignment stage reads and hashes the complete ebook when it needs its text.
+func CheckEPUB(p string) error {
+	f, size, err := openEbookFile(p)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	_, err = parseEPUB(f, size)
+	return err
+}
+
+func openEbookFile(p string) (*os.File, int64, error) {
+	f, err := os.Open(p) //nolint:gosec // the caller resolved it through the checked mapping
+	if err != nil {
+		return nil, 0, err
+	}
+	info, err := f.Stat()
+	switch {
+	case err != nil:
+	case !info.Mode().IsRegular():
+		err = ErrNotEPUB
+	case info.Size() > MaxEbookBytes:
+		err = ErrEbookTooBig
+	default:
+		return f, info.Size(), nil
+	}
+	_ = f.Close()
+	return nil, 0, err
+}
+
 // ReadEPUB is OpenEPUB over the file's bytes.
 func ReadEPUB(raw []byte) (*EPUB, error) {
-	zr, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
+	e, err := parseEPUB(bytes.NewReader(raw), int64(len(raw)))
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(raw)
+	e.SHA256 = hex.EncodeToString(sum[:])
+	return e, nil
+}
+
+func parseEPUB(r io.ReaderAt, size int64) (*EPUB, error) {
+	zr, err := zip.NewReader(r, size)
 	if err != nil {
 		return nil, ErrNotEPUB
 	}
-	sum := sha256.Sum256(raw)
-	e := &EPUB{Size: int64(len(raw)), SHA256: hex.EncodeToString(sum[:]), members: map[string]*zip.File{}}
+	e := &EPUB{Size: size, members: map[string]*zip.File{}}
 	for _, m := range zr.File {
 		e.members[m.Name] = m
 	}

@@ -447,6 +447,9 @@ func TestTailRateFlagsCrammedTailOthersMiss(t *testing.T) {
 	words[len(words)-1] = wd("art", 100.15, 100.16)
 	doc := tailDoc(3, words)
 
+	if noise := ReadalongNoise(doc.t); noise < tailWords {
+		t.Fatalf("fast-tail noise %d", noise)
+	}
 	tails := tailRateOutliers([]chapterDoc{doc})
 	if len(tails) != 1 {
 		t.Fatalf("tail-rate should flag, got %+v", tails)
@@ -664,23 +667,25 @@ func TestRunAndWriteReport(t *testing.T) {
 	}
 }
 
-// CrossSegment (the read-along's heal windows) is Run's cross-segment detector alone.
-func TestCrossSegmentMatchesRun(t *testing.T) {
-	work := t.TempDir()
-	jsonDir := filepath.Join(work, transcript.JSONDir)
-	writeNormalized(t, jsonDir, transcript.Transcript{Chapter: 1, Schema: transcript.Schema,
-		Segments: []transcript.Segment{seg(0, 10, 20, " "+distinctTokens(30)+" "+strings.Repeat("he ran to the old house ", 5))}})
-	in := Input{WorkDir: work, Durations: map[int]float64{1: 1000}}
-	rep, err := Run(in)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
+func TestReadalongLoopSpans(t *testing.T) {
+	refrain := "sang the chorus once more today "
+	tr := transcript.Transcript{Segments: []transcript.Segment{
+		seg(0, 0, 10, strings.Repeat("many words in the first loop ", 6)),
+		seg(1, 10, 20, distinctTokens(20)),
+		seg(2, 20, 35, strings.Repeat("different words in the second loop ", 6)),
+	}}
+	for i := range 8 {
+		tr.Segments = append(tr.Segments, seg(i+3, float64(50+i*60), float64(55+i*60), fmt.Sprintf("unique%d ", i)+refrain))
 	}
-	hits, err := CrossSegment(in)
-	if err != nil || len(hits) != 1 || !reflect.DeepEqual(hits, rep.CrossSegment) {
-		t.Errorf("CrossSegment = %+v, %v; want Run's %+v", hits, err, rep.CrossSegment)
+	if got := LoopSpans(tr); !reflect.DeepEqual(got, [][2]float64{{0, 10}, {20, 35}}) {
+		t.Fatalf("loop spans %v", got)
 	}
-	if _, err := CrossSegment(Input{WorkDir: t.TempDir()}); err == nil {
-		t.Error("CrossSegment should error when transcripts-json/ is absent")
+}
+
+func TestReadalongNoiseShortRepeatedRun(t *testing.T) {
+	tr := transcript.Transcript{Segments: []transcript.Segment{seg(0, 0, 1, "Once again"), seg(1, 1, 2, "Once again"), seg(2, 2, 3, "Once again")}}
+	if got := ReadalongNoise(tr); got != 4 {
+		t.Fatalf("noise %d", got)
 	}
 }
 
@@ -730,9 +735,9 @@ func TestRunLoudErrors(t *testing.T) {
 	})
 }
 
-// LoopWords counts the words a 6-gram repeated 5 or more times covers: a run of
+// loopWords counts the words a 6-gram repeated 5 or more times covers: a run of
 // one word, a looped phrase, none in prose, and a phrase said four times only.
-func TestLoopWords(t *testing.T) {
+func TestLoopWordsCount(t *testing.T) {
 	prose := "Buck did not read the newspapers, or he would have known that trouble was brewing."
 	for _, c := range []struct {
 		name string
@@ -742,10 +747,12 @@ func TestLoopWords(t *testing.T) {
 		{"prose", prose, 0},
 		{"a one-word loop", prose + strings.Repeat(" buck,", 12), 12},
 		{"a phrase looped", prose + strings.Repeat(" and the dogs ran on", 6), 30},
+		// "don't" is two tokens to the detector but one of the text's words.
+		{"a looped contraction", prose + strings.Repeat(" I don't know what to do,", 6), 36},
 		{"a phrase said four times", prose + strings.Repeat(" and the dogs ran on", 4), 0},
 		{"empty", "", 0},
 	} {
-		if got := LoopWords(c.text); got != c.want {
+		if got := loopWords(c.text); got != c.want {
 			t.Errorf("%s: %d, want %d", c.name, got, c.want)
 		}
 	}

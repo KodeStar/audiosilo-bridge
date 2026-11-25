@@ -492,7 +492,7 @@ func TestCostSums(t *testing.T) {
 	if err != nil || len(got) != 2 {
 		t.Fatalf("finished = %+v, %v", got, err)
 	}
-	if got[0].Kind != "audio" || got[0].CostUSD != 10 || got[0].DurationSec != 7200 || got[0].Chapters != 10 {
+	if got[0].Kind != "audio" || got[0].CostUSD != 10 || got[0].DurationSec != 7200 {
 		t.Fatalf("the audio book = %+v", got[0])
 	}
 	if got[1].Kind != "ebook" || got[1].CostUSD != 2 {

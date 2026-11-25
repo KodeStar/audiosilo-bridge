@@ -239,6 +239,7 @@ func TestHeartbeatAdopts(t *testing.T) {
 	task, _ := h.Claim(ctx, a, 5*time.Second)
 	if task == nil {
 		t.Fatal("no task")
+		return
 	}
 	if _, err := h.Heartbeat(b, task.ID, task.Attempt); !errors.Is(err, workerproto.ErrNotHeld) {
 		t.Fatalf("another worker's beat = %v", err)

@@ -78,6 +78,8 @@ func TestPurgeRemovesChaptersKeepsDurables(t *testing.T) {
 	writeFile(t, filepath.Join(work, audio.SplitSourceDir, "source.m4b"), 4096)
 	writeFile(t, filepath.Join(work, "_runs", "fact_pass-a01", "out", "x.md"), 300)
 	writeFile(t, filepath.Join(work, "clips", "t002.flac"), 400)
+	writeFile(t, filepath.Join(work, "readalong/heal/clip.flac"), 200)
+	writeFile(t, filepath.Join(work, "readalong/map.json"), 20)
 	writeFile(t, filepath.Join(work, "retranscribe", "ch002.json"), 500)
 	writeFile(t, filepath.Join(work, audio.ProbeName), 50)
 	writeFile(t, filepath.Join(work, audio.ManifestName), 80)
@@ -86,15 +88,47 @@ func TestPurgeRemovesChaptersKeepsDurables(t *testing.T) {
 	if err := Purge(root, work, state.KindAudio); err != nil {
 		t.Fatalf("Purge: %v", err)
 	}
-	for _, gone := range []string{audio.ChaptersDir, audio.SplitSourceDir, "_runs", "clips", "retranscribe"} {
+	for _, gone := range []string{audio.ChaptersDir, audio.SplitSourceDir, "_runs", "clips", "retranscribe", "readalong/heal"} {
 		if _, err := os.Stat(filepath.Join(work, gone)); !os.IsNotExist(err) {
 			t.Errorf("Purge did not remove reclaimable %s/", gone)
 		}
 	}
-	for _, keep := range []string{audio.ProbeName, audio.ManifestName, "transcripts-raw/ch001.json"} {
+	for _, keep := range []string{audio.ProbeName, audio.ManifestName, "transcripts-raw/ch001.json", "readalong/map.json"} {
 		if _, err := os.Stat(filepath.Join(work, keep)); err != nil {
 			t.Errorf("Purge removed a durable it must keep: %s (%v)", keep, err)
 		}
+	}
+}
+
+func TestPurgeConfinesHealDirectory(t *testing.T) {
+	root := t.TempDir()
+	work := filepath.Join(root, "book")
+	outside := t.TempDir()
+	clip := filepath.Join(outside, "heal", "clip.flac")
+	writeFile(t, clip, 100)
+	if err := os.Mkdir(work, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(work, "readalong")); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(work, "retranscribe", "ch002.json"), 50)
+	if err := Purge(root, work, state.KindAudio); err == nil {
+		t.Fatal("outside heal directory accepted")
+	}
+	// The refused directory doesn't keep the ones after it.
+	if _, err := os.Stat(filepath.Join(work, "retranscribe")); !os.IsNotExist(err) {
+		t.Fatalf("retranscribe/ kept after the refusal: %v", err)
+	}
+	alias := filepath.Join(root, "linked-book")
+	if err := os.Symlink(outside, alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := Purge(root, alias, state.KindAudio); err == nil {
+		t.Fatal("outside book accepted")
+	}
+	if _, err := os.Stat(clip); err != nil {
+		t.Fatal(err)
 	}
 }
 

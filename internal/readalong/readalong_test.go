@@ -1,9 +1,11 @@
 package readalong
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"slices"
@@ -15,9 +17,49 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/epubcfi"
 )
 
-// The expectations in these tables are the spike's Python (textnorm.py,
-// difflib) run on the same input.
+// Count bytes fetched through the same random-access parser used by CheckEPUB.
+type countedReader struct {
+	io.ReaderAt
+	bytes int
+}
 
+func (r *countedReader) ReadAt(p []byte, off int64) (int, error) {
+	n, err := r.ReaderAt.ReadAt(p, off)
+	r.bytes += n
+	return n, err
+}
+
+func TestEPUBPreflightSkipsMedia(t *testing.T) {
+	src, err := zip.OpenReader("../epubcfi/testdata/synthetic.epub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = src.Close() }()
+	var book bytes.Buffer
+	zw := zip.NewWriter(&book)
+	for _, f := range src.File {
+		if err := zw.Copy(f); err != nil {
+			t.Fatal(err)
+		}
+	}
+	media, err := zw.CreateHeader(&zip.FileHeader{Name: "illustration.jpg", Method: zip.Store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := media.Write(make([]byte, 1<<20)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reader := &countedReader{ReaderAt: bytes.NewReader(book.Bytes())}
+	e, err := parseEPUB(reader, int64(book.Len()))
+	if err != nil || len(e.Spine) == 0 || reader.bytes >= 1<<20 {
+		t.Fatalf("preflight read %d bytes: %v", reader.bytes, err)
+	}
+}
+
+// The expectations in these tables come from the spike's textnorm.py and difflib.
 func TestTokens(t *testing.T) {
 	cases := []struct {
 		in   string
@@ -382,6 +424,8 @@ func TestHealWindowsTrailingRun(t *testing.T) {
 		// Denied: no text to place, a sentence aligned at the chapter's very end,
 		// and a section with nothing aligned at all (no sentence to start from).
 		{"no text", Result{Sections: []SectionResult{sec(100, 0)}}, nil},
+		{"just into the next chapter", Result{Sections: []SectionResult{sec(1000.25, 300)}},
+			[]Window{{File: 1, Start: 0, End: 40.25, Gaps: 1}}},
 		{"at the chapter's end", Result{Sections: []SectionResult{sec(1000, 300)}}, nil},
 		{"nothing aligned", Result{Sections: []SectionResult{{Gaps: []Gap{{Start: 0, End: 400}}}}}, nil},
 	} {
@@ -417,9 +461,16 @@ func TestHealWindowsLoopedChapterEnd(t *testing.T) {
 	if got := tl.HealWindows(res, []Window{loop}); !slices.Equal(got, want) {
 		t.Fatalf("with the loop: %+v, want %+v", got, want)
 	}
-	// Denied: a "loop" over 600 s (a phrase the book repeats), a chapter the book
-	// doesn't have, an empty range.
-	for _, r := range [][3]float64{{1, 10, 900}, {9, 10, 20}, {1, 30, 30}} {
+	long, ok := tl.LoopWindow(1, 10, 910)
+	if !ok {
+		t.Fatal("long loop lost")
+	}
+	got := tl.HealWindows(Result{}, []Window{long})
+	want = []Window{{File: 0, Start: 9.5, End: 460}, {File: 0, Start: 460, End: 910.5}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("long loop %+v", got)
+	}
+	for _, r := range [][3]float64{{9, 10, 20}, {1, 30, 30}} {
 		if w, ok := tl.LoopWindow(int(r[0]), r[1], r[2]); ok {
 			t.Errorf("loop window %v = %+v", r, w)
 		}
