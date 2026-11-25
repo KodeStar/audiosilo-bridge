@@ -3605,9 +3605,12 @@ internal/
             empty library sends one empty final call, so the server marks every
             title gone), then Enrich (enrich.go) for each matched book without an
             ASIN that no second title claimed (counted from the claims: contested), no preorder matched
-            (not out yet: another edition) and no pack matched to a book with no
-            range (importjob.SpanMismatch: the folder at its first volume's
-            position may hold that volume alone), PACED: one PUT per 200 ms, a 429 waits
+            (not out yet: another edition), that holds no other volume than the
+            title (importjob.OtherVolume: volume 1's bare title matches a numbered
+            sequel's folder, and with the sequel not owned would be its only
+            claim), and the spans agree (importjob.SpanMismatch).
+            A folder at the first volume's position may hold that volume alone.
+            Enrichment is PACED: one PUT per 200 ms, a 429 waits
             its Retry-After (else 1 to 2 s with jitter, doubling) and halves the pace (to 2 s at the
             slowest), and a wait over 1 min, 5 429s in a row or 10 min of
             enriching leave the rest to the next poll (enrich_deferred: those books
@@ -3701,8 +3704,10 @@ internal/
             waited out as the poll's enrichment does, enrichLimit, then enriched
             false). The books of the library the file could join (joinedBooks: at
             its own path, its folder or a disc set's folder above it) each get a
-            verdict, the BookMatcher picking that book for the title, not
-            SpanMismatch and not a twin (importjob.Twins, bridge#64); the book the rescan answers decides: one of those takes
+            verdict, the BookMatcher picking that book for the title, the
+            book holding no other volume (OtherVolume, the poll's rule), not
+            SpanMismatch and not a twin (importjob.Twins,
+            bridge#64); the book the rescan answers decides: one of those takes
             the ASIN only on its verdict, any other is new (the title's own, a pack
             placed as a pack included) and takes it, except the parent of a disc
             folder destination: the server joins a disc there only beside another
@@ -3854,11 +3859,20 @@ internal/
             use: ASIN exact first, then author + series + title tokens; a book in
             several series is a candidate under each; narrators join the person
             gate; an Audible range position "5-6" is matched at its start, so the
-            title's "Pack 3" never stands in for it; a book the listing gives a
-            range position (a pack's folder, LAM05-06 as "5-6") is matched only
-            by a range title starting where it does, tried before the single
-            volumes, never by a single volume, so it never takes a volume's ASIN
-            by enrichment), MatchScored (the match's
+            title's "Pack 3" never stands in for it. A listed range such as
+            LAM05-06 is eligible for a range starting at 5 or a pack Audible
+            identifies by title without a position. The latter needs a unique
+            best pack by name and person (two copies of one pack, Twins' key and
+            label alike, are no tie: the first is the match). Bounds in its title
+            must agree with the folder's range, or with those a labeled pack's
+            title or folder states. A single volume cannot claim a listed range
+            by words, nor a pack title a single volume. A book labeled a pack
+            only by its title or folder ("Four: A Divergent Collection") is
+            claimed by a single volume that scores better there than on any
+            single, unless it is the series-named opener. A range at 1 that
+            found no pack falls back for display to the best single that is not
+            the series-named opener (firstRangeFallback). An exact ASIN still
+            wins), MatchScored (the match's
             score, match.ScoreASIN for an ASIN), KeepBest
             (of the claims on one path the single best score keeps it; a tie keeps
             none, unless every tied claim is one WorkKey: folded title, folded
@@ -3873,15 +3887,26 @@ internal/
             whose position disagrees (Claim.Disagrees)), PositionAgrees(rec, b)
             (agrees/disagrees: rec's SeriesPosition as one number against b's
             position in rec's series, else b's main series' only when rec names no
-            series or that number is the folder code leading b's folder, its letters
-            the series' initials as the server reads one (folderCodeIs ports its
-            metadata.FolderCodePosition: a range, a third number joined on, letters
-            after the number and 0 are no single number; the listing
-            puts a folder code's number there, whatever that series is called; a
-            franchise's number says nothing, bridge#43); a range
+            series or the number is the folder code leading b's folder (bridge#43).
+            OtherVolume(rec, b) gates enrichment: the positions disagree, unless
+            both titles clean to the same words (one book numbered two ways:
+            "New Spring" 0 and 0.5), or b's title is rec's series name and a
+            number (1 to 3 digits) other than rec's position, or than 1 for a
+            series-named title with none, whatever b's series is called.
+            folderCodeIs follows the server's metadata.FolderCodePosition.
+            C marks a volume in any named series. Other codes use the series' initials.
+            DH06-2019 and DH06-07x read 6. A pack word or a doubled code
+            gives no single position. A proper range keeps both ends.
+            A franchise's number alone says nothing. A range
             or no number on either side is neither; MatchScored is not gated by
-            it), SpanMismatch (a range record on a book with no
-            range: no enrichment), Twins (the paths of books listed more than once:
+            it), SpanMismatch (protects ASIN enrichment across packs and single
+            volumes, including a range record's display fallback, and between
+            packs: a range record needs the folder's own range, not only its
+            start, and a positionless pack the range its title's bounds name,
+            else, stating none, a range opening the series; a labeled pack's
+            bounds come from its title or folder, and one stating none is taken
+            for the opening pack, so a title naming later bounds keeps off it),
+            Twins (the paths of books listed more than once:
             folded title, authors and series alike, positions by value; no
             enrichment by words), Planner (NewPlanner(books), Plan(rec, mode,
             template): destinations only, each item's RelPath, Kind
@@ -3897,9 +3922,9 @@ internal/
             names alone or the file's, a loose file at the root itself), its
             Siblings the group's others, each placed once, bridge#43; a template
             error keeps the item's Kind and Siblings; AuthorFolders reusing an
-            existing author folder spelling; the name is match.CleanTitle with
-            the series as the title opens it, article included (seriesAsTitled:
-            "The Orchard Cycle: Books 1-3" is "Books 1-3", not "The  - Books 1-3"); no per-record server query; whether
+            existing author folder spelling. match.CleanTitle takes the store's
+            series name directly and drops the adjoining article and separator
+            ("The Orchard Cycle: Books 1-3" gives "Books 1-3"). Whether
             the library holds a record is BookMatcher's). Run, the existence check
             and ApplyDestinations went in Phase 4b: audiblejob's import runs the
             steps. The manager's serverapi client went: the Bridge holds

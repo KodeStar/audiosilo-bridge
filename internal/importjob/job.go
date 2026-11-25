@@ -230,7 +230,7 @@ func (p *Planner) place(rec source.Record, mode placement.Mode, template string,
 	// Name by the clean book title - strip the series prefix and "(Book N)" /
 	// "(Unabridged)" fluff so a series book lands as "SHORTCODE## - The Ugly
 	// Truth", not "... - Diary of a Wimpy Kid: The Ugly Truth (Book 5)".
-	clean := match.CleanTitle(rec.Title, seriesAsTitled(rec.Title, rec.Series))
+	clean := match.CleanTitle(rec.Title, rec.Series)
 	in := placement.Input{
 		Author:       rec.Author,
 		Title:        clean,
@@ -256,40 +256,19 @@ func (p *Planner) place(rec source.Record, mode placement.Mode, template string,
 	return item, nil
 }
 
-// seriesAsTitled is the series name as the title opens with it, with the
-// article before it ("The Orchard Cycle: Books 1-3" in series "Orchard Cycle"
-// is "The Orchard Cycle"), so CleanTitle removes the article and the series
-// together; given the bare name it leaves the article and the separator
-// behind ("The : Books 1-3"). Any other title gets series as it is.
-func seriesAsTitled(title, series string) string {
-	t, s := strings.TrimSpace(title), strings.TrimSpace(series)
-	if s == "" {
-		return series
-	}
-	for _, art := range []string{"the ", "a ", "an "} {
-		n := len(art) + len(s)
-		if len(t) < n || !strings.EqualFold(t[:len(art)], art) || !strings.EqualFold(t[len(art):n], s) {
-			continue
-		}
-		if r, _ := utf8.DecodeRuneInString(t[n:]); n < len(t) && (unicode.IsLetter(r) || unicode.IsDigit(r)) {
-			continue // the series name is the start of a longer word
-		}
-		return t[:n]
-	}
-	return series
-}
-
 // BookMatcher matches records against a fixed server-book list via the shared
 // pkg/match matcher under match.ImportOptions. It prepares stable candidate
 // partitions once and reuses them for every title in a poll. A book in several
 // series is a candidate under each. A book whose position is a range is matched
-// by a range title only (see MatchScored). Not safe for concurrent use.
+// by a pack only (see MatchScored). Not safe for concurrent use.
 type BookMatcher struct {
-	books  []link.LibraryBook
-	cands  []match.Book
-	owner  []int // cands[i] is a candidate for books[owner[i]]
-	single matchPartition
-	ranges map[float64]matchPartition // spanning candidates by their start position
+	books   []link.LibraryBook
+	cands   []match.Book
+	owner   []int                      // cands[i] is a candidate for books[owner[i]]
+	single  matchPartition             // books with no evidence of a pack
+	labeled matchPartition             // books with a pack label but no listed range
+	ranges  map[float64]matchPartition // spanning candidates by their start position
+	packs   []packCandidate            // packs scored by title, in listing order
 }
 
 // matchPartition keeps the original candidate indexes beside a reusable index.
@@ -310,22 +289,27 @@ func (p matchPartition) best(q match.Query) (int, float64, bool) {
 // NewBookMatcher builds a matcher over an already-fetched library book list.
 func NewBookMatcher(books []link.LibraryBook) *BookMatcher {
 	m := &BookMatcher{books: books, ranges: map[float64]matchPartition{}}
-	var single []int
+	var single, labeled []int
 	ranges := map[float64][]int{}
 	for i, b := range books {
 		base := match.Book{Title: b.Title, Author: Credit(b.Authors), ASIN: b.ASIN, Narrators: b.Narrators}
-		spans := slices.ContainsFunc(b.Series, func(s link.SeriesRef) bool {
-			_, ok := rangeStart(s.Position)
-			return ok
-		})
+		spans := bookRanges(b)
+		label := bookPackTitle(b)
+		pack := len(spans) > 0 || label != ""
 		add := func(c match.Book) {
 			j := len(m.cands)
 			m.cands = append(m.cands, c)
 			m.owner = append(m.owner, i)
-			if spans {
-				ranges[c.SeriesIndex] = append(ranges[c.SeriesIndex], j)
-			} else {
+			if !pack {
 				single = append(single, j)
+				return
+			}
+			m.packs = append(m.packs, newPackCandidate(j, c, b, label, spans))
+			if len(spans) == 0 {
+				labeled = append(labeled, j)
+			}
+			for _, span := range spans {
+				ranges[span.start] = append(ranges[span.start], j)
 			}
 		}
 		if len(b.Series) == 0 {
@@ -351,6 +335,7 @@ func NewBookMatcher(books []link.LibraryBook) *BookMatcher {
 		return matchPartition{index: match.NewIndexWith(cands, match.ImportOptions()), ord: ord}
 	}
 	m.single = prepare(single)
+	m.labeled = prepare(labeled)
 	for start, ord := range ranges {
 		m.ranges[start] = prepare(ord)
 	}
@@ -373,18 +358,10 @@ func (m *BookMatcher) MatchScored(rec source.Record) (link.LibraryBook, float64,
 		Title: rec.Title, TitleShort: rec.TitleShort, Author: rec.Author,
 		Series: rec.Series, Sequence: rec.Sequence, HasSequence: rec.HasSequence, ASIN: rec.ASIN,
 	}
-	// A range position ("5-6": a pack of two books) is placed at its start, so a
-	// number in the title ("Pack 3") never stands in for the position the store
-	// gave.
-	isRange := false
-	if !q.HasSequence {
-		q.Sequence, isRange = rangeStart(rec.SeriesPosition)
-		q.HasSequence = isRange
-	}
 	if rec.Narrator != "" {
 		q.Narrators = []string{rec.Narrator}
 	}
-	i, score, ok := m.best(q, isRange)
+	i, score, ok := m.best(q, rec.SeriesPosition)
 	if !ok {
 		return link.LibraryBook{}, 0, false
 	}
@@ -392,23 +369,23 @@ func (m *BookMatcher) MatchScored(rec source.Record) (link.LibraryBook, float64,
 }
 
 // rangePosition is a series position spanning books: "5-6", "0.5-4", "1 - 3".
-var rangePosition = regexp.MustCompile(`^\s*(\d+(?:\.\d+)?)\s*[-\x{2013}]\s*\d+(?:\.\d+)?\s*$`)
+var rangePosition = regexp.MustCompile(`^\s*(\d+(?:\.\d+)?)\s*[-–]\s*(\d+(?:\.\d+)?)\s*$`)
 
 // rangeStart is a range position's first number.
 func rangeStart(pos string) (float64, bool) {
-	sm := rangePosition.FindStringSubmatch(pos)
-	if sm == nil {
-		return 0, false
-	}
-	v, err := strconv.ParseFloat(sm[1], 64)
-	return v, err == nil
+	span, ok := readRange(rangePosition, pos)
+	return span.start, ok
 }
 
 // best tries ASINs over every candidate before scoring the stable partitions.
 // The index applies the person gate and preserves candidate order for ties.
-// A range title first tries spanning books starting at its position, then
-// single volumes. A single volume never tries a spanning book.
-func (m *BookMatcher) best(q match.Query, isRange bool) (int, float64, bool) {
+// A range position first tries the spanning books starting where it does. A
+// range, or a title that names a pack, then tries the packs by name
+// (bestPackTitle); only a positionless one may claim a listed range. A range
+// that found no pack falls back to the single volumes (at volume 1 through
+// firstRangeFallback). A single volume never claims a listed range, and takes
+// a pack labeled only by its title or folder only when that scores higher.
+func (m *BookMatcher) best(q match.Query, position string) (int, float64, bool) {
 	if q.ASIN != "" {
 		for i := range m.cands {
 			if m.cands[i].ASIN != "" && strings.EqualFold(q.ASIN, m.cands[i].ASIN) {
@@ -417,12 +394,37 @@ func (m *BookMatcher) best(q match.Query, isRange bool) (int, float64, bool) {
 		}
 		q.ASIN = "" // no candidate has it: spare each partition's index the same scan
 	}
+	span, isRange := readRange(rangePosition, position)
+	isRange = isRange && !q.HasSequence
+	allowRanges := !q.HasSequence && strings.TrimSpace(position) == ""
 	if isRange {
-		if i, score, ok := m.ranges[q.Sequence].best(q); ok {
+		// The position from the store takes precedence over a pack number in
+		// the title ("Publisher's Pack 3" at volumes 5-6).
+		q.Sequence, q.HasSequence = span.start, true
+		if i, score, ok := m.ranges[span.start].best(q); ok {
 			return i, score, true
 		}
 	}
-	return m.single.best(q)
+	if isRange || packTitle(cmp.Or(q.Title, q.TitleShort)) {
+		if i, score, ok := m.bestPackTitle(q, span, allowRanges); ok || !isRange {
+			return i, score, ok
+		}
+	}
+	if isRange && span.start == 1 {
+		return m.firstRangeFallback(q)
+	}
+	i, score, ok := m.single.best(q)
+	if !isRange && len(m.labeled.ord) > 0 {
+		// A store can omit a collection label from a real title ("Four" for
+		// "Four: A Divergent Collection"). Preserve the display match and
+		// listing order. SpanMismatch still protects the ASIN.
+		j, other, found := m.labeled.best(q)
+		better := found && (other > score || (other == score && j < i))
+		if better && (q.Sequence > 1 || !seriesNamedTitle(cmp.Or(q.Title, q.TitleShort), cmp.Or(q.Series, m.cands[j].Series))) {
+			return j, other, true
+		}
+	}
+	return i, score, ok
 }
 
 // Claim is one record's match: the book's path, the match's score, the
@@ -471,34 +473,69 @@ func PositionAgrees(rec source.Record, b link.LibraryBook) (agrees, disagrees bo
 	return got == want, got != want
 }
 
-// folderCode is a leading series code on a folder name, as the server reads
-// one (its metadata.FolderCodePosition): one to five letters, maybe a space,
-// then a number of one to three digits, maybe a decimal part ("DH06 - Land of
-// Magic", "DF15.5 Brief Cases"). What follows the number decides whether it is
-// one (folderCodeIs).
-var folderCode = regexp.MustCompile(`^([A-Za-z]{1,5}) ?(\d{1,3}(?:\.\d+)?)`)
+// OtherVolume reports whether rec names another volume of its series than
+// the one b holds, so b takes no ASIN from it (the poll's enrichment and
+// joinedBooks). Their series numbers disagree (PositionAgrees), unless both
+// titles name the same book ("New Spring" at 0 on Audible and 0.5 in the
+// library). Or b's title is rec's series name and a number ("Iron Vale 3")
+// that is not rec's: its position, else 1 for a title that is the series name.
+// The matcher's bare-title rule matches the opener's title to a numbered
+// sequel's folder, and PositionAgrees says nothing when rec has no position or
+// b's series is spelled otherwise ("Iron Vale Saga").
+func OtherVolume(rec source.Record, b link.LibraryBook) bool {
+	if rec.Series == "" {
+		return false
+	}
+	title := cmp.Or(rec.Title, rec.TitleShort)
+	own := match.Fold(match.CleanTitle(title, rec.Series))
+	theirs := strings.TrimSpace(match.CleanTitle(b.Title, rec.Series))
+	same := own != "" && own == match.Fold(theirs)
+	if _, disagrees := PositionAgrees(rec, b); disagrees {
+		return !same || volumeNumber.MatchString(own) || seriesNamedTitle(title, rec.Series)
+	}
+	if same || !volumeNumber.MatchString(theirs) {
+		return false
+	}
+	n, _ := source.ParsePosition(theirs)
+	if want, ok := source.ParsePosition(rec.SeriesPosition); ok {
+		return want != n
+	}
+	return n != 1 && seriesNamedTitle(title, rec.Series)
+}
 
-// folderCodeIs reports whether the folder at p (its last segment) leads with
-// a code of series' initials whose number is pos ("LT02 - ..." for "L-T" 2,
-// never "Book 07 - ..." for "Cosmere" 7), as the server's listing reads one.
-// As there, the number must end where a word does ("DF15.5x" is no code, never
-// 15), a number joined on makes it a range or nothing, never its first number
-// ("LAM05-06" is 5 to 6, "LAM05-06-07" no code), and 0 is no position.
+// volumeNumber is a title that is only a volume's number ("3", "0.5"), not
+// one such as "1984".
+var volumeNumber = regexp.MustCompile(`^\d{1,3}(?:\.\d+)?$`)
+
+// folderCode is a leading series code on a folder name, as the server reads
+// one: one to five letters, maybe a space, a number of one to three digits
+// with maybe a decimal part ("DH06 - Land of Magic", "DF15.5 Brief Cases"),
+// then maybe a year, a lettered number or a range end joined on. packWord
+// names a pack ("Omnibus", "Box Set", "Books 1-3"). Keep both in step with
+// the server's internal/metadata.FolderCodePosition:
+// TestFolderCodeIsServerVectors runs its cases for single positions, ranges
+// and rejected codes.
+var folderCode = regexp.MustCompile(`^([A-Za-z]{1,5}) ?(\d{1,3}(?:\.\d+)?)(?:[-–](?:(?:19|20)\d{2}|\d{1,3}[A-Za-z]|(\d{1,3}(?:\.\d+)?)))?`)
+var packWord = regexp.MustCompile(`(?i)\b(?:omnibus|box(?:ed)? ?set|collection|books \d+ ?[-–] ?\d+)\b`)
+
+// folderCodeIs checks a listed single position against the folder code. C is
+// an explicit volume marker in any named series. Other codes use its initials.
 func folderCodeIs(p, series, pos string) bool {
 	want, ok := source.ParsePosition(pos)
-	if !ok {
+	if !ok || want == 0 || strings.TrimSpace(series) == "" {
 		return false
 	}
 	name := strings.TrimSpace(path.Base(p))
 	m := folderCode.FindStringSubmatch(name)
-	if m == nil || !initialsOf(m[1], series) {
+	if m == nil || m[3] != "" || (!strings.EqualFold(m[1], "c") && !initialsOf(m[1], series)) {
 		return false
 	}
-	if rest := name[len(m[0]):]; !wordEndsAt(rest) || joinsNumber(rest) {
+	rest := name[len(m[0]):]
+	if !wordEndsAt(rest) || joinsNumber(rest) || repeatsCode(rest, m[1]) || packWord.MatchString(rest) {
 		return false
 	}
 	got, ok := source.ParsePosition(m[2])
-	return ok && got != 0 && got == want
+	return ok && got == want
 }
 
 // wordEndsAt reports whether no letter, digit or underscore starts s: the
@@ -516,6 +553,24 @@ func joinsNumber(s string) bool {
 		return false
 	}
 	d, _ := utf8.DecodeRuneInString(s[n:])
+	return unicode.IsDigit(d)
+}
+
+// repeatsCode reports whether s, what follows a code's number, joins the same
+// code and another number on with a hyphen or an en dash, spaced or not
+// ("DH01-DH03", "DH01 - DH03 Omnibus"): a range written with the code twice is
+// an omnibus, never its first volume.
+func repeatsCode(s, code string) bool {
+	s = strings.TrimLeft(s, " ")
+	r, n := utf8.DecodeRuneInString(s)
+	if r != '-' && r != '–' {
+		return false
+	}
+	s = strings.TrimLeft(s[n:], " ")
+	if len(s) < len(code) || !strings.EqualFold(s[:len(code)], code) {
+		return false
+	}
+	d, _ := utf8.DecodeRuneInString(strings.TrimPrefix(s[len(code):], " "))
 	return unicode.IsDigit(d)
 }
 
@@ -609,26 +664,9 @@ func foldedNames(names []string) []string {
 func Twins(books []link.LibraryBook) map[string]bool {
 	byKey := map[string][]string{}
 	for _, b := range books {
-		title := match.Fold(b.Title)
-		if title == "" {
-			continue
+		if k := twinKey(b); k != "" {
+			byKey[k] = append(byKey[k], b.Path)
 		}
-		parts := make([]string, 0, len(b.Authors)+len(b.Series))
-		for _, f := range foldedNames(b.Authors) {
-			parts = append(parts, "a\x00"+f)
-		}
-		for _, s := range b.Series {
-			// As the matcher names a series, or folded when that reduces it
-			// to nothing (a non-Latin name): two such series stay apart.
-			name := match.NormalizeSeries(s.Name)
-			if name == "" {
-				name = match.Fold(s.Name)
-			}
-			parts = append(parts, "s\x00"+name+"\x00"+positionKey(s.Position))
-		}
-		slices.Sort(parts)
-		k := title + "\x00" + strings.Join(slices.Compact(parts), "\x00")
-		byKey[k] = append(byKey[k], b.Path)
 	}
 	out := map[string]bool{}
 	for _, paths := range byKey {
@@ -641,18 +679,61 @@ func Twins(books []link.LibraryBook) map[string]bool {
 	return out
 }
 
-// SpanMismatch reports whether rec spans books (its position is a range: a
-// pack) and b does not, as when a pack's title fell back to the folder at its
-// first volume's position. Such a match may be shown, but the pack's ASIN is
-// not the book's: an enrichment would stamp it onto what may be one volume.
-func SpanMismatch(rec source.Record, b link.LibraryBook) bool {
-	if _, ok := rangeStart(rec.SeriesPosition); !ok || rec.HasSequence {
-		return false
+// twinKey is what Twins compares: b's folded title, authors and series (each
+// series' position by its value), or "" for a title that folds to nothing.
+func twinKey(b link.LibraryBook) string {
+	title := match.Fold(b.Title)
+	if title == "" {
+		return ""
 	}
-	return !slices.ContainsFunc(b.Series, func(s link.SeriesRef) bool {
-		_, ok := rangeStart(s.Position)
-		return ok
-	})
+	parts := make([]string, 0, len(b.Authors)+len(b.Series))
+	for _, f := range foldedNames(b.Authors) {
+		parts = append(parts, "a\x00"+f)
+	}
+	for _, s := range b.Series {
+		// As the matcher names a series, or folded when that reduces it
+		// to nothing (a non-Latin name): two such series stay apart.
+		name := match.NormalizeSeries(s.Name)
+		if name == "" {
+			name = match.Fold(s.Name)
+		}
+		parts = append(parts, "s\x00"+name+"\x00"+positionKey(s.Position))
+	}
+	slices.Sort(parts)
+	return title + "\x00" + strings.Join(slices.Compact(parts), "\x00")
+}
+
+// SpanMismatch protects ASIN enrichment when only one side spans volumes, or
+// both do but not the same volumes. A range can still have a display match on
+// the folder of its first volume. A range record keeps its ASIN off a listed
+// range that only starts where it does ("1-6" on "1-3"). A positionless pack
+// keeps it off a range its title's bounds don't name, and, with no bounds in
+// its title, off a range that doesn't open the series: a box set matched by
+// name to the only pack folder the library holds may be another box set. A
+// pack labeled only by its title or folder that states no bounds is taken
+// for the opening one alike, so a title naming later bounds keeps off it.
+func SpanMismatch(rec source.Record, b link.LibraryBook) bool {
+	recSpan, ranged := readRange(rangePosition, rec.SeriesPosition)
+	title := cmp.Or(rec.Title, rec.TitleShort)
+	pack := packTitle(title)
+	if spans := bookRanges(b); len(spans) > 0 {
+		if ranged {
+			return rec.HasSequence || !slices.Contains(spans, recSpan)
+		}
+		return !pack || rec.HasSequence || strings.TrimSpace(rec.SeriesPosition) != "" || boundsDisagree(title, spans)
+	}
+	if ranged || pack != (bookPackTitle(b) != "") {
+		return true
+	}
+	if !pack {
+		return false // two single volumes
+	}
+	// A labeled pack's bounds can be in its title or its folder's name.
+	if stated := statedRanges(b); len(stated) > 0 {
+		return boundsDisagree(title, stated)
+	}
+	span, bounded := readRange(titleRange, title)
+	return bounded && span.start > 1
 }
 
 // KeepBest settles books several records claimed. Of the claims on one path:

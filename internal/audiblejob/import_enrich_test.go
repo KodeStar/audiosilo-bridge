@@ -318,3 +318,22 @@ func TestJoinedBooksTwins(t *testing.T) {
 		t.Fatalf("a twin = %v, want it joined without the ASIN", got)
 	}
 }
+
+// joinedBooks applies the poll's series-number rule: volume 1's bare title
+// matches a numbered sequel's folder, and the file joining that folder gives
+// it no ASIN; the same title on its own volume's folder does.
+func TestJoinedBooksOtherVolume(t *testing.T) {
+	opener := rec("B0FAKE0003", "Road to Craft", "Val Erio", "Road to Craft", 1)
+	opener.SeriesPosition = "1"
+	for _, tc := range []struct {
+		pos  string
+		want bool
+	}{{"3", false}, {"1", true}} {
+		b := link.LibraryBook{Path: "Val/Road to Craft/RC03", Title: "Road to Craft " + tc.pos, Authors: []string{"Val Erio"},
+			Series: []link.SeriesRef{{Name: "Road to Craft", Position: tc.pos}}}
+		got := joinedBooks(opener, []link.LibraryBook{b}, path.Join(b.Path, "Road to Craft.m4b"))
+		if v, ok := got[b.Path]; !ok || v != tc.want {
+			t.Fatalf("book #%s: joins = %v, want %v", tc.pos, got, tc.want)
+		}
+	}
+}

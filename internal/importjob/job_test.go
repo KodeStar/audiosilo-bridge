@@ -114,6 +114,7 @@ func TestPlanArticleBeforeSeries(t *testing.T) {
 	for _, c := range []struct{ title, series, want string }{
 		{"The Orchard Cycle: Books 1-3", "Orchard Cycle", "Mara Quill/Orchard Cycle/Books 1-3/x.m4b"},
 		{"The Mayor of Noobtown 3", "Mayor of Noobtown", "Mara Quill/Mayor of Noobtown/Mayor of Noobtown 3/x.m4b"},
+		{"A Lantern in The Orchard Cycle: Winter", "Orchard Cycle", "Mara Quill/Orchard Cycle/A Lantern in Winter/x.m4b"},
 		{"Orchard Cycle: Books 1-3", "Orchard Cycle", "Mara Quill/Orchard Cycle/Books 1-3/x.m4b"},
 		{"The Orchard Cycles Reborn", "Orchard Cycle", "Mara Quill/Orchard Cycle/The Orchard Cycles Reborn/x.m4b"},
 	} {

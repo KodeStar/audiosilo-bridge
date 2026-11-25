@@ -756,7 +756,9 @@ func discParent(rel string) (parent string, ok bool) {
 // title's ASIN: only under the poll's rule, the matcher over the library
 // picking that book for the title, the title not spanning books the book
 // doesn't (importjob.SpanMismatch), so an omnibus never names a single volume
-// and a title never names another book, and the book not one the library
+// and a title never names another book, the book not holding another volume
+// (importjob.OtherVolume: volume 1's bare title matches a numbered sequel's
+// folder), and the book not one the library
 // holds twice (importjob.Twins: the title's words can't tell the copies
 // apart, bridge#64). The book the rescan answers decides:
 // one not listed here is new, the title itself (a pack placed as a pack
@@ -779,7 +781,7 @@ func joinedBooks(rec source.Record, books []link.LibraryBook, rel string) map[st
 			twins = importjob.Twins(books)
 			looked = true
 		}
-		joins[b.Path] = matched && match.Path == b.Path && !importjob.SpanMismatch(rec, b) && !twins[b.Path]
+		joins[b.Path] = matched && match.Path == b.Path && !importjob.OtherVolume(rec, b) && !importjob.SpanMismatch(rec, b) && !twins[b.Path]
 	}
 	return joins
 }

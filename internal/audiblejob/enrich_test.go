@@ -305,19 +305,92 @@ func TestPollContestedKeepsTheBest(t *testing.T) {
 	}
 }
 
+// TestPollOtherVolumeNotEnriched: the opening volume's bare title matches a
+// numbered sequel's folder (pkg/match lets volume 1 claim a bare-titled book).
+// With the sequel not owned that is the folder's only claim, but the numbers
+// disagree, so the opening volume's ASIN never goes onto the sequel's folder.
+// The same title on its own folder is enriched.
+func TestPollOtherVolumeNotEnriched(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		pos  string
+		want map[string]string
+	}{
+		{"3", map[string]string{}},
+		{"1", map[string]string{"Val/Road to Craft/RC03": "B0CONT0001"}},
+	} {
+		fs := &fakeServer{pageSize: 500, books: []link.LibraryBook{
+			{Path: "Val/Road to Craft/RC03", Title: "Road to Craft " + tc.pos, Authors: []string{"Val Erio"},
+				Series: []link.SeriesRef{{Name: "Road to Craft", Position: tc.pos}}},
+		}}
+		accts := &stubAccounts{acct: account(), recs: []source.Record{
+			{ASIN: "B0CONT0001", Title: "Road to Craft", Author: "Val Erio", Series: "Road to Craft", SeriesPosition: "1", Sequence: 1, HasSequence: true},
+		}}
+		h := setup(t, fs, accts)
+		res, err := run(t, h, "acct0001")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Matched != 1 || fmt.Sprint(fs.enrichedNow()) != fmt.Sprint(tc.want) {
+			t.Fatalf("book #%s: result = %+v, enriched %v, want %v", tc.pos, res, fs.enrichedNow(), tc.want)
+		}
+	}
+}
+
+// TestPollTitleNumberNotEnriched: with no position to compare, or the
+// series spelled otherwise, the number a book's title gives after the series
+// name still keeps the opener's ASIN off a sequel's folder; one book numbered
+// two ways keeps its ASIN.
+func TestPollTitleNumberNotEnriched(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		book link.LibraryBook
+		rec  source.Record
+		want map[string]string
+	}{
+		{"opener without a position", link.LibraryBook{Path: "Fell/Iron Vale/IV03", Title: "Iron Vale 3", Authors: []string{"Ona Fell"},
+			Series: []link.SeriesRef{{Name: "Iron Vale", Position: "3"}}},
+			source.Record{ASIN: "B0VALE0001", Title: "Iron Vale", Author: "Ona Fell", Series: "Iron Vale"}, map[string]string{}},
+		{"series spelled otherwise", link.LibraryBook{Path: "Fell/IV/Iron Vale 3", Title: "Iron Vale 3", Authors: []string{"Ona Fell"},
+			Series: []link.SeriesRef{{Name: "Iron Vale Saga", Position: "3"}}},
+			source.Record{ASIN: "B0VALE0001", Title: "Iron Vale", Author: "Ona Fell", Series: "Iron Vale", SeriesPosition: "1", Sequence: 1, HasSequence: true},
+			map[string]string{}},
+		{"numbered two ways", link.LibraryBook{Path: "Fell/Iron Vale/New Spring", Title: "New Spring", Authors: []string{"Ona Fell"},
+			Series: []link.SeriesRef{{Name: "Iron Vale", Position: "0.5"}}},
+			source.Record{ASIN: "B0VALE0000", Title: "New Spring", Author: "Ona Fell", Series: "Iron Vale", SeriesPosition: "0", HasSequence: true},
+			map[string]string{"Fell/Iron Vale/New Spring": "B0VALE0000"}},
+	} {
+		fs := &fakeServer{pageSize: 500, books: []link.LibraryBook{tc.book}}
+		h := setup(t, fs, &stubAccounts{acct: account(), recs: []source.Record{tc.rec}})
+		res, err := run(t, h, "acct0001")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Matched != 1 || fmt.Sprint(fs.enrichedNow()) != fmt.Sprint(tc.want) {
+			t.Fatalf("%s: result = %+v, enriched %v, want %v", tc.name, res, fs.enrichedNow(), tc.want)
+		}
+	}
+}
+
 // TestPollPackOnVolumeNotEnriched: a pack whose title fell back to the folder
 // at its first volume's position matches it, but that folder may hold one
 // volume, so the pack's ASIN never goes onto it; a pack on its own range
 // folder is enriched.
 func TestPollPackOnVolumeNotEnriched(t *testing.T) {
 	t.Parallel()
+	const boxPath = "Quill/Orchard Cycle/OC01-03"
 	fs := &fakeServer{pageSize: 500, books: []link.LibraryBook{
+		{Path: boxPath, Title: "The Orchard Cycle", Authors: []string{"Mara Quill"},
+			Series: []link.SeriesRef{{Name: "Orchard Cycle", Position: "1-3"}}},
 		{Path: "Fell/Iron Vale/IV05 - Ash Road", Title: "Ash Road", Authors: []string{"Ona Fell"},
 			Series: []link.SeriesRef{{Name: "Iron Vale", Position: "5"}}},
 		{Path: "Fell/Iron Vale/IV07-08", Title: "Iron Vale", Authors: []string{"Ona Fell"},
 			Series: []link.SeriesRef{{Name: "Iron Vale", Position: "7-8"}}},
 	}}
 	accts := &stubAccounts{acct: account(), recs: []source.Record{
+		{ASIN: "B0PACK0001", Title: "The Orchard Cycle Box Set", Author: "Mara Quill", Series: "Orchard Cycle"},
+		{ASIN: "B0SOLO0001", Title: "The Orchard Cycle", Author: "Mara Quill", Series: "Orchard Cycle"},
 		{ASIN: "B0PACK0056", Title: "Iron Vale: Books 5-6", Author: "Ona Fell", Series: "Iron Vale", SeriesPosition: "5-6"},
 		{ASIN: "B0PACK0078", Title: "Iron Vale: Books 7-8", Author: "Ona Fell", Series: "Iron Vale", SeriesPosition: "7-8"},
 	}}
@@ -326,10 +399,10 @@ func TestPollPackOnVolumeNotEnriched(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Matched != 2 || res.Enriched != 1 {
+	if res.Matched != 3 || res.Enriched != 2 {
 		t.Fatalf("result = %+v, enriched %v", res, fs.enrichedNow())
 	}
-	if want := map[string]string{"Fell/Iron Vale/IV07-08": "B0PACK0078"}; fmt.Sprint(fs.enrichedNow()) != fmt.Sprint(want) {
+	if want := map[string]string{boxPath: "B0PACK0001", "Fell/Iron Vale/IV07-08": "B0PACK0078"}; fmt.Sprint(fs.enrichedNow()) != fmt.Sprint(want) {
 		t.Fatalf("enriched %v, want %v", fs.enrichedNow(), want)
 	}
 }
