@@ -82,7 +82,7 @@ func (a *API) workerScript(r *http.Request) (string, error) {
 	}
 	// The Bridge serves plain HTTP: a TLS proxy in front shows only through
 	// public_url, which Address takes when the request reached its host.
-	addr, err := workerdist.Address("http", r.Host, a.b.Settings().PublicURL)
+	addr, err := workerdist.Address(r.Host, a.b.Settings().PublicURL)
 	if err != nil {
 		return "", err
 	}

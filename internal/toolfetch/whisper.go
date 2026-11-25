@@ -22,13 +22,11 @@ import (
 )
 
 // WhisperCLIReleaseTag pins the GitHub release whose assets hold the prebuilt
-// whisper.cpp `whisper-cli` binaries: audiosilo-sidecars' (whisperReleaseBase),
-// whose CI publishes them, not this repo's. The Dockerfile's WHISPER_TAG pins the
-// same tag.
+// whisper-cli binaries. The Dockerfile pins the same Bridge release.
 // Bumping the tag is a deliberate upgrade: EnsureWhisperCLI treats a cached binary
-// stamped with a different tag as stale and re-downloads. The build variant is
-// baked into the pinned build, hence the trailing "-1" revision.
-const WhisperCLIReleaseTag = "whisper-cpp-v1.9.1-1"
+// stamped with a different tag as stale and re-downloads, unless the new release's
+// checksums.txt lists the same archive it was installed from.
+const WhisperCLIReleaseTag = "whisper-v1.9.1"
 
 // Device names the informational accelerator a whisper-cli build targets. The
 // vocabulary lives here because the release asset table (WhisperCLIAssetFor) is
@@ -62,14 +60,11 @@ var maxWhisperArchiveBytes int64 = 2 << 30 // 2 GiB
 const maxChecksumsBytes = 1 << 20 // 1 MiB
 
 // whisperReleaseBase is the GitHub Releases download root of the whisper-cli
-// assets. They are audiosilo-sidecars' release assets: that repo is public, so
-// they download without a credential and stay downloadable once it is archived,
-// while the Bridge's own repo is private (its release assets would need a
-// token). Move them to the Bridge's releases when the Bridge goes public.
+// assets published by the Bridge's whisper-binaries workflow.
 // It is a package var (like platformSpec) so a test can point the download branch
 // at an httptest server. Production always uses the real GitHub host. The full URLs
 // are <base>/<tag>/<asset> and <base>/<tag>/checksums.txt.
-var whisperReleaseBase = "https://github.com/KodeStar/audiosilo-sidecars/releases/download"
+var whisperReleaseBase = "https://github.com/KodeStar/audiosilo-bridge/releases/download"
 
 // whisperMeta is the sidecar written LAST, after the binary is fully in place, so a
 // process killed mid-install never leaves a final dir the cache-hit path would
@@ -145,7 +140,9 @@ func CachedWhisperCLI(toolsDir string) string {
 // the recorded asset still matching the CURRENT device's desired asset (or being a
 // recorded CPU fallback) returns immediately with NO network I/O. A tag mismatch
 // (an upgrade), a missing binary, or a device change (a plain CPU install on a box
-// that now detects cuda/vulkan) re-downloads.
+// that now detects cuda/vulkan) re-downloads, except that a tag mismatch whose new
+// checksums.txt lists the cached archive's sha256 for this device keeps the cache
+// (adoptRetaggedWhisperCLI).
 //
 // Integrity: HTTPS-only; the asset's sha256 is looked up in the release's
 // checksums.txt (a missing line is a hard DENY, never "skip verification") and
@@ -191,13 +188,19 @@ func ensureWhisperCLIPlatform(ctx context.Context, toolsDir, goos, goarch, devic
 	// falls through and re-downloads the accelerated build. The .meta is written
 	// last, so its presence proves a complete prior install. (No desired asset for
 	// the platform means we cannot do better than what is cached.)
-	if meta, ok := readJSONSidecar[whisperMeta](metaPath(binPath)); ok && meta.Tag == WhisperCLIReleaseTag {
+	if meta, ok := readJSONSidecar[whisperMeta](metaPath(binPath)); ok {
 		if info, err := os.Stat(binPath); err == nil && !info.IsDir() {
-			if !desiredOK || meta.Asset == desired || meta.Fallback {
+			switch {
+			case meta.Tag != WhisperCLIReleaseTag:
+				if adoptRetaggedWhisperCLI(ctx, binPath, meta, desired, desiredOK, log) {
+					return binPath, nil
+				}
+			case !desiredOK || meta.Asset == desired || meta.Fallback:
 				return binPath, nil
+			default:
+				log.Info("whisper-cli cache holds a different device's build; refreshing",
+					"cached_asset", meta.Asset, "desired_asset", desired)
 			}
-			log.Info("whisper-cli cache holds a different device's build; refreshing",
-				"cached_asset", meta.Asset, "desired_asset", desired)
 		}
 	}
 
@@ -214,6 +217,29 @@ func ensureWhisperCLIPlatform(ctx context.Context, toolsDir, goos, goarch, devic
 		return "", err
 	}
 	return binPath, nil
+}
+
+// adoptRetaggedWhisperCLI keeps a complete install from an older tag when the
+// pinned release publishes the very same archive for this device: the manifest's
+// sha256 for the desired asset equals the one the install was verified against.
+// A release moved to a new tag with identical bytes then costs one checksums.txt
+// fetch, not the whole archive again (the CUDA build is over 800 MB). The .meta is
+// re-stamped with the pinned tag so later calls are plain cache hits. A CPU
+// fallback is not carried over: a new tag retries the accelerated build.
+func adoptRetaggedWhisperCLI(ctx context.Context, binPath string, meta whisperMeta, desired string, desiredOK bool, log *slog.Logger) bool {
+	if !desiredOK || meta.Fallback || meta.Asset != desired || meta.SHA256 == "" {
+		return false
+	}
+	want, err := fetchWhisperChecksum(ctx, WhisperCLIReleaseTag, desired)
+	if err != nil || !strings.EqualFold(want, meta.SHA256) {
+		return false
+	}
+	meta.Tag = WhisperCLIReleaseTag
+	if err := writeJSONSidecar(metaPath(binPath), meta); err != nil {
+		return false
+	}
+	log.Info("whisper-cli cache matches the pinned release; keeping it", "asset", desired, "tag", WhisperCLIReleaseTag)
+	return true
 }
 
 // refreshWhisperCLI downloads and installs the pinned release's asset for the

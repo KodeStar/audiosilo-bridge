@@ -221,7 +221,8 @@ func (w *whisperCpp) Transcribe(ctx context.Context, job Job) error {
 	}
 	if job.NoContext {
 		// -mc 0 (--max-context 0): do not feed past transcription back as the
-		// decoder's prompt across windows. The repair path sets this so a
+		// decoder's prompt across windows. v1.9.1 also skips any --prompt
+		// tokens when this context budget is zero. The repair path sets this so a
 		// deterministic repetition collapse cannot replay identically on the retry.
 		// whisper-cli has no --no-context flag (bridge#72): it exits 0 on an
 		// unknown argument after printing its usage, writing nothing.

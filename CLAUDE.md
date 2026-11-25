@@ -488,11 +488,10 @@ See BRIDGE-PLAN.md's Status table for what is next.
 Operative caveats carried from sidecars (PACKAGES.md has the detail):
 - **audiosilo-meta is pinned** and the schema drift guard
   (`internal/pipeline/schema_drift_test.go`) is strict.
-- **whisper.cpp binaries ship on their own cadence** from audiosilo-sidecars'
+- **whisper.cpp binaries ship on their own cadence** from this repository's
   releases (`toolfetch.WhisperCLIReleaseTag`; the images pin the same tag and
   check each asset's sha256 against that release's `checksums.txt`, which is
-  not a pin: a release replaced whole would pass). Move them to this repo's
-  releases when it goes public.
+  not a pin: a release replaced whole would pass).
 - **The engine's book identity is `books.source_path`** (an absolute Bridge path):
   `generate` maps the server's `(library_id, rel_path)` onto it through the checked
   mount, and `generate_books` maps the server job to the engine book (a resumed job

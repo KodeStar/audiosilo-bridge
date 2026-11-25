@@ -5,12 +5,14 @@ import (
 	"flag"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/kodestar/audiosilo-bridge/internal/worker"
+	"github.com/kodestar/audiosilo-bridge/internal/workerdist"
 )
 
 // installedService writes goos's service file into home as `worker install`
@@ -25,6 +27,20 @@ func installedService(t *testing.T, goos, home, data, bridge string, args ...str
 	}
 	writeFile(t, svc, text)
 	return svc
+}
+
+// noServiceManager puts a launchctl and a systemctl that only fail at the
+// front of $PATH (in dir), so a `worker install` that goes on past
+// --check-token or --print fails instead of reaching this computer's own
+// service.
+func noServiceManager(t *testing.T, dir string) {
+	t.Helper()
+	for _, name := range []string{"launchctl", "systemctl"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
 func writeFile(t *testing.T, svc worker.Service, text string) {
@@ -69,7 +85,7 @@ func TestCarryForward(t *testing.T) {
 
 			// Nothing given: everything kept (named in flag order).
 			fs, f := parsedFlags(t)
-			kept, err := carryForward(fs, svc)
+			kept, _, err := carryForward(fs, svc)
 			if err != nil || strings.Join(kept, " ") != "--backend --bridge --data --model --whisper-cli" {
 				t.Fatalf("kept %q, %v", kept, err)
 			}
@@ -83,7 +99,7 @@ func TestCarryForward(t *testing.T) {
 
 			// Explicit flags win, an empty one included (clearing --model).
 			fs, f = parsedFlags(t, "--bridge", "http://10.0.0.2:8091", "--backend", "auto", "--model", "", "--data", "/new")
-			kept, err = carryForward(fs, svc)
+			kept, _, err = carryForward(fs, svc)
 			if err != nil || strings.Join(kept, " ") != "--whisper-cli" {
 				t.Fatalf("kept %q, %v", kept, err)
 			}
@@ -96,11 +112,11 @@ func TestCarryForward(t *testing.T) {
 	// No service: a first install keeps nothing and says nothing.
 	fs, f := parsedFlags(t)
 	def := *f.data
-	if kept, err := carryForward(fs, worker.Service{GOOS: "linux", Home: t.TempDir()}); err != nil || kept != nil || *f.data != def {
+	if kept, _, err := carryForward(fs, worker.Service{GOOS: "linux", Home: t.TempDir()}); err != nil || kept != nil || *f.data != def {
 		t.Fatalf("no service: %q, %v", kept, err)
 	}
 	// No service manager: Install says so.
-	if kept, err := carryForward(fs, worker.Service{GOOS: "windows", Home: t.TempDir()}); err != nil || kept != nil {
+	if kept, _, err := carryForward(fs, worker.Service{GOOS: "windows", Home: t.TempDir()}); err != nil || kept != nil {
 		t.Fatalf("windows: %q, %v", kept, err)
 	}
 	// Malformed: nothing kept, an error.
@@ -119,7 +135,7 @@ func TestCarryForward(t *testing.T) {
 			writeFile(t, svc, tc.text)
 			fs, f := parsedFlags(t, "--backend", "mlx-whisper")
 			def := *f.data
-			kept, err := carryForward(fs, svc)
+			kept, _, err := carryForward(fs, svc)
 			if err == nil || kept != nil || *f.data != def || *f.backend != "mlx-whisper" {
 				t.Fatalf("kept %q, %v, data %q", kept, err, *f.data)
 			}
@@ -191,5 +207,201 @@ func TestWorkerInstallPrintKeepsTheService(t *testing.T) {
 		!strings.Contains(out.String(), filepath.Join(home, ".audiosilo-bridge-worker")) ||
 		!strings.Contains(errb.String(), "the installed service's settings can't be read") {
 		t.Fatalf("malformed:\nstdout %s\nstderr %s", out.String(), errb.String())
+	}
+}
+
+// Exercise the downloaded program's real token lookup. The final install is
+// stubbed so the test never registers a service on the host.
+func TestWorkerInstallScriptUpdate(t *testing.T) {
+	if os.Getenv("BRIDGE_TEST_CHECK_TOKEN") == "1" {
+		if err := workerCmd(flag.Args(), os.Stdout, os.Stderr); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("the installer runs on macOS and Linux")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv(workerDataEnv, "")
+	t.Setenv(workerTokenEnv, "")
+	data := filepath.Join(home, `escaped & "data" $5%\`)
+	bin := filepath.Join(home, "old worker", "audiosilo-bridge")
+	if err := os.Mkdir(filepath.Dir(bin), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bin, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	svc := worker.Service{GOOS: runtime.GOOS, Home: home, DataDir: data, Binary: bin, BridgeURL: "http://bridge"}
+	body, err := svc.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS == "linux" {
+		// Also cover the --data=value form in a hand-edited unit.
+		body = strings.Replace(body, `"--data" "`, `"--data=`, 1)
+	}
+	writeFile(t, svc, body)
+	if runtime.GOOS == "darwin" {
+		path, _ := svc.File()
+		if out, err := exec.Command("/usr/bin/plutil", "-convert", "binary1", path).CombinedOutput(); err != nil {
+			t.Fatalf("binary plist: %v: %s", err, out)
+		}
+	}
+	script, err := workerdist.Script(svc.BridgeURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TEST_EXE", exe)
+	t.Setenv("BRIDGE_TEST_CHECK_TOKEN", "1")
+	// curl -fsSL -o <path> <url> serves a worker that delegates its check to
+	// this test binary. Leave the installed binary alone until the check passes.
+	curl := `#!/bin/sh
+gzip -c > "$3" <<'WORKER'
+#!/bin/sh
+case "$1" in
+version) echo v1 ;;
+worker)
+  if [ "$5" = --check-token ]; then
+    shift
+    exec "$TEST_EXE" -test.run='^TestWorkerInstallScriptUpdate$' -- "$@"
+  fi
+  echo "installed via $0"
+  ;;
+esac
+WORKER
+`
+	if err := os.WriteFile(filepath.Join(home, "curl"), []byte(curl), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The check runs the real `worker install`.
+	noServiceManager(t, home)
+	runScript := func(args ...string) (string, error) {
+		cmd := exec.Command("sh", append([]string{"-s", "--"}, args...)...)
+		cmd.Stdin = strings.NewReader(script)
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+	if err := worker.SaveToken(defaultWorkerDataDir(), "asw_wrong_folder"); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runScript(); err == nil || !strings.Contains(out, "this update needs --token") {
+		t.Fatalf("token only in the default folder: %v\n%s", err, out)
+	}
+	if got, err := os.ReadFile(bin); err != nil || string(got) != "old" {
+		t.Fatalf("old binary after refusal: %q, %v", got, err)
+	}
+	if err := worker.SaveToken(data, "asw_custom"); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runScript(); err != nil || !strings.Contains(out, "installed via "+bin) {
+		t.Fatalf("token in escaped service data folder: %v\n%s", err, out)
+	}
+	// A --run start looks where `worker` does (the default), not in the
+	// service's --data.
+	if err := os.Remove(filepath.Join(defaultWorkerDataDir(), worker.TokenFileName)); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runScript("--run"); err == nil || !strings.Contains(out, "--token is required") {
+		t.Fatalf("--run with the token only in the service's data folder: %v\n%s", err, out)
+	}
+}
+
+// The installer's token check names an unreadable service only when it
+// refuses: one that passes leaves it to the install that follows.
+func TestWorkerInstallCheckTokenUnreadableService(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("worker install supports macOS and Linux")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv(workerDataEnv, "")
+	t.Setenv(workerTokenEnv, "")
+	noServiceManager(t, home)
+	writeFile(t, worker.Service{GOOS: runtime.GOOS, Home: home}, "not a service file")
+	check := func() (string, error) {
+		var errb bytes.Buffer
+		err := workerCmd([]string{"install", "--bridge", "http://bridge", "--check-token"}, io.Discard, &errb)
+		return errb.String(), err
+	}
+	// The refusal names the folder it looked in, and it isn't the first time.
+	if msg, err := check(); err == nil || !strings.Contains(err.Error(), "this update needs --token: "+defaultWorkerDataDir()) ||
+		strings.Contains(err.Error(), "first time") || !strings.Contains(msg, "can't be read") {
+		t.Fatalf("no token: %v, %q", err, msg)
+	}
+	if err := worker.SaveToken(defaultWorkerDataDir(), "asw_default"); err != nil {
+		t.Fatal(err)
+	}
+	if msg, err := check(); err != nil || msg != "" {
+		t.Fatalf("a saved token: %v, %q", err, msg)
+	}
+}
+
+func TestWorkerInstallDataAndModelOverrides(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("worker install supports macOS and Linux")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	envData := filepath.Join(home, "env")
+	t.Setenv(workerDataEnv, envData)
+	noServiceManager(t, home)
+	installedService(t, runtime.GOOS, home, filepath.Join(home, "old"), "http://bridge", "--model", "old-model", "--backend", "whisper-cpp")
+	for _, tc := range []struct {
+		name        string
+		flags       []string
+		data, model string
+	}{
+		{"environment", nil, envData, "old-model"},
+		{"explicit", []string{"--data", filepath.Join(home, "explicit")}, filepath.Join(home, "explicit"), "old-model"},
+		{"reset", []string{"--reset-model"}, envData, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			if err := workerCmd(append([]string{"install", "--print"}, tc.flags...), &out, io.Discard); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(out.String(), tc.data) || !strings.Contains(out.String(), "whisper-cpp") ||
+				strings.Contains(out.String(), "--model") != (tc.model != "") || !strings.Contains(out.String(), tc.model) {
+				t.Fatalf("rendered service:\n%s", out.String())
+			}
+		})
+	}
+	if err := workerCmd([]string{"install", "--print", "--reset-model", "--model", "small"}, io.Discard, io.Discard); err == nil {
+		t.Fatal("accepted both a model override and a reset")
+	}
+
+	// An install that moves the service to the environment's folder says so,
+	// naming both. Service managers that succeed, all fakes, let it finish.
+	fakes := t.TempDir()
+	for name, text := range map[string]string{"launchctl": "#!/bin/sh\n[ \"$1\" = print ] && exit 1\nexit 0\n", "systemctl": "#!/bin/sh\nexit 0\n"} {
+		if err := os.WriteFile(filepath.Join(fakes, name), []byte(text), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", fakes+string(os.PathListSeparator)+os.Getenv("PATH"))
+	install := func(args ...string) string {
+		t.Helper()
+		var out bytes.Buffer
+		if err := workerCmd(append([]string{"install", "--token", "asw_x"}, args...), &out, io.Discard); err != nil {
+			t.Fatal(err)
+		}
+		return out.String()
+	}
+	if out := install(); !strings.Contains(out, "Using "+workerDataEnv+"'s data folder "+envData+" instead of the installed service's "+filepath.Join(home, "old")) {
+		t.Fatalf("no notice for the moved data folder:\n%s", out)
+	}
+	// Now the service runs from it, and an explicit --data is no surprise.
+	if out := install(); strings.Contains(out, "instead of") {
+		t.Fatalf("a notice with the same folder:\n%s", out)
+	}
+	if out := install("--data", filepath.Join(home, "explicit")); strings.Contains(out, "instead of") {
+		t.Fatalf("a notice for an explicit --data:\n%s", out)
 	}
 }

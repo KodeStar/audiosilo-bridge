@@ -1,9 +1,9 @@
 #!/bin/sh
 # fetch-whisper <tag> <asset>: download a pinned whisper-cli release asset of
-# audiosilo-sidecars, check its sha256 against that release's checksums.txt,
+# audiosilo-bridge, check its sha256 against that release's checksums.txt,
 # and unpack it into /w/out (the Dockerfile's whisper stages).
 set -eu
-base="https://github.com/KodeStar/audiosilo-sidecars/releases/download/$1"
+base="https://github.com/KodeStar/audiosilo-bridge/releases/download/$1"
 mkdir -p /w/out
 cd /w
 curl -fsSLo checksums.txt "$base/checksums.txt"

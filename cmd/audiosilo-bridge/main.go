@@ -175,7 +175,7 @@ Usage:
   audiosilo-bridge agent-runner [--staging DIR] [--home DIR] [--slots N] [--endpoint-only]
   audiosilo-bridge agent-login [--home DIR] claude|codex
   audiosilo-bridge worker --bridge URL [--token T] [--data DIR] [--backend B]
-  audiosilo-bridge worker install --bridge URL --token T [--data DIR] [--backend B] [--print]
+  audiosilo-bridge worker install --bridge URL --token T [--data DIR] [--backend B] [--reset-model] [--print]
   audiosilo-bridge worker uninstall [--print]
 
 Commands:
@@ -200,6 +200,9 @@ Commands:
                 agent on macOS, a systemd user unit on Linux) and start it.
                 The token is kept in the data dir, not in the service file.
                 --print shows the service file without installing it.
+                --reset-model clears the installed model override.
+                An update takes its data folder from --data, then
+                $AUDIOSILO_WORKER_DATA, then the installed service.
   worker uninstall
                 Stop and remove the service (the data dir stays).
 

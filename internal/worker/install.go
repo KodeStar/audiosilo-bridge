@@ -2,11 +2,13 @@ package worker
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -206,6 +208,16 @@ func (s Service) InstalledArgs() ([]string, error) {
 
 // plistArgs is the strings of the ProgramArguments array.
 func plistArgs(b []byte) ([]string, error) {
+	if bytes.HasPrefix(b, []byte("bplist")) {
+		// Read the same snapshot as the XML path. plutil writes only to stdout.
+		cmd := exec.CommandContext(context.Background(), "/usr/bin/plutil", "-convert", "xml1", "-o", "-", "-")
+		cmd.Stdin = bytes.NewReader(b)
+		var err error
+		b, err = cmd.Output()
+		if err != nil {
+			return nil, fmt.Errorf("reading binary plist: %w", err)
+		}
+	}
 	dec := xml.NewDecoder(bytes.NewReader(b))
 	dec.Strict = true
 	lastKey := ""

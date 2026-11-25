@@ -85,6 +85,8 @@ func workerCmd(args []string, stdout, stderr io.Writer) error {
 		ASR: asr.SelectConfig{Backend: *f.backend, Model: *f.model, WhisperCLIPath: *f.whisperCLI, AutoDownload: true}})
 }
 
+var errTokenRequired = errors.New("worker install: --token is required the first time (make one on the Bridge's page, Workers)")
+
 func workerInstall(args []string, stdout, stderr io.Writer, remove bool) error {
 	name := "worker install"
 	if remove {
@@ -94,8 +96,29 @@ func workerInstall(args []string, stdout, stderr io.Writer, remove bool) error {
 	fs.SetOutput(stderr)
 	f := addWorkerFlags(fs)
 	printOnly := fs.Bool("print", false, "show the service file and do nothing")
+	var resetModel, checkToken bool
+	if !remove {
+		fs.BoolVar(&resetModel, "reset-model", false, "use the backend's default model on this install")
+		fs.BoolVar(&checkToken, "check-token", false, "check that a worker token is available without installing")
+	}
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if resetModel {
+		if *f.model != "" {
+			return errors.New("worker install: choose either --model or --reset-model")
+		}
+		// Mark the empty value explicit so carryForward skips the saved model.
+		_ = fs.Set("model", "")
+	}
+	envData := ""
+	if !remove && os.Getenv(workerDataEnv) != "" {
+		if !dataSet(fs) {
+			envData = *f.data
+		}
+		// An explicit --data already holds the right value. Otherwise this
+		// marks its environment default as an override for carryForward.
+		_ = fs.Set("data", *f.data)
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -103,7 +126,7 @@ func workerInstall(args []string, stdout, stderr io.Writer, remove bool) error {
 	}
 	// An update (or an uninstall) keeps what the installed service runs with
 	// unless the command line says otherwise.
-	kept, keepErr := carryForward(fs, worker.Service{GOOS: runtime.GOOS, Home: home})
+	kept, savedData, keepErr := carryForward(fs, worker.Service{GOOS: runtime.GOOS, Home: home})
 	bin, err := os.Executable()
 	if err != nil {
 		return err
@@ -145,13 +168,33 @@ func workerInstall(args []string, stdout, stderr io.Writer, remove bool) error {
 		}
 		return err
 	}
+	token := f.tokenIn(data)
+	if checkToken && token != "" {
+		// The installer's update asks this before it replaces the old program.
+		// A check that passes stays quiet: the install after it names an
+		// unreadable service, so the update says it once.
+		return nil
+	}
 	// Said before the --bridge check: an unreadable service is why an update
 	// suddenly needs --bridge.
 	if keepErr != nil {
 		_, _ = fmt.Fprintln(stderr, "worker install: the installed service's settings can't be read, so it gets the defaults "+
 			"and the flags given here ("+keepErr.Error()+")")
-	} else if len(kept) > 0 && !*printOnly {
+	}
+	if checkToken {
+		// Asked only when a service is installed, so not the first time.
+		return fmt.Errorf("worker install: this update needs --token: %s holds no saved worker token "+
+			"(make one on the Bridge's page, Workers); the installed worker is unchanged", data)
+	}
+	if len(kept) > 0 && !*printOnly {
 		_, _ = fmt.Fprintln(stdout, "Keeping the installed service's "+strings.Join(kept, ", ")+" (give a flag to change it).")
+	}
+	if envData != "" && savedData != "" && !*printOnly {
+		// A stale export would otherwise move the worker without a word.
+		if saved, err := filepath.Abs(savedData); err == nil && filepath.Clean(saved) != data {
+			_, _ = fmt.Fprintln(stdout, "Using "+workerDataEnv+"'s data folder "+data+" instead of the installed service's "+
+				saved+" (unset it to keep that one).")
+		}
 	}
 	if svc.BridgeURL == "" {
 		return errors.New("worker install: --bridge is required (the Bridge page's address)")
@@ -164,9 +207,8 @@ func workerInstall(args []string, stdout, stderr io.Writer, remove bool) error {
 		_, _ = fmt.Fprint(stdout, text)
 		return nil
 	}
-	token := f.tokenIn(data)
 	if token == "" {
-		return errors.New("worker install: --token is required the first time (make one on the Bridge's page, Workers)")
+		return errTokenRequired
 	}
 	if err := worker.SaveToken(data, token); err != nil {
 		return err
@@ -191,40 +233,42 @@ func workerInstall(args []string, stdout, stderr io.Writer, remove bool) error {
 // service's value, read back from svc's file and parsed with the flags that
 // wrote it, so an update keeps a customised worker's --data, --backend,
 // --model, --whisper-cli and --bridge. It returns the flags
-// it kept as "--name". No service file is a first install (nothing kept, no
+// it kept as "--name" and the service's --data, kept or not. No service file is a first install (nothing kept, no
 // error); one that doesn't read as `worker install` writes it is an error, and
 // nothing is kept (the defaults apply).
-func carryForward(fs *flag.FlagSet, svc worker.Service) ([]string, error) {
+func carryForward(fs *flag.FlagSet, svc worker.Service) (kept []string, savedData string, err error) {
 	argv, err := svc.InstalledArgs()
 	if errors.Is(err, iofs.ErrNotExist) || errors.Is(err, worker.ErrUnsupported) {
-		return nil, nil // a first install, or no service manager (Install says so)
+		return nil, "", nil // a first install, or no service manager (Install says so)
 	}
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if len(argv) < 2 || argv[1] != "worker" {
-		return nil, errors.New("the service doesn't run `audiosilo-bridge worker`")
+		return nil, "", errors.New("the service doesn't run `audiosilo-bridge worker`")
 	}
 	prev := flag.NewFlagSet("installed service", flag.ContinueOnError)
 	prev.SetOutput(io.Discard)
 	addWorkerFlags(prev)
 	if err := prev.Parse(argv[2:]); err != nil {
-		return nil, fmt.Errorf("the service's flags: %w", err)
+		return nil, "", fmt.Errorf("the service's flags: %w", err)
 	}
 	if prev.NArg() > 0 {
-		return nil, fmt.Errorf("the service's flags: unexpected %q", prev.Arg(0))
+		return nil, "", fmt.Errorf("the service's flags: unexpected %q", prev.Arg(0))
 	}
 	given := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
-	var kept []string
 	prev.Visit(func(f *flag.Flag) {
+		if f.Name == "data" {
+			savedData = f.Value.String()
+		}
 		if given[f.Name] || f.Name == "token" {
 			return
 		}
 		_ = fs.Set(f.Name, f.Value.String()) // string flags: Set can't fail
 		kept = append(kept, "--"+f.Name)
 	})
-	return kept, nil
+	return kept, savedData, nil
 }
 
 // defaultWorkerDataDir is $AUDIOSILO_WORKER_DATA, else ~/.audiosilo-bridge-worker.

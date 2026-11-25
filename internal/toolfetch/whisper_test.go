@@ -421,12 +421,57 @@ func TestEnsureWhisperCLITagUpgrade(t *testing.T) {
 	if _, err := EnsureWhisperCLI(context.Background(), toolsDir, device, discard()); err != nil {
 		t.Fatalf("EnsureWhisperCLI (upgrade): %v", err)
 	}
-	if hits != 2 {
-		t.Errorf("tag upgrade hits = %d, want 2 (should re-download)", hits)
+	if hits != 3 {
+		t.Errorf("tag upgrade hits = %d, want 3 (the manifest check, then a re-download)", hits)
 	}
 	meta, _ := readJSONSidecar[whisperMeta](metaPath(binPath))
 	if meta.Tag != WhisperCLIReleaseTag {
 		t.Errorf("meta tag after upgrade = %q, want %q", meta.Tag, WhisperCLIReleaseTag)
+	}
+}
+
+// TestEnsureWhisperCLITagUpgradeSameBytes: an install from an older tag whose
+// archive sha256 is what the pinned release lists for this device is kept: one
+// checksums.txt fetch, no archive download, the .meta re-stamped with the pin.
+// A recorded CPU fallback is not kept (the new tag retries the accelerated build).
+func TestEnsureWhisperCLITagUpgradeSameBytes(t *testing.T) {
+	asset, device := whisperTestAsset(t)
+	archive := buildTarGz(t, map[string]string{whisperCLIBase: "#!/bin/sh\nexit 0\n"})
+	sum := sha256hex(archive)
+	var hits int
+	serveWhisperRelease(t, asset, archive, sum+"  "+asset+"\n", &hits)
+
+	toolsDir := t.TempDir()
+	binPath := seedStaleWhisperInstall(t, toolsDir, asset)
+	seed := func(m whisperMeta) {
+		raw, _ := json.Marshal(m)
+		if err := os.WriteFile(metaPath(binPath), raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed(whisperMeta{Tag: "whisper-cpp-v0.0.0-old", Asset: asset, SHA256: strings.ToUpper(sum)})
+	got, err := EnsureWhisperCLI(context.Background(), toolsDir, device, discard())
+	if err != nil || got != binPath {
+		t.Fatalf("EnsureWhisperCLI = %q, %v", got, err)
+	}
+	if hits != 1 {
+		t.Errorf("same-bytes upgrade hits = %d, want 1 (the manifest only)", hits)
+	}
+	if meta, _ := readJSONSidecar[whisperMeta](metaPath(binPath)); meta.Tag != WhisperCLIReleaseTag || meta.Asset != asset {
+		t.Errorf("meta after the same-bytes upgrade = %+v", meta)
+	}
+	hits = 0
+	if _, err := EnsureWhisperCLI(context.Background(), toolsDir, device, discard()); err != nil || hits != 0 {
+		t.Errorf("after re-stamping: hits = %d, err %v, want a plain cache hit", hits, err)
+	}
+
+	hits = 0
+	seed(whisperMeta{Tag: "whisper-cpp-v0.0.0-old", Asset: asset, SHA256: sum, Fallback: true})
+	if _, err := EnsureWhisperCLI(context.Background(), toolsDir, device, discard()); err != nil {
+		t.Fatal(err)
+	}
+	if hits != 2 {
+		t.Errorf("fallback install hits = %d, want 2 (a full re-download)", hits)
 	}
 }
 
