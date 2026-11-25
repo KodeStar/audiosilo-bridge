@@ -613,6 +613,10 @@ func TestPositionlessPack(t *testing.T) {
 		{"bounds in the folder only", "Iron Vale Box Set: Books 1-3", "", []link.LibraryBook{book("Iron Vale Box Set (Books 4-6)", "Iron Vale Box Set", "")}, ""},
 		{"range against folder bounds", "Iron Vale: Books 1-3", "1-3", []link.LibraryBook{book("Iron Vale Box Set (Books 4-6)", "Iron Vale Box Set", ""),
 			book("Iron Vale Box Set (Books 1-3)", "Iron Vale Box Set", "")}, "Iron Vale Box Set (Books 1-3)"},
+		// Two copies of one pack (Twins) are no tie: the first is the match, and
+		// Twins keeps the ASIN off both.
+		{"copies of one pack", "Iron Vale Box Set", "", []link.LibraryBook{book("copy one/Iron Vale Box Set", "Iron Vale Box Set", ""),
+			book("copy two/Iron Vale Box Set", "Iron Vale Box Set", "")}, "copy one/Iron Vale Box Set"},
 		{"equally good packs", "Iron Vale Box Set", "", []link.LibraryBook{later, first}, ""},
 		{"stated single position", "Iron Vale Box Set", "1", []link.LibraryBook{first}, ""},
 		{"other series by same author", "Iron Vale Box Set", "", []link.LibraryBook{{Path: "other", Title: "North Wind Box Set", Authors: one.Authors, Series: series("North Wind", "1-3")}}, ""},

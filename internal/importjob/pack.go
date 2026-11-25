@@ -110,11 +110,13 @@ func packName(title, series string) string {
 // packCandidate is one pack candidate scored by its name: ord is its index in
 // BookMatcher.cands, ranged whether the listing gives it a range (spans then
 // holds those, else the bounds its title or folder states, statedRanges),
-// index its names.
+// index its names. copyOf is the same for two copies of one pack (Twins'
+// key and the label), so they are no tie; "" for a book with no such key.
 type packCandidate struct {
 	ord    int
 	ranged bool
 	spans  []volumeRange
+	copyOf string
 	index  *match.Index
 }
 
@@ -125,6 +127,10 @@ func newPackCandidate(ord int, book match.Book, b link.LibraryBook, label string
 	if !ranged {
 		spans = statedRanges(b)
 	}
+	copyOf := twinKey(b)
+	if copyOf != "" {
+		copyOf += "\x00" + match.Fold(label)
+	}
 	book.Title = packName(book.Title, book.Series)
 	names := []match.Book{book}
 	if label != "" {
@@ -133,7 +139,7 @@ func newPackCandidate(ord int, book match.Book, b link.LibraryBook, label string
 			names = append(names, book)
 		}
 	}
-	return packCandidate{ord: ord, ranged: ranged, spans: spans, index: match.NewIndexWith(names, match.ImportOptions())}
+	return packCandidate{ord: ord, ranged: ranged, spans: spans, copyOf: copyOf, index: match.NewIndexWith(names, match.ImportOptions())}
 }
 
 // bestPackTitle admits a positionless box set to the range folders. A stated
@@ -147,7 +153,7 @@ func (m *BookMatcher) bestPackTitle(q match.Query, span volumeRange, allowRanges
 	q.Title = packName(title, q.Series)
 	q.TitleShort = q.Title
 
-	best, high, tied := -1, 0.0, false
+	best, high, tied, bestCopy := -1, 0.0, false, ""
 	for _, p := range m.packs {
 		if p.ranged && !allowRanges {
 			continue
@@ -161,8 +167,10 @@ func (m *BookMatcher) bestPackTitle(q match.Query, span volumeRange, allowRanges
 		}
 		switch {
 		case score > high:
-			best, high, tied = p.ord, score, false
-		case score == high && m.owner[p.ord] != m.owner[best]:
+			best, high, tied, bestCopy = p.ord, score, false, p.copyOf
+		case score == high && m.owner[p.ord] != m.owner[best] && (p.copyOf == "" || p.copyOf != bestCopy):
+			// Two copies of one pack (Twins) are no tie: the first keeps the
+			// display match, and Twins keeps the ASIN off both.
 			tied = true
 		}
 	}

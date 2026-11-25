@@ -630,26 +630,9 @@ func foldedNames(names []string) []string {
 func Twins(books []link.LibraryBook) map[string]bool {
 	byKey := map[string][]string{}
 	for _, b := range books {
-		title := match.Fold(b.Title)
-		if title == "" {
-			continue
+		if k := twinKey(b); k != "" {
+			byKey[k] = append(byKey[k], b.Path)
 		}
-		parts := make([]string, 0, len(b.Authors)+len(b.Series))
-		for _, f := range foldedNames(b.Authors) {
-			parts = append(parts, "a\x00"+f)
-		}
-		for _, s := range b.Series {
-			// As the matcher names a series, or folded when that reduces it
-			// to nothing (a non-Latin name): two such series stay apart.
-			name := match.NormalizeSeries(s.Name)
-			if name == "" {
-				name = match.Fold(s.Name)
-			}
-			parts = append(parts, "s\x00"+name+"\x00"+positionKey(s.Position))
-		}
-		slices.Sort(parts)
-		k := title + "\x00" + strings.Join(slices.Compact(parts), "\x00")
-		byKey[k] = append(byKey[k], b.Path)
 	}
 	out := map[string]bool{}
 	for _, paths := range byKey {
@@ -660,6 +643,30 @@ func Twins(books []link.LibraryBook) map[string]bool {
 		}
 	}
 	return out
+}
+
+// twinKey is what Twins compares: b's folded title, authors and series (each
+// series' position by its value), or "" for a title that folds to nothing.
+func twinKey(b link.LibraryBook) string {
+	title := match.Fold(b.Title)
+	if title == "" {
+		return ""
+	}
+	parts := make([]string, 0, len(b.Authors)+len(b.Series))
+	for _, f := range foldedNames(b.Authors) {
+		parts = append(parts, "a\x00"+f)
+	}
+	for _, s := range b.Series {
+		// As the matcher names a series, or folded when that reduces it
+		// to nothing (a non-Latin name): two such series stay apart.
+		name := match.NormalizeSeries(s.Name)
+		if name == "" {
+			name = match.Fold(s.Name)
+		}
+		parts = append(parts, "s\x00"+name+"\x00"+positionKey(s.Position))
+	}
+	slices.Sort(parts)
+	return title + "\x00" + strings.Join(slices.Compact(parts), "\x00")
 }
 
 // SpanMismatch protects ASIN enrichment when only one side spans volumes, or

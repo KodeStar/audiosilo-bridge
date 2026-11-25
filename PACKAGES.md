@@ -3849,7 +3849,8 @@ internal/
             title's "Pack 3" never stands in for it. A listed range such as
             LAM05-06 is eligible for a range starting at 5 or a pack Audible
             identifies by title without a position. The latter needs a unique
-            best pack by name and person. Bounds in its title
+            best pack by name and person (two copies of one pack, Twins' key and
+            label alike, are no tie: the first is the match). Bounds in its title
             must agree with the folder's range, or with those a labeled pack's
             title or folder states. A single volume cannot claim a listed range
             by words, nor a pack title a single volume. A book labeled a pack
