@@ -1814,7 +1814,8 @@ internal/
             (units processed this run + productive seconds, measured by the stage AFTER
             setup and excluding agent rate-limit backoff - first-run tool/model
             downloads never contaminate learned rates; a nil sample records nothing).
-            First-pass ASR sends a per-segment sample as soon as the raw is saved. It
+            First-pass ASR sends a per-segment sample as soon as the raw is saved (a
+            segment under 60 s, its model load more than its decode, teaches nothing). It
             recomputes ETAs on every dispatch pass (idle-gated: no active books = no
             query/sim) and publishes deduped eta.update SSE (queue_seconds is null when
             idle); ETASnapshot/ETASeconds feed the books API. Progress reporting is

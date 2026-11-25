@@ -25,6 +25,10 @@ func TestLiveASRRateFollowsRoute(t *testing.T) {
 	exec := &routedStub{StubExecutor: NewStubExecutor(0, 0)}
 	s := New(db, h.hub, exec, 1, h.workRoot, false)
 	ctx := t.Context()
+	s.recordASRRate(ctx, false, 20, 10) // opening credits: the model load, not the rate
+	if got := s.ASRSecondsPerAudioHour(); got != eta.SeedASRSecondsPerAudioHour {
+		t.Fatalf("a short segment set the rate %v", got)
+	}
 	s.recordASRRate(ctx, false, 300, 50)
 	if got := s.ASRSecondsPerAudioHour(); got != 600 {
 		t.Fatalf("local rate %v", got)

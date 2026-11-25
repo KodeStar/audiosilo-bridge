@@ -167,8 +167,14 @@ func (s *Scheduler) ASRSecondsPerAudioHour() float64 {
 	return eta.ASRSecondsPerAudioHour(s.rates, remote)
 }
 
+// minASRSampleAudioSeconds is the shortest segment the ASR rate learns from. A
+// segment's fixed cost (the model load of a local decode) swamps a short one: a
+// book's opening credits would otherwise set a rate many times the true one,
+// which the first sample does outright.
+const minASRSampleAudioSeconds = 60
+
 func (s *Scheduler) recordASRRate(ctx context.Context, remote bool, audioSeconds, decodeSeconds float64) {
-	if audioSeconds <= 0 || decodeSeconds <= 0 {
+	if audioSeconds < minASRSampleAudioSeconds || decodeSeconds <= 0 {
 		return
 	}
 	key := eta.ASRRateKey(remote)
