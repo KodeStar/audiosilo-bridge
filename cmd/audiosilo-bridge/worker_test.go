@@ -30,6 +30,20 @@ func installedService(t *testing.T, goos, home, data, bridge string, args ...str
 	return svc
 }
 
+// noServiceManager puts a launchctl and a systemctl that only fail at the
+// front of $PATH (in dir), so a `worker install` that goes on past
+// --check-token or --print fails instead of reaching this computer's own
+// service.
+func noServiceManager(t *testing.T, dir string) {
+	t.Helper()
+	for _, name := range []string{"launchctl", "systemctl"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
 func writeFile(t *testing.T, svc worker.Service, text string) {
 	t.Helper()
 	path, err := svc.File()
@@ -267,14 +281,8 @@ WORKER
 	if err := os.WriteFile(filepath.Join(home, "curl"), []byte(curl), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	// The check runs the real `worker install`: should it ever go on to
-	// install, these fail instead of reaching this computer's own service.
-	for _, name := range []string{"launchctl", "systemctl"} {
-		if err := os.WriteFile(filepath.Join(home, name), []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Setenv("PATH", home+":"+os.Getenv("PATH"))
+	// The check runs the real `worker install`.
+	noServiceManager(t, home)
 	runScript := func(args ...string) (string, error) {
 		cmd := exec.Command("sh", append([]string{"-s", "--"}, args...)...)
 		cmd.Stdin = strings.NewReader(script)
@@ -316,6 +324,7 @@ func TestWorkerInstallCheckTokenUnreadableService(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv(workerDataEnv, "")
 	t.Setenv(workerTokenEnv, "")
+	noServiceManager(t, home)
 	writeFile(t, worker.Service{GOOS: runtime.GOOS, Home: home}, "not a service file")
 	check := func() (string, error) {
 		var errb bytes.Buffer
@@ -341,6 +350,7 @@ func TestWorkerInstallDataAndModelOverrides(t *testing.T) {
 	t.Setenv("HOME", home)
 	envData := filepath.Join(home, "env")
 	t.Setenv(workerDataEnv, envData)
+	noServiceManager(t, home)
 	installedService(t, runtime.GOOS, home, filepath.Join(home, "old"), "http://bridge", "--model", "old-model", "--backend", "whisper-cpp")
 	for _, tc := range []struct {
 		name        string
