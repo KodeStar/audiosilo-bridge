@@ -139,8 +139,8 @@ internal/
             builds (explicit path -> next to the binary -> $PATH -> HTTPS download,
             in-process extraction w/ per-entry name sanitization, -version
             self-check; ported from audiosilo-server); the whisper-cli release
-            binaries (M3b: EnsureWhisperCLI - platform+device asset table over the
-            pinned WhisperCLIReleaseTag, sha256 verified against the release's
+            binaries (EnsureWhisperCLI uses the platform and device to select an asset
+            from this repository's WhisperCLIReleaseTag, sha256 verified against the release's
             checksums.txt, temp-dir extraction under a hard size budget, --help
             self-check, atomic install + .meta written last; CPU fallback on
             accelerated self-check failure, device-aware cache hit, stale-cache
@@ -337,7 +337,7 @@ internal/
             is optimistic when auto-download can supply a binary, EnsureReady(ctx)
             performs the fetch + downloads ggml-large-v3-turbo; an explicit
             whisper_cli_path that does not resolve is a loud error; NoContext is
-            -mc 0, whisper-cli having no --no-context, and a run that wrote no JSON is
+            -mc 0 (v1.9.1 skips the initial prompt and rolling history). A run that wrote no JSON is
             an error, a stale one removed first, since whisper-cli exits 0 on a bad
             argument: bridge#72; a gated live test, TestWhisperCppLiveCLI, runs a real
             whisper-cli). One job at a
@@ -5226,7 +5226,7 @@ internal/
             fails with exit status 5 meanwhile); a final failure names the
             manual launchctl bootstrap command. Sleep is injectable for tests.
             InstalledArgs reads the service file back into its argv (the
-            plist's ProgramArguments, strict XML; the unit's first ExecStart,
+            plist's ProgramArguments in XML, converting binary plists with plutil; the unit's first ExecStart,
             "quoted" or bare words with only \\ and \" escapes and %% $$
             undoubled), Render's inverse (a round-trip test holds it); no
             file wraps fs.ErrNotExist, and anything else systemd would read
@@ -5236,8 +5236,9 @@ internal/
             worker.go carryForward) parses that argv with the same flag set
             that wrote it and keeps each written flag (--bridge, --data, --backend, --model, --whisper-cli; never
             --token) the command line didn't give, so an update keeps a
-            customised worker and finds its token in the kept --data; an
-            explicit flag wins (an empty one included); a file that doesn't
+            customised worker. On install, --data takes precedence over
+            AUDIOSILO_WORKER_DATA, followed by the installed folder and the
+            default. --reset-model clears the saved model override. A file that doesn't
             parse keeps nothing and says so on stderr. Uninstall names the
             kept --data. The client appends each route to the --bridge path as
             written (EscapedPath), so a proxy prefix's "(" or "!" reaches it
@@ -5264,7 +5265,7 @@ internal/
             double-quoted expansions, curl, which globs only "[]{}", the plist
             XML-escaped, the unit quoted with % and $ doubled), a test per
             character. Otherwise the
-            request's scheme://Host, reachable from that computer by
+            request's http://Host, reachable from that computer by
             construction. The admin sets public_url; the Host shows the fetching
             computer reached that host. The download URLs are under it, prefix
             included. When install.sh can't be served (no folder, a bad Host) the
@@ -5286,12 +5287,11 @@ internal/
             `worker install` then points the service at) and says so; an explicit --dir
             wins. It downloads to a temp file in the target dir, checks `version`
             runs, moves it to <dir>/audiosilo-bridge and runs `worker install` (or
-            `worker` with --run). The saved-token check of an update looks in the
-            installed service's --data (service_args reads the service's
-            argv, installed_data takes --data <dir> or --data=<dir> when
-            it reads plainly), since `worker install` keeps it; a --run
-            start, or a service with none, looks in $AUDIOSILO_WORKER_DATA,
-            else ~/.audiosilo-bridge-worker, as `worker` does. Its tests run it end to end with a fake curl
+            `worker` with --run). On a tokenless update with no data or token in
+            the environment, the downloaded binary runs worker install --check-token
+            before replacing the old binary. It resolves the service's --data with
+            the installer's parser, including escaped paths. A first install or
+            foreground start takes AUDIOSILO_WORKER_DATA or the default. Its tests run it end to end with a fake curl
             (and a fake uname for the other OS's service file), each run in a
             temp HOME holding service files rendered by worker.Service, so no
             test reads this computer's own.

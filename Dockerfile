@@ -20,12 +20,12 @@
 # `agent` container. The whisper models aren't baked in either: the Bridge
 # downloads the one it needs into /bridge-data/tools on first use.
 #
-# The whisper-cli builds are audiosilo-sidecars' release assets (public; see
+# The whisper-cli builds are audiosilo-bridge release assets (see
 # internal/toolfetch), pinned here by tag (the same as toolfetch's
 # WhisperCLIReleaseTag), each checked against the sha256 that release's
 # checksums.txt lists.
 
-ARG WHISPER_TAG=whisper-cpp-v1.9.1-1
+ARG WHISPER_TAG=whisper-v1.9.1
 # The agent CLIs, pinned (the agent target). A bump is these two lines; the build
 # runs both --version, so a release that doesn't install fails here.
 ARG CLAUDE_VERSION=2.1.300
