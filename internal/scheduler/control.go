@@ -485,16 +485,19 @@ func (s *Scheduler) PurgeScratch(ctx context.Context, id int64) error {
 // state (its terminal check gates the reconcile).
 func (s *Scheduler) purgeScratchInner(ctx context.Context, b store.Book) error {
 	kind := state.ParseKind(b.Kind)
-	if err := scratch.Purge(s.workRoot, b.WorkDir, kind); err != nil {
-		return err
-	}
+	perr := scratch.Purge(s.workRoot, b.WorkDir, kind)
 	// The reclaimed artifacts include a completed stage's output, so drop that
 	// stage's sentinel (and its recorded success) - a later Retry/reconcile must
 	// re-run it rather than skip it and feed the next stage an empty directory. The
 	// list is DERIVED from the same table Purge deletes from, so a newly reclaimed
-	// directory cannot be added without its stage coming with it.
+	// directory cannot be added without its stage coming with it. Dropped even when
+	// the purge failed part-way: it may have taken chapters/ before the failure, and
+	// a dropped sentinel only costs a re-run.
 	for _, st := range scratch.InvalidatedStages(kind) {
 		_ = os.Remove(SentinelPath(b.WorkDir, string(st)))
+	}
+	if perr != nil {
+		return perr
 	}
 	// Re-account what remains (the durables) in one walk so scratch_bytes reflects
 	// the reclaim without a read-side walk. If the walk itself fails, the pre-purge

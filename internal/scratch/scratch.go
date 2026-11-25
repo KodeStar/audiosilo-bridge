@@ -244,10 +244,11 @@ func Purge(workRoot, workDir string, kind state.Kind) error {
 		return err
 	}
 	defer func() { _ = root.Close() }()
+	// Every directory is tried: one the root refuses (a symlink out of the work
+	// dir) must not keep the others, an ebook's source prose above all, on disk.
+	var errs []error
 	for _, a := range artifactsFor(kind) {
-		if err := root.RemoveAll(a.Dir); err != nil {
-			return err
-		}
+		errs = append(errs, root.RemoveAll(a.Dir))
 	}
 	// AFTER the directories, and never in front of them. The extract manifest is a
 	// DURABLE the purge deliberately keeps, but it carries each section's opening
@@ -257,9 +258,9 @@ func Purge(workRoot, workDir string, kind state.Kind) error {
 	// prose to protect kilobytes of it. The manifest lives at the work-dir root, so
 	// the sweep cannot affect whether this can run.
 	if kind == state.KindEbook {
-		return ebook.StripHeads(wd)
+		errs = append(errs, ebook.StripHeads(wd))
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // The transcript tier (the Bridge's transcript retention, decision 5): what holds

@@ -479,7 +479,11 @@ internal/
             Purge reclaims windows/chapters/ (audio.WindowAudioDir, no sentinel): the
             window FLACs chapter_detecting removes itself once the chapters are cut,
             left only by a run stopped in between (a re-run splits from the source).
-            Purge reclaims readalong/heal/ (clips and raws). PurgeTranscripts also
+            Purge reclaims readalong/heal/ (clips and raws). Purge deletes through an
+            os.Root on the work dir: a directory reached by a symlink out of it is
+            refused (the purge fails) but every other one still goes, and the caller
+            (scheduler purgeScratchInner) drops the invalidated sentinels even then.
+            PurgeTranscripts also
             removes readalong/words.json, keeping readalong/map.json (CFIs and
             times only, so a write a park held up still finishes), align_report.json and
             request.json.

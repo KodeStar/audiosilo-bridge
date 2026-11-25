@@ -112,8 +112,13 @@ func TestPurgeConfinesHealDirectory(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(work, "readalong")); err != nil {
 		t.Fatal(err)
 	}
+	writeFile(t, filepath.Join(work, "retranscribe", "ch002.json"), 50)
 	if err := Purge(root, work, state.KindAudio); err == nil {
 		t.Fatal("outside heal directory accepted")
+	}
+	// The refused directory doesn't keep the ones after it.
+	if _, err := os.Stat(filepath.Join(work, "retranscribe")); !os.IsNotExist(err) {
+		t.Fatalf("retranscribe/ kept after the refusal: %v", err)
 	}
 	alias := filepath.Join(root, "linked-book")
 	if err := os.Symlink(outside, alias); err != nil {
