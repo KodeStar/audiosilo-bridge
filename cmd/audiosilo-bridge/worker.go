@@ -94,8 +94,25 @@ func workerInstall(args []string, stdout, stderr io.Writer, remove bool) error {
 	fs.SetOutput(stderr)
 	f := addWorkerFlags(fs)
 	printOnly := fs.Bool("print", false, "show the service file and do nothing")
+	var resetModel, checkToken bool
+	if !remove {
+		fs.BoolVar(&resetModel, "reset-model", false, "use the backend's default model on this install")
+		fs.BoolVar(&checkToken, "check-token", false, "check that a worker token is available without installing")
+	}
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if resetModel {
+		if *f.model != "" {
+			return errors.New("worker install: choose either --model or --reset-model")
+		}
+		// Mark the empty value explicit so carryForward skips the saved model.
+		_ = fs.Set("model", "")
+	}
+	if !remove && os.Getenv(workerDataEnv) != "" {
+		// An explicit --data already holds the right value. Otherwise this
+		// marks its environment default as an override for carryForward.
+		_ = fs.Set("data", *f.data)
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -150,13 +167,13 @@ func workerInstall(args []string, stdout, stderr io.Writer, remove bool) error {
 	if keepErr != nil {
 		_, _ = fmt.Fprintln(stderr, "worker install: the installed service's settings can't be read, so it gets the defaults "+
 			"and the flags given here ("+keepErr.Error()+")")
-	} else if len(kept) > 0 && !*printOnly {
+	} else if len(kept) > 0 && !*printOnly && !checkToken {
 		_, _ = fmt.Fprintln(stdout, "Keeping the installed service's "+strings.Join(kept, ", ")+" (give a flag to change it).")
 	}
 	if svc.BridgeURL == "" {
 		return errors.New("worker install: --bridge is required (the Bridge page's address)")
 	}
-	if *printOnly {
+	if *printOnly && !checkToken {
 		text, err := svc.Render()
 		if err != nil {
 			return err
@@ -167,6 +184,9 @@ func workerInstall(args []string, stdout, stderr io.Writer, remove bool) error {
 	token := f.tokenIn(data)
 	if token == "" {
 		return errors.New("worker install: --token is required the first time (make one on the Bridge's page, Workers)")
+	}
+	if checkToken {
+		return nil
 	}
 	if err := worker.SaveToken(data, token); err != nil {
 		return err

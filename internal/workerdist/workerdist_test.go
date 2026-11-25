@@ -62,29 +62,26 @@ func TestOpen(t *testing.T) {
 func TestAddress(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		scheme, host, want string
+		host, want string
 	}{
-		{"http", "10.0.0.1:8091", "http://10.0.0.1:8091"},
-		{"http", "[fd00::1]:8091", "http://[fd00::1]:8091"},
-		{"https", "nas.local", "https://nas.local"},
-		{"http", "my_nas:8091", "http://my_nas:8091"},
+		{"10.0.0.1:8091", "http://10.0.0.1:8091"},
+		{"[fd00::1]:8091", "http://[fd00::1]:8091"},
+		{"nas.local", "http://nas.local"},
+		{"my_nas:8091", "http://my_nas:8091"},
 	} {
-		got, err := Address(tc.scheme, tc.host, "")
+		got, err := Address(tc.host, "")
 		if err != nil || got != tc.want {
-			t.Errorf("Address(%q, %q) = %q, %v, want %q", tc.scheme, tc.host, got, err, tc.want)
+			t.Errorf("Address(%q) = %q, %v, want %q", tc.host, got, err, tc.want)
 		}
 	}
 	// A hostile Host is refused before any public address is looked at, even
 	// one it would otherwise "match".
 	for _, host := range []string{"", "a b", "evil';rm -rf ~;'", "nas:80:80", "$(id)", "nas\n", "user@nas", "nas/x"} {
 		for _, pub := range []string{"", "http://nas", "http://" + host} {
-			if got, err := Address("http", host, pub); !errors.Is(err, ErrAddress) {
+			if got, err := Address(host, pub); !errors.Is(err, ErrAddress) {
 				t.Errorf("Address(host %q, public %q) = %q, %v", host, pub, got, err)
 			}
 		}
-	}
-	if _, err := Address("file", "nas", "http://nas"); !errors.Is(err, ErrAddress) {
-		t.Errorf("a file scheme = %v", err)
 	}
 }
 
@@ -93,73 +90,73 @@ func TestAddress(t *testing.T) {
 func TestAddressPublicURL(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		scheme, host, pub, want string
+		host, pub, want string
 	}{
 		// Matches: the same host and port (a default port filled in on either
 		// side), any case; the path prefix and scheme kept, trailing slashes not.
-		{"http", "192.168.1.20:8091", "http://192.168.1.20:8091/", "http://192.168.1.20:8091"},
-		{"http", "nas.lan:8091", " http://NAS.lan:8091 ", "http://NAS.lan:8091"},
-		{"http", "proxy.lan", "http://proxy.lan/bridge//", "http://proxy.lan/bridge"},
-		{"http", "proxy.lan:80", "http://proxy.lan/bridge", "http://proxy.lan/bridge"},
-		{"http", "proxy.lan", "http://proxy.lan:80/a/b-c_d.e~f%20", "http://proxy.lan:80/a/b-c_d.e~f%20"},
-		{"http", "[fd00::1]:8091", "http://[FD00::1]:8091/x", "http://[FD00::1]:8091/x"},
+		{"192.168.1.20:8091", "http://192.168.1.20:8091/", "http://192.168.1.20:8091"},
+		{"nas.lan:8091", " http://NAS.lan:8091 ", "http://NAS.lan:8091"},
+		{"proxy.lan", "http://proxy.lan/bridge//", "http://proxy.lan/bridge"},
+		{"proxy.lan:80", "http://proxy.lan/bridge", "http://proxy.lan/bridge"},
+		{"proxy.lan", "http://proxy.lan:80/a/b-c_d.e~f%20", "http://proxy.lan:80/a/b-c_d.e~f%20"},
+		{"[fd00::1]:8091", "http://[FD00::1]:8091/x", "http://[FD00::1]:8091/x"},
 		// RFC 3986's pchar: each sub-delim but "'", and ":" "@", kept as written
 		// (single-quoted in the script, they are only characters).
-		{"http", "proxy.lan", "http://proxy.lan/my+bridge(1)/", "http://proxy.lan/my+bridge(1)"},
-		{"http", "proxy.lan", "http://proxy.lan/a!b", "http://proxy.lan/a!b"},
-		{"http", "proxy.lan", "http://proxy.lan/a$b", "http://proxy.lan/a$b"},
-		{"http", "proxy.lan", "http://proxy.lan/a&b", "http://proxy.lan/a&b"},
-		{"http", "proxy.lan", "http://proxy.lan/a(b)", "http://proxy.lan/a(b)"},
-		{"http", "proxy.lan", "http://proxy.lan/a*b", "http://proxy.lan/a*b"},
-		{"http", "proxy.lan", "http://proxy.lan/a+b", "http://proxy.lan/a+b"},
-		{"http", "proxy.lan", "http://proxy.lan/a,b", "http://proxy.lan/a,b"},
-		{"http", "proxy.lan", "http://proxy.lan/a;b", "http://proxy.lan/a;b"},
-		{"http", "proxy.lan", "http://proxy.lan/a=b", "http://proxy.lan/a=b"},
-		{"http", "proxy.lan", "http://proxy.lan/a:b", "http://proxy.lan/a:b"},
-		{"http", "proxy.lan", "http://proxy.lan/a@b", "http://proxy.lan/a@b"},
-		{"http", "proxy.lan", "http://proxy.lan/$(id);x&y", "http://proxy.lan/$(id);x&y"},
+		{"proxy.lan", "http://proxy.lan/my+bridge(1)/", "http://proxy.lan/my+bridge(1)"},
+		{"proxy.lan", "http://proxy.lan/a!b", "http://proxy.lan/a!b"},
+		{"proxy.lan", "http://proxy.lan/a$b", "http://proxy.lan/a$b"},
+		{"proxy.lan", "http://proxy.lan/a&b", "http://proxy.lan/a&b"},
+		{"proxy.lan", "http://proxy.lan/a(b)", "http://proxy.lan/a(b)"},
+		{"proxy.lan", "http://proxy.lan/a*b", "http://proxy.lan/a*b"},
+		{"proxy.lan", "http://proxy.lan/a+b", "http://proxy.lan/a+b"},
+		{"proxy.lan", "http://proxy.lan/a,b", "http://proxy.lan/a,b"},
+		{"proxy.lan", "http://proxy.lan/a;b", "http://proxy.lan/a;b"},
+		{"proxy.lan", "http://proxy.lan/a=b", "http://proxy.lan/a=b"},
+		{"proxy.lan", "http://proxy.lan/a:b", "http://proxy.lan/a:b"},
+		{"proxy.lan", "http://proxy.lan/a@b", "http://proxy.lan/a@b"},
+		{"proxy.lan", "http://proxy.lan/$(id);x&y", "http://proxy.lan/$(id);x&y"},
 		// An "@" after the host is the path's: the host stays proxy.lan.
-		{"http", "proxy.lan", "http://proxy.lan/@evil.com", "http://proxy.lan/@evil.com"},
-		{"http", "evil.com", "http://proxy.lan/@evil.com", "http://evil.com"},
+		{"proxy.lan", "http://proxy.lan/@evil.com", "http://proxy.lan/@evil.com"},
+		{"evil.com", "http://proxy.lan/@evil.com", "http://evil.com"},
 		// Behind a TLS proxy: the request is plain http with the client's Host.
-		{"http", "bridge.example.com", "https://bridge.example.com/bridge", "https://bridge.example.com/bridge"},
-		{"http", "bridge.example.com:443", "https://bridge.example.com/bridge/", "https://bridge.example.com/bridge"},
-		{"https", "bridge.example.com", "https://bridge.example.com", "https://bridge.example.com"},
-		{"http", "proxy.lan:8443", "https://proxy.lan:8443/bridge", "https://proxy.lan:8443/bridge"},
+		{"bridge.example.com", "https://bridge.example.com/bridge", "https://bridge.example.com/bridge"},
+		{"bridge.example.com:443", "https://bridge.example.com/bridge/", "https://bridge.example.com/bridge"},
+		{"bridge.example.com", "https://bridge.example.com", "https://bridge.example.com"},
+		{"proxy.lan:8443", "https://proxy.lan:8443/bridge", "https://proxy.lan:8443/bridge"},
 		// Mismatches fall back to the request's address.
-		{"http", "10.0.0.7:18091", "http://192.168.1.20:8091", "http://10.0.0.7:18091"},
-		{"http", "192.168.1.20:8092", "http://192.168.1.20:8091", "http://192.168.1.20:8092"},
-		{"http", "192.168.1.20", "http://192.168.1.20:8091", "http://192.168.1.20"},
-		{"http", "proxy.lan:80", "https://proxy.lan/bridge", "http://proxy.lan:80"},
-		{"http", "proxy.lan:8091", "https://proxy.lan/bridge", "http://proxy.lan:8091"},
-		{"http", "nas.lan", "http://nas.lan.evil.com", "http://nas.lan"},
-		{"http", "nas.lan", "http://evil.com/nas.lan", "http://nas.lan"},
+		{"10.0.0.7:18091", "http://192.168.1.20:8091", "http://10.0.0.7:18091"},
+		{"192.168.1.20:8092", "http://192.168.1.20:8091", "http://192.168.1.20:8092"},
+		{"192.168.1.20", "http://192.168.1.20:8091", "http://192.168.1.20"},
+		{"proxy.lan:80", "https://proxy.lan/bridge", "http://proxy.lan:80"},
+		{"proxy.lan:8091", "https://proxy.lan/bridge", "http://proxy.lan:8091"},
+		{"nas.lan", "http://nas.lan.evil.com", "http://nas.lan"},
+		{"nas.lan", "http://evil.com/nas.lan", "http://nas.lan"},
 		// A public address a script can't carry as set is never used.
-		{"http", "nas.lan", "ftp://nas.lan", "http://nas.lan"},
-		{"http", "nas.lan", "nas.lan", "http://nas.lan"},
-		{"http", "nas.lan", "//nas.lan", "http://nas.lan"},
-		{"http", "nas.lan", "http://user:pw@nas.lan", "http://nas.lan"},
-		{"http", "nas.lan", "http://nas.lan/?x=1", "http://nas.lan"},
-		{"http", "nas.lan", "http://nas.lan/#x", "http://nas.lan"},
-		{"http", "nas.lan", "http://nas.lan/a'b", "http://nas.lan"},
-		{"http", "nas.lan", "http://nas.lan/a%27b'", "http://nas.lan"},
-		{"http", "nas.lan", "http://nas.lan/a\"b", "http://nas.lan"},
-		{"http", "nas.lan", "http://nas.lan/a`b", "http://nas.lan"},
-		{"http", "nas.lan", "http://nas.lan/a\\b", "http://nas.lan"},
-		{"http", "nas.lan", "http://nas.lan/a[b]", "http://nas.lan"},
-		{"http", "nas.lan", "http://nas.lan/a{b}", "http://nas.lan"},
-		{"http", "nas.lan", "http://nas.lan/a<b>", "http://nas.lan"},
-		{"http", "nas.lan", "http://nas.lan/a|b", "http://nas.lan"},
-		{"http", "nas.lan", "http://nas.lan/a^b", "http://nas.lan"},
-		{"http", "nas.lan", "http://nas.lan/a\tb", "http://nas.lan"},
-		{"http", "nas.lan", "http://nas.lan/a b", "http://nas.lan"},
-		{"http", "nas.lan", "http://nas.lan/a\nb", "http://nas.lan"},
-		{"http", "nas.lan", "http://nas.lan/%zz", "http://nas.lan"},
-		{"http", "nas.lan", "http:nas.lan", "http://nas.lan"},
+		{"nas.lan", "ftp://nas.lan", "http://nas.lan"},
+		{"nas.lan", "nas.lan", "http://nas.lan"},
+		{"nas.lan", "//nas.lan", "http://nas.lan"},
+		{"nas.lan", "http://user:pw@nas.lan", "http://nas.lan"},
+		{"nas.lan", "http://nas.lan/?x=1", "http://nas.lan"},
+		{"nas.lan", "http://nas.lan/#x", "http://nas.lan"},
+		{"nas.lan", "http://nas.lan/a'b", "http://nas.lan"},
+		{"nas.lan", "http://nas.lan/a%27b'", "http://nas.lan"},
+		{"nas.lan", "http://nas.lan/a\"b", "http://nas.lan"},
+		{"nas.lan", "http://nas.lan/a`b", "http://nas.lan"},
+		{"nas.lan", "http://nas.lan/a\\b", "http://nas.lan"},
+		{"nas.lan", "http://nas.lan/a[b]", "http://nas.lan"},
+		{"nas.lan", "http://nas.lan/a{b}", "http://nas.lan"},
+		{"nas.lan", "http://nas.lan/a<b>", "http://nas.lan"},
+		{"nas.lan", "http://nas.lan/a|b", "http://nas.lan"},
+		{"nas.lan", "http://nas.lan/a^b", "http://nas.lan"},
+		{"nas.lan", "http://nas.lan/a\tb", "http://nas.lan"},
+		{"nas.lan", "http://nas.lan/a b", "http://nas.lan"},
+		{"nas.lan", "http://nas.lan/a\nb", "http://nas.lan"},
+		{"nas.lan", "http://nas.lan/%zz", "http://nas.lan"},
+		{"nas.lan", "http:nas.lan", "http://nas.lan"},
 	} {
-		got, err := Address(tc.scheme, tc.host, tc.pub)
+		got, err := Address(tc.host, tc.pub)
 		if err != nil || got != tc.want {
-			t.Errorf("Address(%q, %q, public %q) = %q, %v, want %q", tc.scheme, tc.host, tc.pub, got, err, tc.want)
+			t.Errorf("Address(%q, public %q) = %q, %v, want %q", tc.host, tc.pub, got, err, tc.want)
 		}
 		if err == nil {
 			if _, err := Script(got); err != nil {
@@ -541,78 +538,32 @@ func TestScriptRuns(t *testing.T) {
 			})
 		}
 	}
-	// The saved-token check of an update looks in the installed service's
-	// --data (`worker install` keeps it), not the default; a --run start looks
-	// in the default, as `worker` does. A --data the file had to escape (or
-	// none) leaves the default.
+	// The environment selects the data folder for both an install and a
+	// foreground start. The native CLI integration test covers an unset
+	// environment and the service's escaped --data.
 	for _, goos := range []string{"darwin", "linux"} {
-		// withData writes goos's service file with --data dir, holding a
-		// saved token when token is set.
-		withData := func(dir, token string) func(t *testing.T, home string) {
-			return func(t *testing.T, home string) {
-				t.Helper()
-				data := filepath.Join(filepath.Dir(home), dir)
-				if token != "" {
-					if err := worker.SaveToken(data, token); err != nil {
-						t.Fatal(err)
-					}
-				}
-				rendered(t, worker.Service{GOOS: goos, Home: home, Binary: filepath.Join(home, "svc", "audiosilo-bridge"), DataDir: data,
-					Args: []string{"--backend", "whisper-cpp"}})
+		oldData := func(t *testing.T, home string) {
+			t.Helper()
+			data := filepath.Join(home, "a&b")
+			if err := worker.SaveToken(data, "asw_old"); err != nil {
+				t.Fatal(err)
 			}
+			rendered(t, worker.Service{GOOS: goos, Home: home, Binary: "/opt/worker", DataDir: data})
 		}
-		t.Run(goos+"/custom data", func(t *testing.T) {
+		t.Run(goos+"/environment data", func(t *testing.T) {
 			t.Parallel()
-			r := runWith(t, text, runOpts{goos: goos, service: withData("custom data", "asw_custom")})
-			if r.err != nil || r.ran != "worker install --bridge http://192.168.1.20:8091" {
-				t.Fatalf("update with a custom --data: %v, ran %q\n%s", r.err, r.ran, r.out)
-			}
-		})
-		t.Run(goos+"/custom data run", func(t *testing.T) {
-			t.Parallel()
-			r := runWith(t, text, runOpts{goos: goos, service: withData("custom data", "asw_custom")}, "--run")
-			if r.err == nil || !strings.Contains(r.out, "--token is required") || r.url != "" {
-				t.Fatalf("--run with the token only in the service's --data: %v\n%s", r.err, r.out)
-			}
-		})
-		t.Run(goos+"/escaped data", func(t *testing.T) {
-			t.Parallel()
-			r := runWith(t, text, runOpts{goos: goos, service: withData("a&b", "asw_custom")})
-			if r.err == nil || !strings.Contains(r.out, "--token is required") || r.url != "" {
-				t.Fatalf("an escaped --data: %v\n%s", r.err, r.out)
-			}
-			// ... and the default's token does.
-			r = runWith(t, text, runOpts{goos: goos, saved: "asw_saved", service: withData("a&b", "")})
-			if r.err != nil || r.ran != "worker install --bridge http://192.168.1.20:8091" {
-				t.Fatalf("an escaped --data, the default's token: %v\n%s", r.err, r.out)
-			}
-		})
-		t.Run(goos+"/no data token", func(t *testing.T) {
-			t.Parallel()
-			// The default holds a token, the service's --data none: the service's
-			// folder is the one `worker install` reads, so it is required.
-			r := runWith(t, text, runOpts{goos: goos, saved: "asw_saved", service: withData("custom data", "")})
-			if r.err == nil || !strings.Contains(r.out, "--token is required") {
-				t.Fatalf("%v\n%s", r.err, r.out)
+			for _, args := range [][]string{nil, {"--run"}} {
+				r := runWith(t, text, runOpts{goos: goos, service: oldData}, args...)
+				if r.err == nil || !strings.Contains(r.out, "--token is required") || r.url != "" {
+					t.Fatalf("empty environment-selected folder: %v\n%s", r.err, r.out)
+				}
+				r = runWith(t, text, runOpts{goos: goos, saved: "asw_env", service: oldData}, args...)
+				if r.err != nil || r.ran == "" {
+					t.Fatalf("environment-selected token: %v\n%s", r.err, r.out)
+				}
 			}
 		})
 	}
-	// A hand-written unit's --data=<dir> reads too.
-	t.Run("unit data=", func(t *testing.T) {
-		t.Parallel()
-		r := runWith(t, text, runOpts{goos: "linux", service: func(t *testing.T, home string) {
-			t.Helper()
-			data := filepath.Join(filepath.Dir(home), "eq data")
-			if err := worker.SaveToken(data, "asw_eq"); err != nil {
-				t.Fatal(err)
-			}
-			writeService(".config/systemd/user/audiosilo-bridge-worker.service",
-				"[Service]\nExecStart=/opt/x/audiosilo-bridge worker \"--data="+data+"\"\n")(t, home)
-		}})
-		if r.err != nil {
-			t.Fatalf("%v\n%s", r.err, r.out)
-		}
-	})
 	// A --run start that lands where the installed service runs the program
 	// from (reused, or the default folder) says the service keeps the old one
 	// until it restarts, and how; one elsewhere, or with no service, doesn't.

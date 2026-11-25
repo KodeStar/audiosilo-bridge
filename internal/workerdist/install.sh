@@ -10,7 +10,7 @@
 # the Bridge, puts it in ~/.audiosilo-bridge-worker/bin (or --dir; an update
 # without --dir reuses the installed service's folder), then installs the
 # worker as a service that starts at login (launchd on macOS, a systemd user
-# unit on Linux; an update keeps the service's settings, --data included), or
+# unit on Linux; AUDIOSILO_WORKER_DATA can override its saved data folder), or
 # with --run runs it in this terminal instead.
 #
 #   --token <asw_...>  the worker's token from the Workers tab (required the
@@ -42,42 +42,33 @@ die() {
 	exit 1
 }
 
-# service_args prints the installed worker service's command line, one word a
-# line, as `worker install` writes it (the launchd agent's ProgramArguments,
-# the systemd user unit's first ExecStart: "quoted" words, or bare); nothing
-# when there is none. A word the file had to escape comes out escaped (the
-# callers refuse those), and a unit's words stop at the first escape, open
-# quote or bare word holding a ' (systemd unquotes it), since what follows
-# can't be read plainly.
-service_args() {
-	[ -n "${HOME:-}" ] || return 0
+# Only the program's folder is needed here. The downloaded worker checks
+# credentials with the same flag and service-file readers it uses to install.
+service_program() {
+	[ -f "$service_file" ] || return 0
 	case "$os" in
 	darwin)
-		f="$HOME/Library/LaunchAgents/app.audiosilo.bridge-worker.plist"
-		[ -f "$f" ] || return 0
-		awk '/<key>ProgramArguments<\/key>/ { args = 1; next }
+		# plutil normalizes XML and binary plists, including compact XML.
+		# Without plutil, the XML layout written by worker install is readable.
+		if [ -x /usr/bin/plutil ]; then
+			/usr/bin/plutil -convert xml1 -o - -- "$service_file" 2>/dev/null
+		else
+			cat "$service_file"
+		fi | awk '/<key>ProgramArguments<\/key>/ { args = 1; next }
 			args && /<\/array>/ { exit }
-			args && /<string>/ { sub(/^[ \t]*<string>/, ""); sub(/<\/string>[ \t]*$/, ""); print }' "$f" 2>/dev/null || true
+			args && /<string>/ { if ($0 !~ /<\/string>[ \t]*$/) exit; sub(/^[ \t]*<string>/, ""); sub(/<\/string>[ \t]*$/, ""); print; exit }'
 		;;
 	linux)
-		f="$HOME/.config/systemd/user/audiosilo-bridge-worker.service"
-		[ -f "$f" ] || return 0
 		awk '/^[ \t]*ExecStart=/ {
-			line = $0
-			sub(/^[ \t]*ExecStart=[ \t]*/, "", line)
-			while (line != "") {
-				if (match(line, /^"[^"]*"/)) word = substr(line, 2, RLENGTH - 2)
-				else if (match(line, /^[^" \t]+/)) {
-					word = substr(line, 1, RLENGTH)
-					if (index(word, "\047")) exit # systemd unquotes it
-				} else exit
-				if (index(word, "\\")) exit
-				print word
-				line = substr(line, RLENGTH + 1)
-				sub(/^[ \t]+/, "", line)
+			sub(/^[ \t]*ExecStart=[ \t]*/, "")
+			if (match($0, /^"[^"]*"/)) word = substr($0, 2, RLENGTH - 2)
+			else if (match($0, /^[^" \t]+/)) {
+				word = substr($0, 1, RLENGTH)
+				if (index(word, "\047")) exit
 			}
+			print word
 			exit
-		}' "$f" 2>/dev/null || true
+		}' "$service_file" 2>/dev/null || true
 		;;
 	esac
 }
@@ -96,7 +87,7 @@ plain() {
 # folder this user can write (a path the file had to escape included: pass
 # --dir then).
 installed_dir() {
-	prog=$(plain "$(service_args | head -n 1)")
+	prog=$(plain "$(service_program)")
 	case "$prog" in
 	*/) return 0 ;;
 	/*/*) ;;
@@ -107,14 +98,6 @@ installed_dir() {
 	# leaves the default, which `worker install` then points the service at.
 	[ -d "$prog" ] && [ -w "$prog" ] && printf '%s\n' "$prog"
 	return 0
-}
-
-# installed_data prints the installed service's --data folder (--data <dir>
-# or --data=<dir> after the program's `worker`), when it reads plainly.
-installed_data() {
-	plain "$(service_args | awk 'NR == 1 { next } take { print; exit }
-		$0 == "--data" || $0 == "-data" { take = 1; next }
-		/^--?data=/ { sub(/^--?data=/, ""); print; exit }')"
 }
 
 # main runs only once the whole script has arrived: a download cut short runs
@@ -158,8 +141,14 @@ main() {
 	done
 
 	case "$(uname -s)" in
-	Darwin) os=darwin ;;
-	Linux) os=linux ;;
+	Darwin)
+		os=darwin
+		service_file="${HOME:+$HOME/Library/LaunchAgents/app.audiosilo.bridge-worker.plist}"
+		;;
+	Linux)
+		os=linux
+		service_file="${HOME:+$HOME/.config/systemd/user/audiosilo-bridge-worker.service}"
+		;;
 	*) die "this computer runs $(uname -s): a worker runs on macOS or Linux only" ;;
 	esac
 	case "$(uname -m)" in
@@ -173,16 +162,16 @@ main() {
 		arch=arm64
 	fi
 
-	if [ -z "$token" ]; then
-		# An update: the worker keeps its token in its data dir, or takes
-		# $AUDIOSILO_WORKER_TOKEN. `worker install` keeps the installed
-		# service's --data, so its folder is the one to look in; `worker` (a
-		# --run start) uses $AUDIOSILO_WORKER_DATA, else ~/.audiosilo-bridge-worker.
-		data=''
-		[ "$run" = 1 ] || data=$(installed_data)
-		[ -n "$data" ] || data="${AUDIOSILO_WORKER_DATA:-${HOME:-}/.audiosilo-bridge-worker}"
-		[ -n "${AUDIOSILO_WORKER_TOKEN:-}" ] || [ -s "$data/worker.token" ] ||
-			die "--token is required: add a worker on the Bridge's page (Workers) and copy its command"
+	check_service_token=0
+	if [ -z "$token" ] && [ -z "${AUDIOSILO_WORKER_TOKEN:-}" ]; then
+		if [ "$run" = 0 ] && [ -f "$service_file" ] && [ -z "${AUDIOSILO_WORKER_DATA:-}" ]; then
+			# Only the worker knows which installed settings it can carry forward.
+			check_service_token=1
+		else
+			data="${AUDIOSILO_WORKER_DATA:-${HOME:-}/.audiosilo-bridge-worker}"
+			[ -s "$data/worker.token" ] ||
+				die "--token is required: add a worker on the Bridge's page (Workers) and copy its command"
+		fi
 	fi
 
 	# An update with no --dir goes where the installed service runs it from.
@@ -212,6 +201,9 @@ main() {
 	rm -f "$tmp.gz"
 	chmod 755 "$tmp"
 	version=$("$tmp" version) || die "the downloaded program doesn't run on this computer"
+	if [ "$check_service_token" = 1 ]; then
+		"$tmp" worker install --bridge "$BRIDGE" --check-token
+	fi
 	mv -f "$tmp" "$bin"
 	say "Installed audiosilo-bridge $version at $bin"
 	case ":${PATH:-}:" in

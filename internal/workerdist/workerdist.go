@@ -122,7 +122,7 @@ const scriptAddress = "'@@BRIDGE@@'"
 var hostPattern = regexp.MustCompile(`^[A-Za-z0-9._\-]+(:[0-9]+)?$|^\[[0-9A-Fa-f:.]+\](:[0-9]+)?$`)
 
 // Address is the Bridge's address as the computer fetching the script
-// reached it: scheme://host of that request, so it is reachable from there by
+// reached it: http://host of that request, so it is reachable from there by
 // construction (ErrAddress for a host a script can't carry).
 //
 // When the configured public address names that same host and port, it is the
@@ -131,14 +131,14 @@ var hostPattern = regexp.MustCompile(`^[A-Za-z0-9._\-]+(:[0-9]+)?$|^\[[0-9A-Fa-f
 // serves the Bridge under a prefix or over TLS. The admin sets public_url, and
 // the request's Host shows the fetching computer reached that host. The host
 // is validated first: a Host a script can't carry never reaches the comparison.
-func Address(scheme, host, publicURL string) (string, error) {
-	if (scheme != "http" && scheme != "https") || !hostPattern.MatchString(host) {
+func Address(host, publicURL string) (string, error) {
+	if !hostPattern.MatchString(host) {
 		return "", ErrAddress
 	}
 	if pub, ok := publicAddress(publicURL, host); ok {
 		return pub, nil
 	}
-	return scheme + "://" + host, nil
+	return "http://" + host, nil
 }
 
 // pathPattern is what a public address's path prefix may hold: RFC 3986's
