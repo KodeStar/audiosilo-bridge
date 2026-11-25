@@ -811,8 +811,17 @@ func TestWhisperCppLiveCLI(t *testing.T) {
 	if cli == "" || model == "" || audio == "" {
 		t.Skip("set AUDIOSILO_BRIDGE_LIVE_WHISPER_CLI, _MODEL and _AUDIO to run against a real whisper-cli")
 	}
-	for _, noContext := range []bool{false, true} {
-		t.Run(fmt.Sprintf("no_context=%v", noContext), func(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		prompt    string
+		noContext bool
+	}{
+		{"default", "", false},
+		{"prompt", "President Kennedy", false},
+		{"no_context", "", true},
+		{"no_context_with_prompt", "President Kennedy", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			dataDir := t.TempDir()
 			b := newWhisperCpp(SelectConfig{WhisperCLIPath: cli, DataDir: dataDir, Log: discardLogger()})
 			if err := os.MkdirAll(filepath.Dir(b.modelPath(dataDir)), 0o750); err != nil {
@@ -821,7 +830,7 @@ func TestWhisperCppLiveCLI(t *testing.T) {
 			if err := os.Symlink(model, b.modelPath(dataDir)); err != nil {
 				t.Fatal(err)
 			}
-			job := Job{Audio: audio, OutDir: filepath.Join(dataDir, "raw"), Chapter: 1, Language: "en", NoContext: noContext}
+			job := Job{Audio: audio, OutDir: filepath.Join(dataDir, "raw"), Chapter: 1, Language: "en", NoContext: tc.noContext, InitialPrompt: tc.prompt}
 			if err := b.Transcribe(context.Background(), job); err != nil {
 				t.Fatalf("Transcribe: %v", err)
 			}
