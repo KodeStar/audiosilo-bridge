@@ -495,7 +495,8 @@ internal/
             qa_report.json (stable enum contract for the M5 adjudicator/UI) +
             qa_report.md (byte-compatible with the Python report). LoopSpans locates
             separate runs in a chapter for the read-along heal. ReadalongNoise counts
-            suspect words from 6-grams, short repeated segments and fast tails. Report.Clean()
+            suspect words from 6-grams, short repeated segments and fast tails, in the
+            text's own words (a normalized "don't" is two tokens, one word). Report.Clean()
             drives the QAClean branch; the retranscribe queue = wph outliers +
             mid-chapter loops. Loud errors on manifest/transcript divergence,
             wrong-schema files, and an empty transcript set.

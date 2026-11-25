@@ -747,6 +747,8 @@ func TestLoopWordsCount(t *testing.T) {
 		{"prose", prose, 0},
 		{"a one-word loop", prose + strings.Repeat(" buck,", 12), 12},
 		{"a phrase looped", prose + strings.Repeat(" and the dogs ran on", 6), 30},
+		// "don't" is two tokens to the detector but one of the text's words.
+		{"a looped contraction", prose + strings.Repeat(" I don't know what to do,", 6), 36},
 		{"a phrase said four times", prose + strings.Repeat(" and the dogs ran on", 4), 0},
 		{"empty", "", 0},
 	} {

@@ -425,12 +425,24 @@ func normalizeASCII(s string) string {
 // occurrence of any 6-gram (over its Unicode-normalized words) repeated at least 5
 // times, cross_segment_scan.py's "not natural prose" threshold. A read-along's
 // adoption rule weighs it (repair.AdoptFreshReadalong): a loop's words are noise.
+// It counts text's own (whitespace-separated) words, the unit AdoptStats.Words
+// counts in: normalizing splits "don't" or "well-known" into two tokens, and
+// counting tokens would make a loop of them more words than the text has,
+// shrinking the narration a fresh run is held to.
 func loopWords(text string) int {
-	toks := strings.Fields(normalizeUnicode(text))
-	n := 0
-	for _, hit := range loopCoverage(toks) {
-		if hit {
+	var toks []string
+	var owner []int // the text word each token came from
+	for i, w := range strings.Fields(text) {
+		for _, tok := range strings.Fields(normalizeUnicode(w)) {
+			toks = append(toks, tok)
+			owner = append(owner, i)
+		}
+	}
+	n, last := 0, -1
+	for k, hit := range loopCoverage(toks) {
+		if hit && owner[k] != last {
 			n++
+			last = owner[k]
 		}
 	}
 	return n
