@@ -177,11 +177,11 @@ func (s *Scheduler) recordASRRate(ctx context.Context, remote bool, audioSeconds
 		return
 	}
 	s.rateMu.Lock()
-	defer s.rateMu.Unlock()
 	if prior := s.rates[key]; prior > 0 {
-		rate = eta.Alpha*rate + (1-eta.Alpha)*prior
+		rate = eta.Blend(rate, prior)
 	}
 	s.rates[key] = rate
+	s.rateMu.Unlock()
 	_ = s.db.SetRate(ctx, key, rate)
 }
 

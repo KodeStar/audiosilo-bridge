@@ -214,7 +214,12 @@ func Observe(stage string, wallclockSeconds float64, units int, current map[stri
 	if r, has := current[stage]; has {
 		old = r
 	}
-	return Alpha*observed + (1-Alpha)*old, true
+	return Blend(observed, old), true
+}
+
+// Blend folds one observation into a prior rate: the EWMA every learned rate uses.
+func Blend(observed, old float64) float64 {
+	return Alpha*observed + (1-Alpha)*old
 }
 
 // segment is one lane-bound piece of a book's remaining path: the stage, the lane it
@@ -305,14 +310,16 @@ func remainingSegments(b Book, rates map[string]float64) []segment {
 		}
 		isCurrent := cur == b.State
 		units := stageRemainingUnits(b, cur, isCurrent)
-		seconds := float64(units) * rateFor(cur, rates)
+		var seconds float64
 		if cur == state.ASR {
-			rate := ASRSecondsPerAudioHour(rates, b.RemoteASR)
+			// ASR is learned per audio hour on the route the next segment takes.
 			hoursPerChapter := stageUnits[state.ASR].seed / SeedASRSecondsPerAudioHour
 			if b.DurationSec > 0 {
 				hoursPerChapter = b.DurationSec / 3600 / float64(stageTotalUnits(b, cur))
 			}
-			seconds = (hoursPerChapter * rate) * float64(units)
+			seconds = hoursPerChapter * ASRSecondsPerAudioHour(rates, b.RemoteASR) * float64(units)
+		} else {
+			seconds = float64(units) * rateFor(cur, rates)
 		}
 		// Heal progress counts windows. The rate is for one complete alignment.
 		if cur == state.ReadalongAligning && isCurrent {
