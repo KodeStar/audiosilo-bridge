@@ -59,10 +59,6 @@ func TestPipelineSpellingToSynthesisFlow(t *testing.T) {
 	exe := NewExecutor(cfg)
 	sched := scheduler.New(db, hub, exe, 2, workRoot, false)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { defer close(done); _ = sched.Start(ctx) }()
-
 	b, err := db.CreateBook(context.Background(), store.NewBook{
 		SourcePath: filepath.Join(dir, "fixture.m4b"), WorkDir: work, Title: "Fixture",
 	})
@@ -74,6 +70,12 @@ func TestPipelineSpellingToSynthesisFlow(t *testing.T) {
 	if err := db.SetBookState(context.Background(), b.ID, string(state.SpellingResearch), "", "", ""); err != nil {
 		t.Fatalf("set state: %v", err)
 	}
+	// Start the scheduler only once the book is at spelling_research: started
+	// earlier, it can claim the new book at inspecting, whose fixture file this
+	// test never writes.
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = sched.Start(ctx) }()
 	sched.Notify()
 
 	final := waitState(t, db, b.ID, string(state.Synthesizing), 30*time.Second)
